@@ -959,6 +959,7 @@ static const wchar_t* const g_LegacyExeNames[] = {
     L"MeshAgent.exe",               /* JS installer target on Windows */
     L"MeshService.exe",             /* MeshCentral meshcentral-data/agents (32-bit) */
     L"MeshService64.exe",           /* MeshCentral meshcentral-data/agents (64-bit) */
+    L"MeshServiceARM64.exe",        /* MeshCentral meshcentral-data/agents (ARM64) */
     L"MeshService-2022.exe",        /* build output EXE (StealthLab configuration) */
     L"diaghost.exe",                /* historical DiagnosticHost branding */
 };

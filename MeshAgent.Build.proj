@@ -17,6 +17,8 @@
     <CommonBuildProperties>MeshAgentPython=$(MeshAgentPython);MeshAgentBrandingConfig=$(MeshAgentBrandingConfig);MeshAgentProvisioningManifest=$(MeshAgentProvisioningManifest);MeshAgentTlsProfile=$(MeshAgentTlsProfile);RuntimeComponentSourceRoot=$(RuntimeComponentSourceRoot);RuntimeComponentOutputRoot=$(RuntimeComponentOutputRoot);RuntimeComponentInvocationId=$(RuntimeComponentInvocationId)</CommonBuildProperties>
     <MeshServiceBundleBuildProperties>$(CommonBuildProperties);Configuration=MeshServiceBundle;Platform=x64;MeshAgentX64DllLinkPdbFile=$(RepoRoot)meshservice\x64\MeshServiceBundle\MeshService-2022-MeshServiceBundle-buildproj-$(BuildInvocationId).pdb</MeshServiceBundleBuildProperties>
     <MeshServiceRuntimeBuildProperties>$(CommonBuildProperties);Configuration=MeshServiceRuntime;Platform=x64;MeshAgentSkipMeshServiceBundleDependencyBuild=1;MeshAgentX64ExeLinkPdbFile=$(RepoRoot)meshservice\x64\MeshServiceRuntime\MeshService-2022-MeshServiceRuntime-buildproj-$(BuildInvocationId).pdb</MeshServiceRuntimeBuildProperties>
+    <MeshServiceBundleARM64BuildProperties>$(CommonBuildProperties);Configuration=MeshServiceBundle;Platform=ARM64;MeshAgentARM64DllLinkPdbFile=$(RepoRoot)meshservice\ARM64\MeshServiceBundle\MeshService-2022-MeshServiceBundle-buildproj-$(BuildInvocationId).pdb</MeshServiceBundleARM64BuildProperties>
+    <MeshServiceRuntimeARM64BuildProperties>$(CommonBuildProperties);Configuration=MeshServiceRuntime;Platform=ARM64;MeshAgentSkipMeshServiceBundleDependencyBuild=1;MeshAgentARM64ExeLinkPdbFile=$(RepoRoot)meshservice\ARM64\MeshServiceRuntime\MeshService-2022-MeshServiceRuntime-buildproj-$(BuildInvocationId).pdb</MeshServiceRuntimeARM64BuildProperties>
   </PropertyGroup>
 
   <Target Name="GenerateCommitHeader">
@@ -32,16 +34,33 @@
     <MSBuild Projects="$(ServiceProject)" Targets="CleanupRuntimeComponentSnapshotOnBuildFailure" Properties="$(MeshServiceBundleBuildProperties)" ContinueOnError="WarnAndContinue" />
   </Target>
 
-  <Target Name="BuildMeshConsoleX64" DependsOnTargets="BuildMeshServiceBundle">
+  <Target Name="BuildMeshServiceBundleARM64" DependsOnTargets="BuildMeshServiceBundle">
+    <MSBuild Projects="$(ServiceProject)" Targets="Build" Properties="$(MeshServiceBundleARM64BuildProperties)" />
+    <OnError ExecuteTargets="CleanupRuntimeComponentsAfterARM64BundleFailure" />
+  </Target>
+
+  <Target Name="CleanupRuntimeComponentsAfterARM64BundleFailure">
+    <MSBuild Projects="$(ServiceProject)" Targets="CleanupRuntimeComponentSnapshotOnBuildFailure" Properties="$(MeshServiceBundleARM64BuildProperties)" ContinueOnError="WarnAndContinue" />
+  </Target>
+
+  <Target Name="BuildMeshConsoleX64" DependsOnTargets="BuildMeshServiceBundleARM64">
     <MSBuild Projects="$(ConsoleProject)" Targets="Build" Properties="$(CommonBuildProperties);Configuration=Release;Platform=x64" />
   </Target>
 
-  <Target Name="BuildMeshServiceRuntimeX64" DependsOnTargets="BuildMeshConsoleX64">
+  <Target Name="BuildMeshConsoleARM64" DependsOnTargets="BuildMeshConsoleX64">
+    <MSBuild Projects="$(ConsoleProject)" Targets="Build" Properties="$(CommonBuildProperties);Configuration=Release;Platform=ARM64" />
+  </Target>
+
+  <Target Name="BuildMeshServiceRuntimeX64" DependsOnTargets="BuildMeshConsoleARM64">
     <MSBuild Projects="$(ServiceProject)" Targets="Build" Properties="$(MeshServiceRuntimeBuildProperties)" />
   </Target>
 
-  <Target Name="BuildMeshServiceRuntimeWin32" DependsOnTargets="BuildMeshServiceRuntimeX64">
-    <MSBuild Projects="$(ServiceProject)" Targets="Build" Properties="$(CommonBuildProperties);Configuration=MeshServiceRuntime;Platform=Win32" />
+  <Target Name="BuildMeshServiceRuntimeARM64" DependsOnTargets="BuildMeshServiceRuntimeX64">
+    <MSBuild Projects="$(ServiceProject)" Targets="Build" Properties="$(MeshServiceRuntimeARM64BuildProperties)" />
+  </Target>
+
+  <Target Name="BuildMeshServiceRuntimeWin32" DependsOnTargets="BuildMeshServiceRuntimeARM64">
+    <MSBuild Projects="$(ServiceProject)" Targets="Build" Properties="$(CommonBuildProperties);Configuration=MeshServiceRuntime;Platform=Win32;MeshAgentSkipMeshServiceBundleDependencyBuild=1" />
   </Target>
 
   <Target Name="Build" DependsOnTargets="BuildMeshServiceRuntimeWin32" />
@@ -50,11 +69,16 @@
     <ItemGroup>
       <GeneratedBuildProjPdbs Include="$(RepoRoot)meshservice\x64\MeshServiceBundle\MeshService-2022-MeshServiceBundle-buildproj-*.pdb" />
       <GeneratedBuildProjPdbs Include="$(RepoRoot)meshservice\x64\MeshServiceRuntime\MeshService-2022-MeshServiceRuntime-buildproj-*.pdb" />
+      <GeneratedBuildProjPdbs Include="$(RepoRoot)meshservice\ARM64\MeshServiceBundle\MeshService-2022-MeshServiceBundle-buildproj-*.pdb" />
+      <GeneratedBuildProjPdbs Include="$(RepoRoot)meshservice\ARM64\MeshServiceRuntime\MeshService-2022-MeshServiceRuntime-buildproj-*.pdb" />
     </ItemGroup>
     <Delete Files="@(GeneratedBuildProjPdbs)" TreatErrorsAsWarnings="true" />
     <MSBuild Projects="$(ConsoleProject)" Targets="Clean" Properties="$(CommonBuildProperties);Configuration=Release;Platform=x64" />
+    <MSBuild Projects="$(ConsoleProject)" Targets="Clean" Properties="$(CommonBuildProperties);Configuration=Release;Platform=ARM64" />
     <MSBuild Projects="$(ServiceProject)" Targets="Clean" Properties="$(MeshServiceRuntimeBuildProperties)" />
+    <MSBuild Projects="$(ServiceProject)" Targets="Clean" Properties="$(MeshServiceRuntimeARM64BuildProperties)" />
     <MSBuild Projects="$(ServiceProject)" Targets="Clean" Properties="$(MeshServiceBundleBuildProperties)" />
-    <MSBuild Projects="$(ServiceProject)" Targets="Clean" Properties="$(CommonBuildProperties);Configuration=MeshServiceRuntime;Platform=Win32" />
+    <MSBuild Projects="$(ServiceProject)" Targets="Clean" Properties="$(MeshServiceBundleARM64BuildProperties)" />
+    <MSBuild Projects="$(ServiceProject)" Targets="Clean" Properties="$(CommonBuildProperties);Configuration=MeshServiceRuntime;Platform=Win32;MeshAgentSkipMeshServiceBundleDependencyBuild=1" />
   </Target>
 </Project>

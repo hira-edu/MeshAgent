@@ -211,6 +211,7 @@ wincrypto_object __fastcall wincrypto_open(int newcert, char *rootSubject)
 	BYTE* pbBasicConstraints = NULL;
 	CRYPT_BIT_BLOB keyusage2;
 	DWORD pkSize = 0;
+	BYTE ByteData = CERT_KEY_CERT_SIGN_KEY_USAGE | CERT_OFFLINE_CRL_SIGN_KEY_USAGE | CERT_CRL_SIGN_KEY_USAGE;
 	
 	char wkeycontainer[255]; // MAX Length of X509 distinguished name is 64 characters, so this should be OK
 	char akeycontainer[255]; // MAX Length of X509 distinguished name is 64 characters, so this should be OK
@@ -316,7 +317,6 @@ wincrypto_object __fastcall wincrypto_open(int newcert, char *rootSubject)
 	ZeroMemory(&certExtension, sizeof(certExtension));
 
 	// Set key usage for root certificate
-	BYTE ByteData = CERT_KEY_CERT_SIGN_KEY_USAGE | CERT_OFFLINE_CRL_SIGN_KEY_USAGE | CERT_CRL_SIGN_KEY_USAGE;
 	ZeroMemory(&keyusage2, sizeof(keyusage2));
 	keyusage2.cbData = 1;
 	keyusage2.pbData = &ByteData;

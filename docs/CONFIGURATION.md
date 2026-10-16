@@ -388,6 +388,8 @@ include:
 - `meshcore/generated/network_profile.h`
 - service version/resource inputs
 - `meshservice/embedded/service_bundle.dll`
+- `meshservice/embedded/x64/service_bundle.dll`
+- `meshservice/embedded/arm64/service_bundle.dll`
 
 Network values in the branding header are guarded by
 `MESH_PROVISIONING_HARDCODED`, which is not defined by the production project

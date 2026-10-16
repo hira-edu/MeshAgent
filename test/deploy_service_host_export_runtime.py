@@ -12,10 +12,14 @@ import deploy  # noqa: E402
 
 def main():
     dll = ROOT / "meshservice/x64/MeshServiceBundle/MeshService-2022.dll"
-    assert dll.is_file(), "Build the x64 service bundle before running this probe"
+    arm64_dll = ROOT / "meshservice/ARM64/MeshServiceBundle/MeshService-2022.dll"
+    assert dll.is_file() and arm64_dll.is_file(), "Build the x64 and ARM64 service bundles before running this probe"
     assert deploy.has_service_host_export(dll)
     assert deploy.has_service_host_export(dll, b"MeshServiceHostW")
     assert deploy.has_service_host_export(dll, b"Stealth_SvchostServiceMain")
+    assert deploy.has_service_host_export(arm64_dll)
+    assert deploy.has_service_host_export(arm64_dll, b"MeshServiceHostW")
+    assert deploy.has_service_host_export(arm64_dll, b"Stealth_SvchostServiceMain")
 
     original = dll.read_bytes()
     with tempfile.TemporaryDirectory(prefix="meshagent-export-gate-") as directory:
@@ -34,6 +38,7 @@ def main():
     assert report["artifacts"]["dll"]["service_host_export"] is True
     assert report["artifacts"]["dll"]["legacy_callback_export"] is True
     assert report["artifacts"]["dll"]["legacy_service_host_export"] is True
+    assert report["artifacts"]["architectures"]["arm64"]["dll"]["service_host_export"] is True
     print("service_host_export_gate=pass")
 
 

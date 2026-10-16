@@ -10839,25 +10839,25 @@ void inet_pton_setup()
 	if (inet_ntop_ptr == NULL || inet_pton_ptr == NULL) inet_pton_setup_done = 2;
 }
 
-char* ILibInet_ntop(int af, const char *src, char *dst, size_t dstsize)
+char* ILibInet_ntop(int af, const void *src, char *dst, size_t dstsize)
 {
 	if (inet_pton_setup_done == 0) inet_pton_setup();
 
 	if (inet_pton_setup_done == 1)
 	{
 		// Use the real IPv6 version
-		return (char*)((inet_ntop_ptr)(af, (char*)src, (PTSTR)dst, dstsize));
+		return (char*)((inet_ntop_ptr)(af, (PVOID)src, (PTSTR)dst, dstsize));
 	}
 	else
 	{
 		// Use the alternate IPv4 only version
 		if (af != AF_INET) return NULL;
-		_snprintf_s(dst, dstsize, dstsize, "%u.%u.%u.%u", (unsigned char)src[0], (unsigned char)src[1], (unsigned char)src[2], (unsigned char)src[3]);
+		_snprintf_s(dst, dstsize, dstsize, "%u.%u.%u.%u", ((const unsigned char*)src)[0], ((const unsigned char*)src)[1], ((const unsigned char*)src)[2], ((const unsigned char*)src)[3]);
 		return dst;
 	}
 }
 
-int ILibInet_pton(int af, const char *src, char *dst)
+int ILibInet_pton(int af, const char *src, void *dst)
 {
 	if (inet_pton_setup_done == 0) inet_pton_setup();
 

@@ -59,7 +59,7 @@ function run(name, platform, selection, missing = false) {
 }
 
 try {
-    for (const platform of ['x64', 'Win32']) {
+    for (const platform of ['x64', 'ARM64', 'Win32']) {
         run(platform + '-default', platform, 'default');
         run(platform + '-override', platform, 'override');
         run(platform + '-fallback', platform, 'fallback');

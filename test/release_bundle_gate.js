@@ -9,6 +9,7 @@ const DEFAULT_EXPECTED_ARTIFACTS = [
     {
         id: 'MeshService64.exe',
         signed: true,
+        expectedMachine: 0x8664,
         candidates: [
             'dist/MeshService64.exe',
             'artifacts/MeshService64.exe',
@@ -19,6 +20,7 @@ const DEFAULT_EXPECTED_ARTIFACTS = [
     {
         id: 'MeshService.exe',
         signed: true,
+        expectedMachine: 0x014c,
         candidates: [
             'dist/MeshService.exe',
             'artifacts/MeshService.exe',
@@ -28,13 +30,36 @@ const DEFAULT_EXPECTED_ARTIFACTS = [
         ]
     },
     {
+        id: 'MeshServiceARM64.exe',
+        signed: true,
+        expectedMachine: 0xaa64,
+        candidates: [
+            'dist/MeshServiceARM64.exe',
+            'artifacts/MeshServiceARM64.exe',
+            'meshservice/ARM64/MeshServiceRuntime/MeshService-2022.exe',
+            'meshservice/ARM64/Release/MeshService-2022.exe'
+        ]
+    },
+    {
         id: 'diagsvc.dll',
         signed: true,
+        expectedMachine: 0x8664,
         candidates: [
             'dist/diagsvc.dll',
             'artifacts/diagsvc.dll',
             'meshservice/x64/MeshServiceBundle/MeshService-2022.dll',
             'meshservice/embedded/service_bundle.dll'
+        ]
+    },
+    {
+        id: 'MeshServiceARM64.dll',
+        signed: true,
+        expectedMachine: 0xaa64,
+        candidates: [
+            'dist/MeshServiceARM64.dll',
+            'artifacts/MeshServiceARM64.dll',
+            'meshservice/ARM64/MeshServiceBundle/MeshService-2022.dll',
+            'meshservice/embedded/arm64/service_bundle.dll'
         ]
     },
     {
@@ -45,6 +70,15 @@ const DEFAULT_EXPECTED_ARTIFACTS = [
             'artifacts/WinDiagnosticHost.msh',
             'meshservice/x64/MeshServiceRuntime/MeshService-2022.msh',
             'meshservice/WinDiagnosticHost.msh'
+        ]
+    },
+    {
+        id: 'MeshServiceARM64.msh',
+        signed: false,
+        candidates: [
+            'dist/MeshServiceARM64.msh',
+            'artifacts/MeshServiceARM64.msh',
+            'meshservice/ARM64/MeshServiceRuntime/MeshService-2022.msh'
         ]
     }
 ];
@@ -176,6 +210,7 @@ function inspectPeSignature(filePath) {
     const buffer = fs.readFileSync(filePath);
     const result = {
         isPe: false,
+        machine: null,
         hasCertificateTable: false,
         certificateTableOffset: 0,
         certificateTableSize: 0,
@@ -193,6 +228,7 @@ function inspectPeSignature(filePath) {
     }
 
     const optionalHeaderOffset = peOffset + 0x18;
+    result.machine = readUInt16LE(buffer, peOffset + 4);
     const optionalHeaderMagic = readUInt16LE(buffer, optionalHeaderOffset);
     let dataDirectoryOffset = 0;
     if (optionalHeaderMagic === 0x10b) {
@@ -240,7 +276,7 @@ function resolveExpectedArtifacts(extraArtifacts) {
                 break;
             }
         }
-        records.push({ id: expected.id, signed: expected.signed, required: true, path: found, candidates: expected.candidates.slice(0) });
+        records.push({ id: expected.id, signed: expected.signed, expectedMachine: expected.expectedMachine, required: true, path: found, candidates: expected.candidates.slice(0) });
     }
 
     for (const explicit of explicitArtifacts) {
@@ -277,6 +313,8 @@ function collectArtifactManifest(expectedArtifacts, enforceSigning) {
             };
             if (item.signed) {
                 record.signature = inspectPeSignature(item.path);
+                record.expectedMachine = item.expectedMachine == null ? null : item.expectedMachine;
+                record.machineMatches = item.expectedMachine == null || record.signature.machine === item.expectedMachine;
             }
         }
         return record;
@@ -494,6 +532,9 @@ function buildChecklist({ artifactManifest, missingReleaseDocuments, bundleExpor
     const peArtifactsValid = artifactManifest
         .filter((artifact) => artifact.peArtifact && artifact.found)
         .every((artifact) => artifact.signature != null && artifact.signature.isPe === true);
+    const peArchitecturesMatch = artifactManifest
+        .filter((artifact) => artifact.peArtifact && artifact.found && artifact.expectedMachine != null)
+        .every((artifact) => artifact.machineMatches === true);
     const signedArtifactsOk = artifactManifest
         .filter((artifact) => artifact.signedRequired)
         .every((artifact) => artifact.signature != null && artifact.signature.hasCertificateTable === true);
@@ -502,6 +543,7 @@ function buildChecklist({ artifactManifest, missingReleaseDocuments, bundleExpor
     return {
         required_release_artifacts_present: requiredArtifactsPresent,
         pe_artifacts_valid: peArtifactsValid,
+        pe_artifact_architectures_match: peArchitecturesMatch,
         signed_artifacts_have_pe_certificate_table: signedArtifactsOk,
         digests_exported: digestsExported,
         required_release_documents_present: missingReleaseDocuments.length === 0,
@@ -509,6 +551,7 @@ function buildChecklist({ artifactManifest, missingReleaseDocuments, bundleExpor
         release_ready:
             requiredArtifactsPresent &&
             peArtifactsValid &&
+            peArchitecturesMatch &&
             signedArtifactsOk &&
             digestsExported &&
             missingReleaseDocuments.length === 0 &&
@@ -520,6 +563,7 @@ function collectFailures(checklist) {
     const failures = [];
     if (!checklist.required_release_artifacts_present) { failures.push('required release artifacts are missing'); }
     if (!checklist.pe_artifacts_valid) { failures.push('one or more declared PE artifacts are malformed or not PE files'); }
+    if (!checklist.pe_artifact_architectures_match) { failures.push('one or more PE artifacts have the wrong machine architecture'); }
     if (!checklist.signed_artifacts_have_pe_certificate_table) { failures.push('required signed PE artifacts are missing a certificate table or are absent'); }
     if (!checklist.digests_exported) { failures.push('no artifact digests were exported'); }
     if (!checklist.required_release_documents_present) { failures.push('one or more required release documents are missing'); }
@@ -538,6 +582,7 @@ function writeReportOutputs(evidenceDir, report, checklist, missingReleaseDocume
         `SIGNING_ENFORCEMENT=${report.signingPolicy.enforceSigning}`,
         `ARTIFACTS_FOUND=${artifactManifest.filter((artifact) => artifact.found).length}/${artifactManifest.length}`,
         `PE_ARTIFACTS_VALID=${checklist.pe_artifacts_valid}`,
+        `PE_ARTIFACT_ARCHITECTURES_MATCH=${checklist.pe_artifact_architectures_match}`,
         `SIGNED_ARTIFACTS_OK=${checklist.signed_artifacts_have_pe_certificate_table}`,
         `DIGESTS_EXPORTED=${checklist.digests_exported}`,
         `MISSING_RELEASE_DOCUMENT_COUNT=${missingReleaseDocuments.length}`,

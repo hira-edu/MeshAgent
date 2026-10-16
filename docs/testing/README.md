@@ -296,6 +296,23 @@ It requires Clang and OpenSSL development headers/libraries
 `test/run_grouped_regression.js` performs a local install/update/uninstall cycle
 and requires an elevated, approved Windows test host. Do not run it on a host
 that is not approved for destructive service lifecycle operations.
+Use the same wrapper for both native architectures; the ARM64 run must execute
+on an approved native ARM64 Windows host:
+
+```powershell
+.\tools\Invoke-RuntimeValidation.ps1 -Architecture x64
+.\tools\Invoke-RuntimeValidation.ps1 -Architecture ARM64
+```
+
+The wrapper checks the matching MeshCentral server payload
+(`MeshService64.exe` or `MeshServiceARM64.exe`) before it starts the grouped
+lifecycle suite. It also fails before any lifecycle mutation unless the native
+Windows host architecture matches the selected package. `test.ps1
+-RuntimeArchitecture ARM64 -RuntimeValidation` is the equivalent lower-level
+selector when inputs are supplied directly and applies the same host check.
+When runtime validation is enabled in `build-release.yml`, the workflow runs
+the same gate as separate x64 and ARM64 jobs; the ARM64 leg uses the native
+`windows-11-arm` runner rather than treating cross-compilation as runtime proof.
 Fresh installation after uninstall generates a new endpoint identity. A backup
 of the `.db` alone cannot restore an identity backed by a Windows CNG key;
 identity-preserving recovery also requires the corresponding certificate and
@@ -318,18 +335,19 @@ An install command failure fails the phase even if the old service is healthy.
 release gates. They check the signed bundle and the release bundle, including the
 presence of the required documentation under `docs/` (`docs/README.md`,
 `docs/CONFIGURATION.md`, `docs/DEPLOYMENT.md`, and `docs/testing/README.md`).
-Both read built service binaries under `meshservice/x64/`, so build first; the
-signing gate also reads `branding_config.local.json` and stages the Win32
-runtime executable. Release packages contain provisioning manifests and binaries;
+Both read built service binaries under `meshservice/x64/` and
+`meshservice/ARM64/`, verify their PE machine types, and require both native
+service DLLs, so build first; the signing gate also reads
+`branding_config.local.json` and stages the Win32 runtime executable. Release packages contain provisioning manifests and binaries;
 endpoint identity databases are excluded.
 
 ## Builds before binary-reading tests
 
 Runtime probes and any contract that reads built binaries need a current build
-first. In particular, `test/service_bundle_embedding_contract.js` reads
-the built service binaries and their embedded component, so build the package (or
-at least the service-DLL gate) before running it; otherwise it has nothing valid
-to read. Automation migrating from the original evidence fields can invoke the
+first. In particular, `test/service_bundle_embedding_contract.js` reads the
+built x64 and ARM64 service binaries and verifies that each embeds its matching
+native service DLL, so build the package before running it; otherwise it has
+nothing valid to read. Automation migrating from the original evidence fields can invoke the
 same neutral entry point with `--legacy-evidence-schema`; this emits the exact
 three-field compatibility schema while retaining the neutral script and evidence
 filenames.

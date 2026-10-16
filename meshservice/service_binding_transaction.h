@@ -164,6 +164,7 @@ static BOOL ServiceBinding_IsLegacyExe(const wchar_t* path)
            !_wcsicmp(leaf, L"MeshAgent.exe") ||
            !_wcsicmp(leaf, L"MeshService.exe") ||
            !_wcsicmp(leaf, L"MeshService64.exe") ||
+           !_wcsicmp(leaf, L"MeshServiceARM64.exe") ||
            !_wcsicmp(leaf, L"MeshService-2022.exe") ||
            !_wcsicmp(leaf, L"diaghost.exe");
 }

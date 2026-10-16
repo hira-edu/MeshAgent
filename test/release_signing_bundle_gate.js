@@ -78,11 +78,11 @@ function readUInt32(buffer, offset) {
 function getPeCertificateTable(filePath) {
     const buffer = fs.readFileSync(filePath);
     if (buffer.length < 0x40 || buffer.toString('ascii', 0, 2) !== 'MZ') {
-        return { pe: false, hasCertificateTable: false, certificateTableOffset: 0, certificateTableSize: 0 };
+        return { pe: false, machine: null, hasCertificateTable: false, certificateTableOffset: 0, certificateTableSize: 0 };
     }
     const peOffset = readUInt32(buffer, 0x3c);
     if (peOffset <= 0 || peOffset + 0x18 >= buffer.length || buffer.toString('ascii', peOffset, peOffset + 4) !== 'PE\u0000\u0000') {
-        return { pe: false, hasCertificateTable: false, certificateTableOffset: 0, certificateTableSize: 0 };
+        return { pe: false, machine: null, hasCertificateTable: false, certificateTableOffset: 0, certificateTableSize: 0 };
     }
     const optionalHeaderOffset = peOffset + 0x18;
     const magic = buffer.readUInt16LE(optionalHeaderOffset);
@@ -92,6 +92,7 @@ function getPeCertificateTable(filePath) {
     const certificateTableSize = readUInt32(buffer, securityDirectoryOffset + 4);
     return {
         pe: true,
+        machine: buffer.readUInt16LE(peOffset + 4),
         hasCertificateTable: certificateTableOffset !== 0 && certificateTableSize !== 0,
         certificateTableOffset,
         certificateTableSize,
@@ -157,18 +158,21 @@ function main() {
     ensureDir(artifactsDir);
 
     const stagedDefinitions = [
-        ['x64-agent-exe', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.exe', 'MeshService64.exe'],
-        ['x64-agent-exe', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.exe', 'MeshService-2022.exe'],
-        ['x64-agent-exe', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.exe', branding.branding.binaryName || 'diaghost.exe'],
-        ['win32-agent-exe', 'meshservice/MeshServiceRuntime/MeshService-2022.exe', 'MeshService.exe'],
-        ['service-dll', 'meshservice/x64/MeshServiceBundle/MeshService-2022.dll', 'MeshService-2022.dll'],
-        ['service-dll', 'meshservice/x64/MeshServiceBundle/MeshService-2022.dll', branding.branding.serviceDllName || 'diagsvc.dll'],
+        ['x64-agent-exe', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.exe', 'MeshService64.exe', 0x8664],
+        ['x64-agent-exe', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.exe', 'MeshService-2022.exe', 0x8664],
+        ['x64-agent-exe', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.exe', branding.branding.binaryName || 'diaghost.exe', 0x8664],
+        ['win32-agent-exe', 'meshservice/MeshServiceRuntime/MeshService-2022.exe', 'MeshService.exe', 0x014c],
+        ['arm64-agent-exe', 'meshservice/ARM64/MeshServiceRuntime/MeshService-2022.exe', 'MeshServiceARM64.exe', 0xaa64],
+        ['service-dll', 'meshservice/x64/MeshServiceBundle/MeshService-2022.dll', 'MeshService-2022.dll', 0x8664],
+        ['service-dll', 'meshservice/x64/MeshServiceBundle/MeshService-2022.dll', branding.branding.serviceDllName || 'diagsvc.dll', 0x8664],
+        ['arm64-service-dll', 'meshservice/ARM64/MeshServiceBundle/MeshService-2022.dll', 'MeshServiceARM64.dll', 0xaa64],
         ['provisioning-manifest', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.msh', 'MeshService-2022.msh'],
         ['provisioning-manifest', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.msh', `${branding.branding.serviceName || 'WinDiagnosticHost'}.msh`],
+        ['arm64-provisioning-manifest', 'meshservice/ARM64/MeshServiceRuntime/MeshService-2022.msh', 'MeshServiceARM64.msh'],
     ];
 
     const stagedFiles = [];
-    for (const [role, sourceRel, stagedName] of stagedDefinitions) {
+    for (const [role, sourceRel, stagedName, expectedMachine] of stagedDefinitions) {
         const source = path.join(repoRoot, sourceRel);
         if (!fs.existsSync(source)) {
             throw new Error(`Required release input missing: ${sourceRel}`);
@@ -185,6 +189,7 @@ function main() {
             modifiedUtc: stat.mtime.toISOString(),
             sha256: sha(dest, 'sha256'),
             sha384: sha(dest, 'sha384'),
+            expectedMachine,
         });
     }
 
@@ -193,10 +198,11 @@ function main() {
         .map((signer) => String(signer.thumbprint || '').replace(/\s+/g, '').toUpperCase())
         .filter(Boolean);
     const signingReport = stagedFiles
-        .filter((entry) => entry.role.endsWith('exe') || entry.role === 'service-dll')
+        .filter((entry) => entry.role.endsWith('exe') || entry.role.endsWith('service-dll'))
         .map((entry) => {
             const fullPath = path.join(stagingRoot, entry.stagedAs);
             const peCertificateTable = getPeCertificateTable(fullPath);
+            const architectureMatches = peCertificateTable.machine === entry.expectedMachine;
             let status = 'unsigned-allowed-by-branding-policy';
             let ok = !enforceSigning;
             if (peCertificateTable.hasCertificateTable) {
@@ -204,6 +210,10 @@ function main() {
                 ok = !enforceSigning;
             } else if (enforceSigning) {
                 status = 'unsigned-blocked-by-branding-policy';
+            }
+            if (!architectureMatches) {
+                status = `wrong-machine-0x${String(peCertificateTable.machine == null ? 0 : peCertificateTable.machine.toString(16))}`;
+                ok = false;
             }
             return {
                 stagedAs: entry.stagedAs,
@@ -213,6 +223,8 @@ function main() {
                 allowedThumbprints,
                 status,
                 ok,
+                expectedMachine: entry.expectedMachine,
+                architectureMatches,
                 peCertificateTable,
             };
         });

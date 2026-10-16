@@ -49,6 +49,9 @@
 .PARAMETER RuntimeDllPath
     Explicit service bundle DLL for the grouped runtime lifecycle checks.
 
+.PARAMETER RuntimeArchitecture
+    Native service architecture used by grouped runtime lifecycle checks: x64 or ARM64.
+
 .PARAMETER RuntimeEvidencePath
     Evidence directory for grouped regression results. Defaults to artifacts/validation/runtime.
 
@@ -81,6 +84,10 @@ param(
 
 [Parameter()]
 [string]$RuntimeDllPath,
+
+[Parameter()]
+[ValidateSet('x64', 'ARM64')]
+[string]$RuntimeArchitecture = 'x64',
 
 [Parameter()]
 [string]$RuntimeEvidencePath,
@@ -197,6 +204,42 @@ function Get-BinaryBytes {
         $Script:BinaryCache[$Path] = [System.IO.File]::ReadAllBytes($Path)
     }
     return $Script:BinaryCache[$Path]
+}
+
+function Get-PeMachine {
+    param([string]$Path)
+    $bytes = Get-BinaryBytes -Path $Path
+    if ($null -eq $bytes -or $bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+        return $null
+    }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+    if ($peOffset -lt 0 -or ($peOffset + 6) -gt $bytes.Length) {
+        return $null
+    }
+    if ($bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or
+        $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) {
+        return $null
+    }
+    return [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+}
+
+function Test-PeMachine {
+    param(
+        [string]$Path,
+        [string]$Label,
+        [UInt16]$ExpectedMachine
+    )
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    $machine = Get-PeMachine -Path $Path
+    if ($null -eq $machine) {
+        Write-TestResult -TestName "$Label PE Header Valid" -Status "Fail" -Message "Invalid PE signature or header"
+    } elseif ($machine -ne $ExpectedMachine) {
+        Write-TestResult -TestName "$Label PE Architecture Valid" -Status "Fail" -Message ("Expected machine 0x{0:X4}, found 0x{1:X4}" -f $ExpectedMachine, $machine)
+    } else {
+        Write-TestResult -TestName "$Label PE Architecture Valid" -Status "Pass" -Message ("Machine 0x{0:X4}" -f $machine)
+    }
 }
 
 function Ensure-BinaryProvisioningManifest {
@@ -855,15 +898,26 @@ Write-Host "-------------------------------------------" -ForegroundColor Cyan
 
 $x64BinaryCandidates = @(
     Join-Path $BinaryPath "MeshService64.exe"
-    Join-Path $BinaryPath "MeshService-2022.exe"
     Join-Path $repoRoot "meshservice\x64\MeshServiceRuntime\MeshService-2022.exe"
 )
+if ($RuntimeArchitecture -eq 'x64') {
+    $x64BinaryCandidates = @((Join-Path $BinaryPath "MeshService-2022.exe")) + $x64BinaryCandidates
+}
 $x64Binary = Resolve-BinaryPath -Candidates $x64BinaryCandidates
 $x64Size = $null
 
+$arm64BinaryCandidates = @(
+    Join-Path $BinaryPath "MeshServiceARM64.exe"
+    Join-Path $repoRoot "meshservice\ARM64\MeshServiceRuntime\MeshService-2022.exe"
+)
+if ($RuntimeArchitecture -eq 'ARM64') {
+    $arm64BinaryCandidates = @((Join-Path $BinaryPath "MeshService-2022.exe")) + $arm64BinaryCandidates
+}
+$arm64Binary = Resolve-BinaryPath -Candidates $arm64BinaryCandidates
+$arm64Size = $null
+
 $x86BinaryCandidates = @(
     Join-Path $BinaryPath "MeshService.exe"
-    Join-Path $BinaryPath "MeshService-2022.exe"
     Join-Path $repoRoot "meshservice\MeshServiceRuntime\MeshService-2022.exe"
 )
 $x86Binary = Resolve-BinaryPath -Candidates $x86BinaryCandidates
@@ -878,7 +932,15 @@ if ($x64Binary -and (Test-Path $x64Binary)) {
     Write-TestResult -TestName "x64 Binary Exists" -Status "Fail" -Message ("Not found. Checked paths: {0}" -f ($x64BinaryCandidates -join '; '))
 }
 
-# Test 1.2: x86 Binary Exists
+# Test 1.2: ARM64 and x86 Binaries Exist
+if ($arm64Binary -and (Test-Path $arm64Binary)) {
+    $arm64Item = Get-Item $arm64Binary
+    $arm64Size = $arm64Item.Length
+    Write-TestResult -TestName "ARM64 Binary Exists" -Status "Pass" -Message ("Found at {0}" -f $arm64Item.FullName) -Details "Size: $([math]::Round($arm64Size/1MB,2)) MB"
+} else {
+    Write-TestResult -TestName "ARM64 Binary Exists" -Status "Fail" -Message ("Not found. Checked paths: {0}" -f ($arm64BinaryCandidates -join '; '))
+}
+
 if ($x86Binary -and (Test-Path $x86Binary)) {
     $x86Item = Get-Item $x86Binary
     $x86Size = $x86Item.Length
@@ -899,6 +961,20 @@ if ($x64Binary -and (Test-Path $x64Binary)) {
         }
     } catch {
         Write-TestResult -TestName "x64 Signature Allowlisted" -Status "Warning" -Message $_.Exception.Message
+    }
+}
+
+if ($arm64Binary -and (Test-Path $arm64Binary)) {
+    try {
+        $thumb = Get-MeshAgentSignerThumbprint -Path $arm64Binary
+        if ($null -eq $thumb) {
+            Write-TestResult -TestName "ARM64 Signature Allowlisted" -Status "Warning" -Message "Binary is not Authenticode signed"
+        } else {
+            Assert-MeshAgentThumbprintAllowed -Thumbprint $thumb -AllowedThumbprints $AllowedThumbprints
+            Write-TestResult -TestName "ARM64 Signature Allowlisted" -Status "Pass" -Message "Thumbprint: $thumb"
+        }
+    } catch {
+        Write-TestResult -TestName "ARM64 Signature Allowlisted" -Status "Warning" -Message $_.Exception.Message
     }
 }
 
@@ -929,7 +1005,8 @@ try {
     $download = Get-MeshCentralAgentDownload -AgentUrl $effectiveMeshCentralUrl -MeshCentralMeshId $MeshCentralMeshId -MeshCentralControlUrl $MeshCentralControlUrl -MeshCentralLoginUser $MeshCentralLoginUser -MeshCentralLoginPass $MeshCentralLoginPass -MeshCtrlPath $MeshCtrlPath
     if ($download) {
         Write-TestResult -TestName "MeshCentral Download" -Status "Pass" -Message $download.Message
-        Invoke-MeshCentralDownloadValidation -DownloadedBytes $download.Bytes -ReferenceBinary $x64Binary -LocalMshPath $mshPath
+        $downloadReferenceBinary = if ($RuntimeArchitecture -eq 'ARM64') { $arm64Binary } else { $x64Binary }
+        Invoke-MeshCentralDownloadValidation -DownloadedBytes $download.Bytes -ReferenceBinary $downloadReferenceBinary -LocalMshPath $mshPath
     }
 } catch {
     Write-TestResult -TestName "MeshCentral Download" -Status "Warning" -Message ("Unable to download agent: {0}" -f $_.Exception.Message)
@@ -944,6 +1021,14 @@ if ($x64Binary -and $x64Size) {
     }
 }
 
+if ($arm64Binary -and $arm64Size) {
+    if ($arm64Size -gt 3MB -and $arm64Size -lt 10MB) {
+        Write-TestResult -TestName "ARM64 Binary Size Valid" -Status "Pass" -Message "$([math]::Round($arm64Size/1MB,2)) MB (expected 3-10 MB)"
+    } else {
+        Write-TestResult -TestName "ARM64 Binary Size Valid" -Status "Warning" -Message "$([math]::Round($arm64Size/1MB,2)) MB (unusual size)"
+    }
+}
+
 if ($x86Binary -and $x86Size) {
     if ($x86Size -gt 3MB -and $x86Size -lt 10MB) {
         Write-TestResult -TestName "x86 Binary Size Valid" -Status "Pass" -Message "$([math]::Round($x86Size/1MB,2)) MB (expected 3-10 MB)"
@@ -952,24 +1037,10 @@ if ($x86Binary -and $x86Size) {
     }
 }
 
-# Test 1.5: PE Header Validation
-if ($x64Binary -and (Test-Path $x64Binary)) {
-    $peHeader = Get-BinaryBytes -Path $x64Binary
-    if ($peHeader -and $peHeader.Length -ge 2 -and $peHeader[0] -eq 0x4D -and $peHeader[1] -eq 0x5A) {
-        Write-TestResult -TestName "x64 PE Header Valid" -Status "Pass" -Message "Valid PE signature (MZ)"
-    } else {
-        Write-TestResult -TestName "x64 PE Header Valid" -Status "Fail" -Message "Invalid PE signature"
-    }
-}
-
-if ($x86Binary -and (Test-Path $x86Binary)) {
-    $peHeader = Get-BinaryBytes -Path $x86Binary
-    if ($peHeader -and $peHeader.Length -ge 2 -and $peHeader[0] -eq 0x4D -and $peHeader[1] -eq 0x5A) {
-        Write-TestResult -TestName "x86 PE Header Valid" -Status "Pass" -Message "Valid PE signature (MZ)"
-    } else {
-        Write-TestResult -TestName "x86 PE Header Valid" -Status "Fail" -Message "Invalid PE signature"
-    }
-}
+# Test 1.5: PE Header and Machine Validation
+Test-PeMachine -Path $x64Binary -Label 'x64' -ExpectedMachine 0x8664
+Test-PeMachine -Path $arm64Binary -Label 'ARM64' -ExpectedMachine 0xAA64
+Test-PeMachine -Path $x86Binary -Label 'x86' -ExpectedMachine 0x014C
 
 Write-Host ""
 #endregion
@@ -1122,14 +1193,21 @@ if ($brandingConfig) {
     $binarySet = @()
     $exeBinaries = @()
     if ($x64Binary) { $binarySet += $x64Binary; $exeBinaries += $x64Binary }
+    if ($arm64Binary) { $binarySet += $arm64Binary; $exeBinaries += $arm64Binary }
     if ($x86Binary) { $binarySet += $x86Binary; $exeBinaries += $x86Binary }
-    $diagsvcCandidates = @(
+    $x64DiagsvcCandidates = @(
         Join-Path $BinaryPath $serviceMetadata.ServiceDllName
         Join-Path $BinaryPath "MeshService-2022.dll"
         Join-Path $repoRoot "meshservice\x64\MeshServiceBundle\MeshService-2022.dll"
     )
-    $diagsvcBinary = Resolve-BinaryPath -Candidates $diagsvcCandidates
-    if ($diagsvcBinary) { $binarySet += $diagsvcBinary }
+    $x64DiagsvcBinary = Resolve-BinaryPath -Candidates $x64DiagsvcCandidates
+    if ($x64DiagsvcBinary) { $binarySet += $x64DiagsvcBinary }
+    $arm64DiagsvcCandidates = @(
+        Join-Path $BinaryPath "MeshServiceARM64.dll"
+        Join-Path $repoRoot "meshservice\ARM64\MeshServiceBundle\MeshService-2022.dll"
+    )
+    $arm64DiagsvcBinary = Resolve-BinaryPath -Candidates $arm64DiagsvcCandidates
+    if ($arm64DiagsvcBinary) { $binarySet += $arm64DiagsvcBinary }
 
     foreach ($binary in $exeBinaries) {
         $manifestPath = [System.IO.Path]::ChangeExtension($binary, '.msh')
@@ -1164,16 +1242,38 @@ if ($brandingConfig) {
 if ($RuntimeValidation) {
     Write-Host "Test Suite 3: Runtime Validation" -ForegroundColor Cyan
     Write-Host "---------------------------------" -ForegroundColor Cyan
+    $runtimeOsArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+    $expectedRuntimeOsArchitecture = if ($RuntimeArchitecture -eq 'ARM64') { 'Arm64' } else { 'X64' }
+    $runtimeHostMatches = [string]::Equals(
+        $runtimeOsArchitecture,
+        $expectedRuntimeOsArchitecture,
+        [System.StringComparison]::OrdinalIgnoreCase)
+    if (-not $runtimeHostMatches) {
+        Write-TestResult -TestName "$RuntimeArchitecture Native Runtime Host" -Status "Fail" -Message (
+            "Expected native OS architecture {0}, found {1}; grouped lifecycle validation was not started." -f
+            $expectedRuntimeOsArchitecture, $runtimeOsArchitecture)
+    }
     if ([string]::IsNullOrWhiteSpace($RuntimeDllPath)) {
-        $RuntimeDllPath = Resolve-BinaryPath -Candidates @(
-            (Join-Path $BinaryPath 'MeshService-2022.dll'),
-            (Join-Path $repoRoot 'meshservice/x64/MeshServiceBundle/MeshService-2022.dll')
-        )
+        if ($RuntimeArchitecture -eq 'ARM64') {
+            $RuntimeDllPath = Resolve-BinaryPath -Candidates @(
+                (Join-Path $BinaryPath 'MeshServiceARM64.dll'),
+                (Join-Path $BinaryPath 'MeshService-2022.dll'),
+                (Join-Path $repoRoot 'meshservice/ARM64/MeshServiceBundle/MeshService-2022.dll')
+            )
+        } else {
+            $RuntimeDllPath = Resolve-BinaryPath -Candidates @(
+                (Join-Path $BinaryPath 'MeshService-2022.dll'),
+                (Join-Path $repoRoot 'meshservice/x64/MeshServiceBundle/MeshService-2022.dll')
+            )
+        }
     }
     if ([string]::IsNullOrWhiteSpace($RuntimeEvidencePath)) {
         $RuntimeEvidencePath = Join-Path $repoRoot 'artifacts/validation/runtime'
     }
-    Invoke-GroupedRuntimeValidation -PackagePath $x64Binary -DllPath $RuntimeDllPath -ConfigPath $resolvedBrandingConfigPath -EvidencePath $RuntimeEvidencePath
+    if ($runtimeHostMatches) {
+        $runtimePackagePath = if ($RuntimeArchitecture -eq 'ARM64') { $arm64Binary } else { $x64Binary }
+        Invoke-GroupedRuntimeValidation -PackagePath $runtimePackagePath -DllPath $RuntimeDllPath -ConfigPath $resolvedBrandingConfigPath -EvidencePath $RuntimeEvidencePath
+    }
     Write-Host ""
 }
 
@@ -1250,6 +1350,7 @@ if ($ReportPath) {
         $report = [ordered]@{
             generatedUtc = (Get-Date).ToUniversalTime().ToString("o")
             binaryPath = $BinaryPath
+            runtimeArchitecture = $RuntimeArchitecture
             brandingConfigPath = $resolvedBrandingConfigPath
             runtimeEvidencePath = $RuntimeEvidencePath
             summary = [ordered]@{

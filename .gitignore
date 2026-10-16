@@ -420,6 +420,7 @@ Win32/
 meshservice/Release_DLL/
 meshservice/MeshServiceBundle/
 meshservice/x64/
+meshservice/ARM64/
 meshservice/Win32/
 meshservice/MeshService-2022/Release_DLL/
 meshservice/MeshService-2022/MeshServiceRuntime/
@@ -427,6 +428,8 @@ meshservice/MeshService-2022/MeshServiceBundle/
 meshservice/MeshService-2022/x64/
 meshservice/MeshService-2022/Win32/
 meshservice/embedded/service_bundle.dll
+meshservice/embedded/x64/
+meshservice/embedded/arm64/
 microscript/ILibDuktape_Commit.h
 *.iobj
 *.ipdb

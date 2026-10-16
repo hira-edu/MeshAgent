@@ -7471,8 +7471,8 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 
 #if !defined(_WIN64)
 	ServiceDeploy_SetInstallerLogPathToTemp(L"MeshInstaller-Terminal.log");
-	ServiceDeploy_LogInstallEvent(L"[SELFUPDATE_INGRESS] Win32 lifecycle rejected; use the x64 service EXE");
-	wprintf(L"[-] Self-update lifecycle operations require the x64 service EXE on 64-bit Windows.\n");
+	ServiceDeploy_LogInstallEvent(L"[SELFUPDATE_INGRESS] Win32 lifecycle rejected; use the native 64-bit service EXE");
+	wprintf(L"[-] Self-update lifecycle operations require the native x64 or ARM64 service EXE.\n");
 	return (int)ERROR_NOT_SUPPORTED;
 #endif
 
@@ -7736,11 +7736,11 @@ static int MeshService_RunNativeTerminalLifecycle(int argc, char** argv)
 	}
 
 #if !defined(_WIN64)
-	// This package embeds the x64 service DLL. Loading it in a Win32 lifecycle
+	// This package embeds a native 64-bit service DLL. Loading it in a Win32 lifecycle
 	// process fails with ERROR_BAD_EXE_FORMAT; reject before deployment mutation.
 	ServiceDeploy_SetInstallerLogPathToTemp(L"MeshInstaller-Terminal.log");
-	ServiceDeploy_LogInstallEvent(L"[TERMINAL] Win32 lifecycle rejected; use the x64 service EXE");
-	printf("[-] Terminal lifecycle operations require the x64 service EXE on 64-bit Windows.\n");
+	ServiceDeploy_LogInstallEvent(L"[TERMINAL] Win32 lifecycle rejected; use the native 64-bit service EXE");
+	printf("[-] Terminal lifecycle operations require the native x64 or ARM64 service EXE.\n");
 	return (int)ERROR_NOT_SUPPORTED;
 #endif
 

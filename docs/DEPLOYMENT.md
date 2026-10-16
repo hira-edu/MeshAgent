@@ -59,7 +59,18 @@ Build the package on Windows using the ordered build entry point:
 msbuild .\MeshAgent.Build.proj /m /nologo /verbosity:minimal
 ```
 
-The `MeshServiceBundle` configuration embeds the x86 and x64 persistent
+The ordered build produces Win32, x64, and ARM64 agent executables plus native
+x64 and ARM64 service DLLs. The ARM64 C++ build tools for the selected Visual
+Studio toolset must be installed; a host without them fails the build instead
+of silently omitting ARM64.
+
+The `build-release.yml` workflow uses the same three-architecture release
+matrix. Tag releases and optional server deployment include the matching `.msh`
+files and both native service DLLs. Each native 64-bit matrix leg verifies its
+PE machine and exact embedded-DLL equality before uploading artifacts; when
+signing is configured, the service DLL is signed before it is embedded.
+
+Each x64 and ARM64 `MeshServiceBundle` configuration embeds the x86 and x64 persistent
 `RuntimeLoader` controller executables built from a sibling checkout. Each
 controller contains and owns its architecture-specific runtime image. The build looks for
 `..\NativeRuntime\RuntimeLibrary\RuntimeLibrary.vcxproj` and then `..\hook`
@@ -233,10 +244,11 @@ fleet update guard and `--allow-fleet-update` apply as for Windows releases.
 
 ## Endpoint install, update, and uninstall
 
-The x64 service EXE supports native lifecycle operations from an elevated terminal.
-The current service migration targets 64-bit Windows and an x64 service DLL.
+The x64 and ARM64 service EXEs support native lifecycle operations from an elevated terminal.
+The service migration targets 64-bit Windows and uses a DLL matching the agent architecture.
 Win32 EXE terminal lifecycle commands return `ERROR_NOT_SUPPORTED` (50) before
-deployment changes; use `MeshService64.exe`, including for unattended operations.
+deployment changes; use `MeshService64.exe` on x64 or `MeshServiceARM64.exe` on ARM64,
+including for unattended operations.
 All commands below require an elevated (Run as Administrator) PowerShell
 prompt. The URL single-quotes protect the `$` and `@` characters in the
 MeshCentral mesh ID encoding.
@@ -245,6 +257,7 @@ MeshCentral mesh ID encoding.
 
 ```powershell
 Invoke-WebRequest -Uri 'https://agents.high.support/meshagents?id=4' -OutFile "$env:TEMP\MeshService64.exe"
+Invoke-WebRequest -Uri 'https://agents.high.support/meshagents?id=43' -OutFile "$env:TEMP\MeshServiceARM64.exe"
 ```
 
 ### Run the lifecycle operation
@@ -257,6 +270,11 @@ one lifecycle switch, optionally followed by `--quiet` (alias `-silent`):
 & "$env:TEMP\MeshService64.exe" -install
 & "$env:TEMP\MeshService64.exe" -update
 & "$env:TEMP\MeshService64.exe" -uninstall
+
+# Run the matching commands on native ARM64 Windows.
+& "$env:TEMP\MeshServiceARM64.exe" -install
+& "$env:TEMP\MeshServiceARM64.exe" -update
+& "$env:TEMP\MeshServiceARM64.exe" -uninstall
 ```
 
 For unattended use, append `--quiet` to any of these three commands. It
@@ -369,7 +387,7 @@ TLS renewal uses a unique temporary key container and deletes it after export;
 an export without the private key fails. Renewal and database-write failures
 stop startup while preserving the endpoint's root identity.
 
-The x64 service EXE's `-fullupdate` ingress remains supported and launches the approved
+Both native 64-bit service EXEs' `-fullupdate` ingress remains supported and launches the approved
 `MeshLifecycleHostW` callback. Direct `-fullinstall`, `-fulluninstall`, and
 `-validate-*` EXE switches are disabled; automated validation uses that callback
 with a lifecycle manifest. Repository tests use

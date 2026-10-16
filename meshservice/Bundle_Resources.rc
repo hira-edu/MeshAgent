@@ -3,7 +3,13 @@
 #define IDR_SERVICE_BUNDLE_DLL 101
 
 #ifndef EMBED_SERVICE_BUNDLE_PATH
+#if defined(MESH_AGENT_EMBED_ARM64_BUNDLE) || defined(_M_ARM64)
+#define EMBED_SERVICE_BUNDLE_PATH "embedded\\arm64\\service_bundle.dll"
+#elif defined(_WIN64)
+#define EMBED_SERVICE_BUNDLE_PATH "embedded\\x64\\service_bundle.dll"
+#else
 #define EMBED_SERVICE_BUNDLE_PATH "embedded\\service_bundle.dll"
+#endif
 #endif
 
 IDR_SERVICE_BUNDLE_DLL RCDATA EMBED_SERVICE_BUNDLE_PATH

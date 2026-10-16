@@ -6,11 +6,13 @@ const {
     signingRequiredForArtifact
 } = require('./release_bundle_gate');
 
-function peRecord({ enforceSigning = false, found = true, isPe = true, hasCertificateTable = false } = {}) {
+function peRecord({ enforceSigning = false, found = true, isPe = true, hasCertificateTable = false, machineMatches = true } = {}) {
     return {
         id: 'fixture.exe',
         required: true,
         peArtifact: true,
+        expectedMachine: 0x8664,
+        machineMatches,
         signedRequired: signingRequiredForArtifact({ signed: true }, enforceSigning),
         found,
         digests: found ? { sha256: 'fixture' } : null,
@@ -54,6 +56,10 @@ assert.match(collectFailures(enforcedUnsigned).join('; '), /certificate table/);
 const malformedPe = checklist([peRecord({ isPe: false })]);
 assert.equal(malformedPe.release_ready, false, 'disabled signing must not conceal malformed PE inputs');
 assert.match(collectFailures(malformedPe).join('; '), /malformed or not PE/);
+
+const wrongArchitecture = checklist([peRecord({ machineMatches: false })]);
+assert.equal(wrongArchitecture.release_ready, false, 'a mislabeled PE architecture must fail the release gate');
+assert.match(collectFailures(wrongArchitecture).join('; '), /wrong machine architecture/);
 
 assert.equal(checklist([peRecord({ found: false })]).release_ready, false, 'missing required artifacts must remain blocking');
 assert.equal(checklist([peRecord()], { missingReleaseDocuments: ['missing.md'] }).release_ready, false, 'missing documents must remain blocking');

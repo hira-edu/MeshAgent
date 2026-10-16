@@ -2866,7 +2866,7 @@ void ILibProcessPipe_Pipe_Resume(ILibProcessPipe_Pipe pipeObject)
 }
 
 #ifdef WIN32
-DWORD ILibProcessPipe_Pipe_BackgroundReader(void *arg)
+void ILibProcessPipe_Pipe_BackgroundReader(void *arg)
 {
 	ILibProcessPipe_PipeObject *pipeObject = (ILibProcessPipe_PipeObject*)arg;
 	DWORD bytesRead = 0;
@@ -2879,9 +2879,9 @@ DWORD ILibProcessPipe_Pipe_BackgroundReader(void *arg)
 
 		while(consumed != 0 && pipeObject->PAUSED == 0 && pipeObject->totalRead > pipeObject->readOffset)
 		{
-			if (!ILibProcessPipe_BackgroundReadWindowIsValid(pipeObject)) { ILibProcessPipe_FailInvalidReadWindow(pipeObject, "BackgroundReader.BeforeHandler"); ILibProcessPipe_FreePipe(pipeObject); return 0; }
+			if (!ILibProcessPipe_BackgroundReadWindowIsValid(pipeObject)) { ILibProcessPipe_FailInvalidReadWindow(pipeObject, "BackgroundReader.BeforeHandler"); ILibProcessPipe_FreePipe(pipeObject); return; }
 			((ILibProcessPipe_GenericReadHandler)pipeObject->handler)(pipeObject->buffer + pipeObject->readOffset, pipeObject->totalRead - pipeObject->readOffset, &consumed, pipeObject->user1, pipeObject->user2);
-			if (consumed > (pipeObject->totalRead - pipeObject->readOffset)) { ILibProcessPipe_FailInvalidReadWindow(pipeObject, "BackgroundReader.Consumed"); ILibProcessPipe_FreePipe(pipeObject); return 0; }
+			if (consumed > (pipeObject->totalRead - pipeObject->readOffset)) { ILibProcessPipe_FailInvalidReadWindow(pipeObject, "BackgroundReader.Consumed"); ILibProcessPipe_FreePipe(pipeObject); return; }
 			if (consumed == 0)
 			{
 				memmove_s(pipeObject->buffer, pipeObject->bufferSize, pipeObject->buffer + pipeObject->readOffset, pipeObject->totalRead - pipeObject->readOffset);
@@ -2905,14 +2905,14 @@ DWORD ILibProcessPipe_Pipe_BackgroundReader(void *arg)
 		}
 
 		if (pipeObject->PAUSED == 1) { continue; }
-		if (!ILibProcessPipe_BackgroundReadWindowIsValid(pipeObject)) { ILibProcessPipe_FailInvalidReadWindow(pipeObject, "BackgroundReader.BeforeRead"); ILibProcessPipe_FreePipe(pipeObject); return 0; }
+		if (!ILibProcessPipe_BackgroundReadWindowIsValid(pipeObject)) { ILibProcessPipe_FailInvalidReadWindow(pipeObject, "BackgroundReader.BeforeRead"); ILibProcessPipe_FreePipe(pipeObject); return; }
 		if (!ReadFile(pipeObject->mPipe_ReadEnd, pipeObject->buffer + pipeObject->readOffset + pipeObject->readNewOffset, (DWORD)(pipeObject->bufferSize - pipeObject->readOffset - pipeObject->readNewOffset), &bytesRead, NULL)) { break; }
 
 		consumed = 0;
-		if (!ILibProcessPipe_BackgroundReadWindowCanAppend(pipeObject, bytesRead)) { ILibProcessPipe_FailInvalidReadWindow(pipeObject, "BackgroundReader.Append"); ILibProcessPipe_FreePipe(pipeObject); return 0; }
+		if (!ILibProcessPipe_BackgroundReadWindowCanAppend(pipeObject, bytesRead)) { ILibProcessPipe_FailInvalidReadWindow(pipeObject, "BackgroundReader.Append"); ILibProcessPipe_FreePipe(pipeObject); return; }
 		pipeObject->totalRead += bytesRead;
 		((ILibProcessPipe_GenericReadHandler)pipeObject->handler)(pipeObject->buffer + pipeObject->readOffset, pipeObject->totalRead - pipeObject->readOffset, &consumed, pipeObject->user1, pipeObject->user2);
-		if (consumed > (pipeObject->totalRead - pipeObject->readOffset)) { ILibProcessPipe_FailInvalidReadWindow(pipeObject, "BackgroundReader.InitialConsumed"); ILibProcessPipe_FreePipe(pipeObject); return 0; }
+		if (consumed > (pipeObject->totalRead - pipeObject->readOffset)) { ILibProcessPipe_FailInvalidReadWindow(pipeObject, "BackgroundReader.InitialConsumed"); ILibProcessPipe_FreePipe(pipeObject); return; }
 		pipeObject->readOffset += consumed;
 		if (consumed == 0) 
 		{ 
@@ -2923,7 +2923,6 @@ DWORD ILibProcessPipe_Pipe_BackgroundReader(void *arg)
 	if (pipeObject->brokenPipeHandler != NULL) { pipeObject->brokenPipeHandler(pipeObject); }
 	ILibProcessPipe_FreePipe(pipeObject);
 
-	return 0;
 }
 #endif
 #ifdef WIN32

@@ -10,8 +10,11 @@
     parameters. Use it from CI (or locally) after staging the MeshServiceRuntime build so runtime evidence
     is captured automatically under `artifacts/validation/runtime/runtime.json`.
 
+.PARAMETER Architecture
+    Native service architecture to validate: x64 or ARM64. The default is x64.
+
 .PARAMETER BinaryPath
-    Root directory that contains MeshService-2022.exe (default: meshservice\x64\MeshServiceRuntime).
+    Root directory that contains MeshService-2022.exe. Defaults to the selected architecture's MeshServiceRuntime output.
 
 .PARAMETER MeshCentralRepo
     Path to the local MeshCentral checkout that hosts `meshctrl.js` and meshcentral-data (default: ..\MeshCentral).
@@ -39,12 +42,14 @@
 
 .PARAMETER SkipMeshCentralPreflight
     Skips the MeshCentral cache refresh/parity check. By default the helper restarts MeshCentral, clears cached meshagent downloads,
-    and verifies that `meshcentral-data\agents\MeshService64.exe` matches the local MeshServiceRuntime build before running tests.
+    and verifies that the selected architecture's MeshCentral agent payload matches the local MeshServiceRuntime build before running tests.
 
 #>
 [CmdletBinding()]
 param(
-    [string]$BinaryPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'meshservice\x64\MeshServiceRuntime'),
+    [ValidateSet('x64', 'ARM64')]
+    [string]$Architecture = 'x64',
+    [string]$BinaryPath,
     [string]$MeshCentralRepo = (Join-Path (Split-Path $PSScriptRoot -Parent) '..\MeshCentral'),
     [string]$MeshCtrlPath,
     [string]$MeshCentralControlUrl = 'ws://127.0.0.1:3000',
@@ -70,6 +75,16 @@ function Assert-Elevation {
             return
         }
         throw "Runtime validation requires an elevated PowerShell session. Re-run as Administrator or pass -AllowNonAdmin to override (not recommended)."
+    }
+}
+
+function Assert-NativeArchitecture {
+    param([string]$RequestedArchitecture)
+
+    $actual = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+    $expected = if ($RequestedArchitecture -eq 'ARM64') { 'Arm64' } else { 'X64' }
+    if (-not [string]::Equals($actual, $expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw ("Runtime validation for {0} requires a native {0} Windows host; this host reports {1}." -f $RequestedArchitecture, $actual)
     }
 }
 
@@ -189,7 +204,8 @@ function Invoke-MeshCentralCacheRefresh {
 function Invoke-MeshCentralPreflight {
     param(
         [string]$RepoPath,
-        [string]$BinaryRoot
+        [string]$BinaryRoot,
+        [string]$NativeArchitecture
     )
 
     Write-Host "[RuntimeValidation] Performing MeshCentral cache refresh + parity check..." -ForegroundColor Cyan
@@ -200,9 +216,10 @@ function Invoke-MeshCentralPreflight {
         throw "Local MeshServiceRuntime binary missing at $localBinary"
     }
 
-    $serverBinary = Join-Path $dataPath 'agents\MeshService64.exe'
+    $serverFileName = if ($NativeArchitecture -eq 'ARM64') { 'MeshServiceARM64.exe' } else { 'MeshService64.exe' }
+    $serverBinary = Join-Path $dataPath (Join-Path 'agents' $serverFileName)
     if (-not (Test-Path -LiteralPath $serverBinary)) {
-        throw "MeshCentral agent payload missing at $serverBinary. Copy the current MeshService64.exe build into meshcentral-data\\agents before invoking runtime validation."
+        throw "MeshCentral agent payload missing at $serverBinary. Copy the current $serverFileName build into meshcentral-data\\agents before invoking runtime validation."
     }
 
     $localHash = (Get-FileHash -LiteralPath $localBinary -Algorithm SHA256).Hash
@@ -303,12 +320,16 @@ function Test-MeshCentralReachable {
     }
 }
 
+Assert-NativeArchitecture -RequestedArchitecture $Architecture
 Assert-Elevation -AllowOverride:$AllowNonAdmin
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $brandingState = Get-BrandingState -RepoRoot $repoRoot
 if ($null -eq $brandingState -or $null -eq $brandingState.Config) {
     throw "Branding configuration is unavailable. Run MSBuild.exe .\\MeshAgent.Build.proj (or python .\\tools\\generate_branding_assets.py --repo-root . --config .\\branding_config.local.json) to refresh generated assets."
+}
+if ([string]::IsNullOrWhiteSpace($BinaryPath)) {
+    $BinaryPath = Join-Path $repoRoot ("meshservice\{0}\MeshServiceRuntime" -f $Architecture)
 }
 $binaryRoot = Resolve-ExistingPath $BinaryPath
 
@@ -320,7 +341,7 @@ if ($MeshCentralRepo -and (Test-Path -LiteralPath $MeshCentralRepo)) {
 $meshCtrlResolved = Resolve-MeshCtrlPath -ExplicitPath $MeshCtrlPath -RepoRoot $meshCentralRepoResolved
 
 if (-not $SkipMeshCentralPreflight) {
-    Invoke-MeshCentralPreflight -RepoPath $meshCentralRepoResolved -BinaryRoot $binaryRoot
+    Invoke-MeshCentralPreflight -RepoPath $meshCentralRepoResolved -BinaryRoot $binaryRoot -NativeArchitecture $Architecture
 }
 
 if (-not $MeshCentralMeshId) {
@@ -352,6 +373,7 @@ if ($LogPath) {
 
 $testArgs = @{
     BinaryPath            = $binaryRoot
+    RuntimeArchitecture   = $Architecture
     RuntimeValidation     = $true
     MeshCentralMeshId     = $MeshCentralMeshId
     MeshCentralControlUrl = $MeshCentralControlUrl

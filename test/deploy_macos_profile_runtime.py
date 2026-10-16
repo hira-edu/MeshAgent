@@ -36,7 +36,8 @@ if not (root / 'branding_config.local.json').exists():
     except RuntimeError as error:
         assert 'Active Windows branding installRoot/serviceDllName is required' in str(error)
 windows_artifacts = set(deployment.ARTIFACTS)
-assert 'MeshService64.exe' in windows_artifacts and 'meshagent_osx-arm-64' not in windows_artifacts
+assert {'MeshService64.exe', 'MeshServiceARM64.exe'} <= windows_artifacts
+assert 'meshagent_osx-arm-64' not in windows_artifacts
 
 deployment.apply_platform_profile('macos')
 assert set(deployment.ARTIFACTS) == {'meshagent_osx-arm-64'}

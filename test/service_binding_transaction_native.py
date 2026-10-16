@@ -162,6 +162,7 @@ int main(void){
     config.lpBinaryPathName=L"C:\\Program Files\\Mesh Agent\\MeshAgent.exe -run";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
     config.lpBinaryPathName=L"C:\\Program Files\\Mesh Agent\\MeshAgent.exe";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
     config.lpBinaryPathName=L"\"C:\\Mesh\\MeshService64.exe\"";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    config.lpBinaryPathName=L"\"C:\\Mesh\\MeshServiceARM64.exe\"";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
     config.lpBinaryPathName=L"C:\\Mesh\\diaghost.exe  \r\n";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
     config.dwServiceType=SERVICE_WIN32_OWN_PROCESS;
     config.lpBinaryPathName=L"C:\\Agent\\agent.exe\t-run";

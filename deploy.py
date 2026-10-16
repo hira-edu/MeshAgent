@@ -182,6 +182,11 @@ ARTIFACTS = {
         "remote_filename": "MeshService64.exe",
         "publish_targets": ("data", "signed", "module"),
     },
+    "MeshServiceARM64.exe": {
+        "local_path": "meshservice/ARM64/MeshServiceRuntime/MeshService-2022.exe",
+        "remote_filename": "MeshServiceARM64.exe",
+        "publish_targets": ("data", "signed", "module"),
+    },
     "MeshService.exe": {
         "local_path": "meshservice/MeshServiceRuntime/MeshService-2022.exe",
         "remote_filename": "MeshService.exe",
@@ -192,9 +197,19 @@ ARTIFACTS = {
         "remote_filename": "MeshService64.dll",
         "publish_targets": ("signed", "module"),
     },
+    "MeshServiceARM64.dll": {
+        "local_path": "meshservice/ARM64/MeshServiceBundle/MeshService-2022.dll",
+        "remote_filename": "MeshServiceARM64.dll",
+        "publish_targets": ("signed", "module"),
+    },
     "service_bundle.dll": {
         "local_path": "meshservice/embedded/service_bundle.dll",
         "remote_filename": "service_bundle.dll",
+        "publish_targets": ("signed", "module"),
+    },
+    "service_bundle_arm64.dll": {
+        "local_path": "meshservice/embedded/arm64/service_bundle.dll",
+        "remote_filename": "service_bundle_arm64.dll",
         "publish_targets": ("signed", "module"),
     },
     "diagsvc.dll": {
@@ -205,6 +220,11 @@ ARTIFACTS = {
     "MeshService64.msh": {
         "local_path": "meshservice/x64/MeshServiceRuntime/MeshService-2022.msh",
         "remote_filename": "MeshService64.msh",
+        "publish_targets": ("data", "signed", "module"),
+    },
+    "MeshServiceARM64.msh": {
+        "local_path": "meshservice/ARM64/MeshServiceRuntime/MeshService-2022.msh",
+        "remote_filename": "MeshServiceARM64.msh",
         "publish_targets": ("data", "signed", "module"),
     },
     "MeshService.msh": {
@@ -406,15 +426,19 @@ _USERFILES_USER = os.environ.get("MESHCENTRAL_USERFILES_USER", "")
 USERFILES_DIR = f"{MESHCENTRAL_BASE}/meshcentral-files/domain/user-{_USERFILES_USER}/Public" if _USERFILES_USER else ""
 MESHCENTRAL_CONTROL_URL = os.environ.get("MESHCENTRAL_CONTROL_URL", "")
 MESHCENTRAL_CONTROL_USER = os.environ.get("MESHCENTRAL_CONTROL_USER", "")
-HASHAGENTS_TRACKED_FILENAMES = {"MeshService.exe", "MeshService64.exe"}
+HASHAGENTS_TRACKED_FILENAMES = {"MeshService.exe", "MeshService64.exe", "MeshServiceARM64.exe"}
 SIGNED_RUNTIME_MUTABLE_FILENAMES = set(HASHAGENTS_TRACKED_FILENAMES)
 REQUIRED_AGENT_ARTIFACTS = {
     "MeshService64.exe",
+    "MeshServiceARM64.exe",
     "MeshService.exe",
     "MeshService64.dll",
+    "MeshServiceARM64.dll",
     "service_bundle.dll",
+    "service_bundle_arm64.dll",
     "diagsvc.dll",
     "MeshService64.msh",
+    "MeshServiceARM64.msh",
     "MeshService.msh",
     "WinDiagnosticHost.msh",
 }
@@ -831,6 +855,101 @@ def file_digest(path, algorithm="sha384"):
     return h.hexdigest()
 
 
+def read_pe_machine(path):
+    """Return the COFF machine value from a bounded PE header read."""
+    with Path(path).open("rb") as handle:
+        header = handle.read(0x1000)
+    if len(header) < 0x40 or header[:2] != b"MZ":
+        raise ValueError(f"Not a PE image: {path}")
+    pe_offset = int.from_bytes(header[0x3C:0x40], "little")
+    if pe_offset < 0x40 or pe_offset + 6 > len(header) or header[pe_offset:pe_offset + 4] != b"PE\0\0":
+        raise ValueError(f"Invalid PE header: {path}")
+    return int.from_bytes(header[pe_offset + 4:pe_offset + 6], "little")
+
+
+def _pe_rva_to_file_offset(image, sections, rva):
+    """Translate a PE relative virtual address to a bounded file offset."""
+    for virtual_address, virtual_size, raw_offset, raw_size in sections:
+        span = max(virtual_size, raw_size)
+        if virtual_address <= rva < virtual_address + span:
+            delta = rva - virtual_address
+            if delta >= raw_size or raw_offset + delta >= len(image):
+                break
+            return raw_offset + delta
+    raise ValueError(f"PE RVA 0x{rva:X} is not backed by file data")
+
+
+def read_pe_export_names(path):
+    """Return the named exports from a PE image without loading executable code."""
+    image = Path(path).read_bytes()
+    if len(image) < 0x40 or image[:2] != b"MZ":
+        raise ValueError(f"Not a PE image: {path}")
+    pe_offset = int.from_bytes(image[0x3C:0x40], "little")
+    if pe_offset < 0x40 or pe_offset + 24 > len(image) or image[pe_offset:pe_offset + 4] != b"PE\0\0":
+        raise ValueError(f"Invalid PE header: {path}")
+
+    section_count = int.from_bytes(image[pe_offset + 6:pe_offset + 8], "little")
+    optional_size = int.from_bytes(image[pe_offset + 20:pe_offset + 22], "little")
+    optional_offset = pe_offset + 24
+    optional_end = optional_offset + optional_size
+    if section_count == 0 or section_count > 96 or optional_end > len(image):
+        raise ValueError(f"Invalid PE section table: {path}")
+
+    magic = int.from_bytes(image[optional_offset:optional_offset + 2], "little")
+    if magic == 0x10B:
+        data_directory_offset = optional_offset + 96
+    elif magic == 0x20B:
+        data_directory_offset = optional_offset + 112
+    else:
+        raise ValueError(f"Unsupported PE optional header: {path}")
+    if data_directory_offset + 8 > optional_end:
+        raise ValueError(f"PE export directory is missing: {path}")
+
+    export_rva = int.from_bytes(image[data_directory_offset:data_directory_offset + 4], "little")
+    export_size = int.from_bytes(image[data_directory_offset + 4:data_directory_offset + 8], "little")
+    if export_rva == 0 or export_size == 0:
+        return set()
+
+    section_offset = optional_end
+    section_end = section_offset + section_count * 40
+    if section_end > len(image):
+        raise ValueError(f"Truncated PE section table: {path}")
+    sections = []
+    for index in range(section_count):
+        entry = section_offset + index * 40
+        virtual_size = int.from_bytes(image[entry + 8:entry + 12], "little")
+        virtual_address = int.from_bytes(image[entry + 12:entry + 16], "little")
+        raw_size = int.from_bytes(image[entry + 16:entry + 20], "little")
+        raw_offset = int.from_bytes(image[entry + 20:entry + 24], "little")
+        if raw_offset > len(image) or raw_size > len(image) - raw_offset:
+            raise ValueError(f"Invalid PE section bounds: {path}")
+        sections.append((virtual_address, virtual_size, raw_offset, raw_size))
+
+    export_offset = _pe_rva_to_file_offset(image, sections, export_rva)
+    if export_offset + 40 > len(image):
+        raise ValueError(f"Truncated PE export directory: {path}")
+    name_count = int.from_bytes(image[export_offset + 24:export_offset + 28], "little")
+    names_rva = int.from_bytes(image[export_offset + 32:export_offset + 36], "little")
+    if name_count > 1_000_000:
+        raise ValueError(f"Unreasonable PE export count: {path}")
+    if name_count == 0:
+        return set()
+
+    names_offset = _pe_rva_to_file_offset(image, sections, names_rva)
+    if names_offset + name_count * 4 > len(image):
+        raise ValueError(f"Truncated PE export name table: {path}")
+    exports = set()
+    for index in range(name_count):
+        name_rva_offset = names_offset + index * 4
+        name_rva = int.from_bytes(image[name_rva_offset:name_rva_offset + 4], "little")
+        name_offset = _pe_rva_to_file_offset(image, sections, name_rva)
+        terminator = image.find(b"\0", name_offset, min(len(image), name_offset + 4096))
+        if terminator < 0:
+            raise ValueError(f"Unterminated PE export name: {path}")
+        exports.add(image[name_offset:terminator])
+    return exports
+
+
 def remote_digest(path, algorithm="sha384"):
     """Return a hex digest for a remote file or None if missing."""
     result = ssh_cmd(f"{algorithm}sum {path} 2>/dev/null || echo MISSING", check=False)
@@ -917,7 +1036,13 @@ def extract_embedded_service_bundle(exe_path):
 def has_service_host_export(dll_path, export_name=b"ServiceHost_ServiceMain"):
     """Check a DLL entry point without running its DllMain."""
     if os.name != "nt":
-        raise RuntimeError("Service host export validation requires Windows")
+        return export_name in read_pe_export_names(dll_path)
+
+    # LoadLibrary/GetProcAddress provides the strongest native-architecture check,
+    # but Windows cannot map an ARM64 DLL into an x64 Python process (or vice versa).
+    # Parse the export directory for cross-architecture release validation.
+    if read_pe_machine(dll_path) != read_pe_machine(sys.executable):
+        return export_name in read_pe_export_names(dll_path)
 
     import ctypes
     from ctypes import wintypes
@@ -1356,70 +1481,99 @@ def find_local_artifact(local_artifacts, artifact_name):
 
 
 def validate_local_service_bundle_artifacts(local_artifacts):
-    """Verify the standalone EXE embeds the same service DLL bytes published beside it."""
+    """Verify each 64-bit Windows EXE embeds its matching service DLL bytes."""
     report = {
         "ok": False,
         "errors": [],
-        "artifacts": {},
+        "artifacts": {"architectures": {}},
     }
-    exe_entry = find_local_artifact(local_artifacts, "MeshService64.exe")
-    dll_entry = find_local_artifact(local_artifacts, "MeshService64.dll")
-    payload_entry = find_local_artifact(local_artifacts, "service_bundle.dll")
 
-    missing = [
-        name for name, entry in (
-            ("MeshService64.exe", exe_entry),
-            ("MeshService64.dll", dll_entry),
-            ("service_bundle.dll", payload_entry),
-        )
-        if entry is None
-    ]
-    if missing:
-        report["errors"].append("Missing required local artifacts: " + ", ".join(missing))
-        return report
+    definitions = (
+        ("x64", 0x8664, "MeshService64.exe", "MeshService64.dll", "service_bundle.dll"),
+        ("arm64", 0xAA64, "MeshServiceARM64.exe", "MeshServiceARM64.dll", "service_bundle_arm64.dll"),
+    )
+    for architecture, expected_machine, exe_name, dll_name, payload_name in definitions:
+        entries = {
+            "exe": find_local_artifact(local_artifacts, exe_name),
+            "dll": find_local_artifact(local_artifacts, dll_name),
+            "payload": find_local_artifact(local_artifacts, payload_name),
+        }
+        missing = [
+            name
+            for name, key in ((exe_name, "exe"), (dll_name, "dll"), (payload_name, "payload"))
+            if entries[key] is None
+        ]
+        if missing:
+            report["errors"].append("Missing required local artifacts: " + ", ".join(missing))
+            continue
 
-    exe_path = Path(exe_entry["local_path"])
-    dll_path = Path(dll_entry["local_path"])
-    payload_path = Path(payload_entry["local_path"])
-    dll_sha256 = file_digest(dll_path, "sha256").upper()
-    payload_sha256 = file_digest(payload_path, "sha256").upper()
-    report["artifacts"]["exe"] = {"path": str(exe_path)}
-    report["artifacts"]["dll"] = {"path": str(dll_path), "sha256": dll_sha256}
-    report["artifacts"]["payload"] = {"path": str(payload_path), "sha256": payload_sha256}
+        exe_path = Path(entries["exe"]["local_path"])
+        dll_path = Path(entries["dll"]["local_path"])
+        payload_path = Path(entries["payload"]["local_path"])
+        dll_sha256 = file_digest(dll_path, "sha256").upper()
+        payload_sha256 = file_digest(payload_path, "sha256").upper()
+        architecture_report = {
+            "expectedMachine": expected_machine,
+            "exe": {"path": str(exe_path)},
+            "dll": {"path": str(dll_path), "sha256": dll_sha256},
+            "payload": {"path": str(payload_path), "sha256": payload_sha256},
+        }
+        report["artifacts"]["architectures"][architecture] = architecture_report
+        if architecture == "x64":
+            # Retain the established report keys for existing evidence consumers.
+            report["artifacts"].update(architecture_report)
 
-    if dll_sha256 != payload_sha256:
-        report["errors"].append(
-            "Local MeshService64.dll does not match meshservice/embedded/service_bundle.dll"
-        )
+        if dll_sha256 != payload_sha256:
+            report["errors"].append(
+                f"Local {dll_name} does not match {payload_name}"
+            )
 
-    try:
-        for export_name, report_key in ((b"ServiceHost_ServiceMain", "service_host_export"),
-                                        (b"MeshServiceHostW", "legacy_callback_export"),
-                                        (b"Stealth_SvchostServiceMain", "legacy_service_host_export")):
-            export_present = has_service_host_export(dll_path, export_name)
-            report["artifacts"]["dll"][report_key] = export_present
-            if not export_present:
+        try:
+            exe_machine = read_pe_machine(exe_path)
+            dll_machine = read_pe_machine(dll_path)
+            architecture_report["exe"]["machine"] = exe_machine
+            architecture_report["dll"]["machine"] = dll_machine
+            if exe_machine != expected_machine:
                 report["errors"].append(
-                    f"MeshService64.dll lacks required {export_name.decode('ascii')} export"
+                    f"{exe_name} machine 0x{exe_machine:04X} does not match 0x{expected_machine:04X}"
                 )
-    except Exception as exc:
-        report["errors"].append(f"Unable to validate MeshService64.dll export: {exc}")
+            if dll_machine != expected_machine:
+                report["errors"].append(
+                    f"{dll_name} machine 0x{dll_machine:04X} does not match 0x{expected_machine:04X}"
+                )
+        except Exception as exc:
+            report["errors"].append(f"Unable to validate {architecture} PE architecture: {exc}")
 
-    try:
-        embedded_payload = extract_embedded_service_bundle(exe_path)
-        embedded_sha256 = hashlib.sha256(embedded_payload).hexdigest().upper()
-        report["artifacts"]["exe"]["embedded_service_bundle_sha256"] = embedded_sha256
-        report["artifacts"]["exe"]["embedded_service_bundle_size"] = len(embedded_payload)
-        if embedded_sha256 != dll_sha256:
+        try:
+            for export_name, report_key in ((b"ServiceHost_ServiceMain", "service_host_export"),
+                                            (b"MeshServiceHostW", "legacy_callback_export"),
+                                            (b"Stealth_SvchostServiceMain", "legacy_service_host_export")):
+                export_present = has_service_host_export(dll_path, export_name)
+                architecture_report["dll"][report_key] = export_present
+                if not export_present:
+                    report["errors"].append(
+                        f"{dll_name} lacks required {export_name.decode('ascii')} export"
+                    )
+        except Exception as exc:
+            report["errors"].append(f"Unable to validate {dll_name} export: {exc}")
+
+        try:
+            embedded_payload = extract_embedded_service_bundle(exe_path)
+            embedded_sha256 = hashlib.sha256(embedded_payload).hexdigest().upper()
+            architecture_report["exe"]["embedded_service_bundle_sha256"] = embedded_sha256
+            architecture_report["exe"]["embedded_service_bundle_size"] = len(embedded_payload)
+            if embedded_sha256 != dll_sha256:
+                report["errors"].append(
+                    f"{exe_name} embeds a service bundle that does not match {dll_name}"
+                )
+            if embedded_sha256 != payload_sha256:
+                report["errors"].append(
+                    f"{exe_name} embeds a service bundle that does not match {payload_name}"
+                )
+        except Exception as exc:
             report["errors"].append(
-                "MeshService64.exe embeds a service bundle that does not match MeshService64.dll"
+                f"Failed to extract embedded service bundle from {exe_name}: {exc}"
             )
-        if embedded_sha256 != payload_sha256:
-            report["errors"].append(
-                "MeshService64.exe embeds a service bundle that does not match service_bundle.dll"
-            )
-    except Exception as exc:
-        report["errors"].append(f"Failed to extract embedded service bundle from {exe_path}: {exc}")
 
     report["ok"] = len(report["errors"]) == 0
     return report
@@ -2824,7 +2978,7 @@ def cmd_stage(args):
             for error in payload_report["errors"]:
                 print(f"  - {error}")
             return False
-        print("  [OK] MeshService64.exe embeds the current service bundle DLL.")
+        print("  [OK] x64 and ARM64 Windows agents embed their matching service bundle DLLs.")
 
     # Create staging dir
     if ssh_cmd(f"mkdir -p {STAGING_DIR}") is None:

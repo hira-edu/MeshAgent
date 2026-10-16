@@ -92,44 +92,71 @@ function main(options = {}) {
     const args = parseArgs(process.argv);
     const legacyEvidence = options.legacyEvidence === true || args['legacy-evidence-schema'] === true;
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const exePath = path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
-    const dllPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
+    const requestedArchitecture = args.architecture ? String(args.architecture).toLowerCase() : null;
+    if (requestedArchitecture != null && !['x64', 'arm64'].includes(requestedArchitecture)) {
+        throw new Error(`unsupported architecture: ${requestedArchitecture}`);
+    }
+    const allDefinitions = [
+        ['x64', path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe'), path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll')],
+        ['arm64', path.resolve('meshservice', 'ARM64', 'MeshServiceRuntime', 'MeshService-2022.exe'), path.resolve('meshservice', 'ARM64', 'MeshServiceBundle', 'MeshService-2022.dll')]
+    ];
+    const definitions = legacyEvidence ? allDefinitions.slice(0, 1) :
+        (requestedArchitecture == null ? allDefinitions : allDefinitions.filter(([architecture]) => architecture === requestedArchitecture));
+    const architectures = {};
 
-    assert(fs.existsSync(exePath), `missing x64 agent package: ${exePath}`);
-    assert(fs.existsSync(dllPath), `missing x64 service bundle DLL: ${dllPath}`);
+    for (const [architecture, exePath, dllPath] of definitions) {
+        assert(fs.existsSync(exePath), `missing ${architecture} agent package: ${exePath}`);
+        assert(fs.existsSync(dllPath), `missing ${architecture} service bundle DLL: ${dllPath}`);
 
-    const embedded = extractEmbeddedServiceBundle(exePath);
-    const dllSha256 = sha256File(dllPath);
-    const dllSize = fs.statSync(dllPath).size;
-    const checks = legacyEvidence ?
-        buildLegacyChecks(embedded, dllSha256, dllSize) :
-        buildChecks(embedded, dllSha256, dllSize);
+        const embedded = extractEmbeddedServiceBundle(exePath);
+        const dllSha256 = sha256File(dllPath);
+        const dllSize = fs.statSync(dllPath).size;
+        const checks = legacyEvidence ?
+            buildLegacyChecks(embedded, dllSha256, dllSize) :
+            buildChecks(embedded, dllSha256, dllSize);
 
-    for (const [name, passed] of Object.entries(checks)) {
-        assert(passed, `${name} failed`);
+        for (const [name, passed] of Object.entries(checks)) {
+            assert(passed, `${architecture}.${name} failed`);
+        }
+        architectures[architecture] = {
+            exePath,
+            dllPath,
+            embedded,
+            dll: { size: dllSize, sha256: dllSha256 },
+            checks
+        };
     }
 
-    const report = {
+    const report = legacyEvidence ? {
         generatedUtc: new Date().toISOString(),
-        exePath,
-        dllPath,
-        embedded,
-        dll: {
-            size: dllSize,
-            sha256: dllSha256
-        },
-        checks
+        exePath: architectures.x64.exePath,
+        dllPath: architectures.x64.dllPath,
+        embedded: architectures.x64.embedded,
+        dll: architectures.x64.dll,
+        checks: architectures.x64.checks
+    } : {
+        generatedUtc: new Date().toISOString(),
+        architectures
     };
 
     if (evidenceDir) {
         writeJson(path.join(evidenceDir, 'service_bundle_embedding_contract.json'), report);
-        writeText(path.join(evidenceDir, 'summary.txt'), [
+        const summary = legacyEvidence ? [
             `GENERATED_UTC=${report.generatedUtc}`,
-            `EXE=${exePath}`,
-            `DLL=${dllPath}`,
+            `EXE=${report.exePath}`,
+            `DLL=${report.dllPath}`,
             'SUCCESS=true',
-            `CHECKS=${Object.entries(checks).map(([name, passed]) => `${name}:${passed}`).join(',')}`
-        ].join('\n') + '\n');
+            `CHECKS=${Object.entries(report.checks).map(([name, passed]) => `${name}:${passed}`).join(',')}`
+        ] : [
+            `GENERATED_UTC=${report.generatedUtc}`,
+            ...Object.entries(architectures).flatMap(([architecture, result]) => [
+                `${architecture.toUpperCase()}_EXE=${result.exePath}`,
+                `${architecture.toUpperCase()}_DLL=${result.dllPath}`
+            ]),
+            'SUCCESS=true',
+            `CHECKS=${Object.entries(architectures).flatMap(([architecture, result]) => Object.entries(result.checks).map(([name, passed]) => `${architecture}.${name}:${passed}`)).join(',')}`
+        ];
+        writeText(path.join(evidenceDir, 'summary.txt'), summary.join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');
     }

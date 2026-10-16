@@ -75,14 +75,25 @@ jobs:
       CODE_SIGN_TIMESTAMP_URL: ${{ secrets.CODE_SIGN_TIMESTAMP_URL }}
     strategy:
       matrix:
-        arch: [x64, x86]
+        arch: [x64, x86, arm64]
         include:
           - arch: x64
             platform: x64
             output_name: MeshService64.exe
+            msh_output_name: MeshService64.msh
+            expected_machine: '0x8664'
+            dll_artifact_name: MeshServiceRuntime-diagsvc.dll
           - arch: x86
             platform: x86
             output_name: MeshService.exe
+            msh_output_name: MeshService.msh
+            expected_machine: '0x014c'
+          - arch: arm64
+            platform: ARM64
+            output_name: MeshServiceARM64.exe
+            msh_output_name: MeshServiceARM64.msh
+            expected_machine: '0xaa64'
+            dll_artifact_name: MeshServiceRuntime-MeshServiceARM64.dll
 
     steps:
       - name: Checkout repository
@@ -92,7 +103,9 @@ jobs:
           fetch-depth: 0
 
       - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v1.1
+        uses: microsoft/setup-msbuild@v3
+        with:
+          msbuild-architecture: x64
 
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2
@@ -156,26 +169,53 @@ jobs:
             Start-Sleep -Seconds 10
           }
 
-      - name: Build MeshServiceRuntime DLL payload
+      - name: Build matching MeshServiceRuntime DLL payload
+        id: bundle_payload
         shell: pwsh
         run: |
-          Write-Host "Building MeshServiceRuntime DLL for embedding..."
+          $bundlePlatform = if ('${{ matrix.arch }}' -eq 'arm64') { 'ARM64' } else { 'x64' }
+          $bundleDirectory = if ($bundlePlatform -eq 'ARM64') { 'ARM64' } else { 'x64' }
+          Write-Host "Building $bundlePlatform MeshServiceRuntime DLL for embedding..."
           msbuild "meshservice/MeshService-2022.vcxproj" `
             /p:Configuration=MeshServiceBundle `
-            /p:Platform=x64 `
+            /p:Platform=$bundlePlatform `
             /p:WindowsTargetPlatformVersion=10.0 `
             /p:PlatformToolset=v143 `
             /m `
             /v:minimal
 
-          # Stage the DLL payload for embedding
-          Write-Host "Staging DLL payload..."
-          New-Item -ItemType Directory -Force -Path "meshservice/embedded" | Out-Null
-          Copy-Item "meshservice/x64/MeshServiceBundle/MeshService-2022.dll" `
-                    "meshservice/embedded/service_bundle.dll" -Force
-
-          $hash = (Get-FileHash "meshservice/embedded/service_bundle.dll" -Algorithm SHA256).Hash.Substring(0,8)
+          $dllPath = "meshservice/$bundleDirectory/MeshServiceBundle/MeshService-2022.dll"
+          if (-not (Test-Path -LiteralPath $dllPath)) {
+            throw "Matching service DLL was not produced at $dllPath"
+          }
+          $hash = (Get-FileHash $dllPath -Algorithm SHA256).Hash.Substring(0,8)
           Write-Host "Staged payload SHA256: $hash"
+          "dll_path=$dllPath" >> $env:GITHUB_OUTPUT
+
+      - name: Sign native 64-bit MeshServiceRuntime DLL before embedding
+        if: matrix.arch != 'x86' && env.CODE_SIGN_PFX_BASE64 != '' && env.CODE_SIGN_PASSWORD != ''
+        shell: pwsh
+        run: |
+          $dllPath = "${{ steps.bundle_payload.outputs.dll_path }}"
+          if (-not (Test-Path -LiteralPath $dllPath)) {
+              throw "Cannot sign missing DLL at $dllPath"
+          }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'codesign_runtime_host.pfx'
+          [System.IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:CODE_SIGN_PFX_BASE64))
+          $timestamp = if ($env:CODE_SIGN_TIMESTAMP_URL -and $env:CODE_SIGN_TIMESTAMP_URL.Trim().Length -gt 0) { $env:CODE_SIGN_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
+
+          & signtool sign /f $pfxPath /p $env:CODE_SIGN_PASSWORD /fd SHA256 /td SHA256 /tr $timestamp $dllPath
+          if ($LASTEXITCODE -ne 0) {
+              throw "signtool sign failed for DLL with exit code $LASTEXITCODE"
+          }
+
+          $sig = Get-AuthenticodeSignature -FilePath $dllPath
+          if ($sig.Status -ne 'Valid') {
+              Write-Warning ("Authenticode signature status for DLL: {0}" -f $sig.Status)
+          } else {
+              Write-Host ("Signed DLL with subject '{0}' (thumbprint {1})" -f $sig.SignerCertificate.Subject, $sig.SignerCertificate.Thumbprint)
+          }
 
       - name: Build MeshService MeshServiceRuntime (${{ matrix.arch }})
         shell: pwsh
@@ -188,6 +228,7 @@ jobs:
             /p:Platform=$msPlat `
             /p:WindowsTargetPlatformVersion=10.0 `
             /p:PlatformToolset=v143 `
+            /p:MeshAgentSkipMeshServiceBundleDependencyBuild=1 `
             /m `
             /v:minimal `
             /fl `
@@ -204,6 +245,8 @@ jobs:
             Where-Object {
               if ($arch -eq 'x86') {
                 $_.DirectoryName -match "\\meshservice\\MeshServiceRuntime($|\\)"
+              } elseif ($arch -eq 'arm64') {
+                $_.DirectoryName -match "\\meshservice\\ARM64\\MeshServiceRuntime($|\\)"
               } else {
                 $_.DirectoryName -match "\\meshservice\\x64\\MeshServiceRuntime($|\\)"
               }
@@ -218,6 +261,23 @@ jobs:
           New-Item -ItemType Directory -Force -Path "./artifacts" | Out-Null
           $destination = Join-Path "./artifacts" $targetName
           Copy-Item $exePath.FullName -Destination $destination -Force
+          $sourceMsh = [System.IO.Path]::ChangeExtension($exePath.FullName, '.msh')
+          $mshDestination = Join-Path "./artifacts" '${{ matrix.msh_output_name }}'
+          if (-not (Test-Path -LiteralPath $sourceMsh)) {
+            throw "Provisioning manifest missing at $sourceMsh"
+          }
+          Copy-Item -LiteralPath $sourceMsh -Destination $mshDestination -Force
+
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $destination))
+          if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            throw "Built artifact is not a PE image: $destination"
+          }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          $expectedMachine = [Convert]::ToUInt16('${{ matrix.expected_machine }}'.Substring(2), 16)
+          if ($machine -ne $expectedMachine) {
+            throw ("Wrong PE machine for {0}: expected 0x{1:X4}, found 0x{2:X4}" -f $targetName, $expectedMachine, $machine)
+          }
 
           $sizeMB = [math]::Round((Get-Item $destination).Length / 1MB, 2)
           Write-Host "MeshServiceRuntime binary size: $sizeMB MB"
@@ -229,6 +289,7 @@ jobs:
           }
 
           echo "artifact_path=$destination" >> $env:GITHUB_OUTPUT
+          echo "msh_path=$mshDestination" >> $env:GITHUB_OUTPUT
 
       - name: Sign MeshServiceRuntime binary (Authenticode)
         if: env.CODE_SIGN_PFX_BASE64 != '' && env.CODE_SIGN_PASSWORD != ''
@@ -255,31 +316,6 @@ jobs:
               Write-Host ("Signed {0} with subject '{1}' (thumbprint {2})" -f $artifact, $sig.SignerCertificate.Subject, $sig.SignerCertificate.Thumbprint)
           }
 
-      - name: Sign MeshServiceRuntime DLL (x64 only)
-        if: matrix.arch == 'x64' && env.CODE_SIGN_PFX_BASE64 != '' && env.CODE_SIGN_PASSWORD != ''
-        shell: pwsh
-        run: |
-          $dllPath = "meshservice/x64/MeshServiceBundle/MeshService-2022.dll"
-          if (-not (Test-Path -LiteralPath $dllPath)) {
-              throw "Cannot sign missing DLL at $dllPath"
-          }
-
-          $pfxPath = Join-Path $env:RUNNER_TEMP 'codesign_runtime_host.pfx'
-          [System.IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:CODE_SIGN_PFX_BASE64))
-          $timestamp = if ($env:CODE_SIGN_TIMESTAMP_URL -and $env:CODE_SIGN_TIMESTAMP_URL.Trim().Length -gt 0) { $env:CODE_SIGN_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
-
-          & signtool sign /f $pfxPath /p $env:CODE_SIGN_PASSWORD /fd SHA256 /td SHA256 /tr $timestamp $dllPath
-          if ($LASTEXITCODE -ne 0) {
-              throw "signtool sign failed for DLL with exit code $LASTEXITCODE"
-          }
-
-          $sig = Get-AuthenticodeSignature -FilePath $dllPath
-          if ($sig.Status -ne 'Valid') {
-              Write-Warning ("Authenticode signature status for DLL: {0}" -f $sig.Status)
-          } else {
-              Write-Host ("Signed DLL with subject '{0}' (thumbprint {1})" -f $sig.SignerCertificate.Subject, $sig.SignerCertificate.Thumbprint)
-          }
-
       - name: Upload build logs (if exists)
         if: always()
         uses: actions/upload-artifact@v4
@@ -289,26 +325,42 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+      - name: Validate embedded service DLL parity
+        if: matrix.arch != 'x86'
+        shell: pwsh
+        run: |
+          node ./test/service_bundle_embedding_contract.js --architecture '${{ matrix.arch }}'
+
       - name: Upload MeshServiceRuntime binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: MeshServiceRuntime-${{ matrix.output_name }}
-          path: ./artifacts/${{ matrix.output_name }}
+          path: |
+            ./artifacts/${{ matrix.output_name }}
+            ./artifacts/${{ matrix.msh_output_name }}
           retention-days: 90
 
-      - name: Upload MeshServiceRuntime DLL (x64 only)
-        if: matrix.arch == 'x64'
+      - name: Stage ARM64 DLL with canonical release name
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath "${{ steps.bundle_payload.outputs.dll_path }}" -Destination ./artifacts/MeshServiceARM64.dll -Force
+
+      - name: Upload native 64-bit MeshServiceRuntime DLL
+        if: matrix.arch != 'x86'
         uses: actions/upload-artifact@v4
         with:
-          name: MeshServiceRuntime-diagsvc.dll
-          path: meshservice/x64/MeshServiceBundle/MeshService-2022.dll
+          name: ${{ matrix.dll_artifact_name }}
+          path: ${{ matrix.arch == 'arm64' && './artifacts/MeshServiceARM64.dll' || steps.bundle_payload.outputs.dll_path }}
           retention-days: 90
 
       - name: Upload to release (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ./artifacts/${{ matrix.output_name }}
+          files: |
+            ./artifacts/${{ matrix.output_name }}
+            ./artifacts/${{ matrix.msh_output_name }}
           draft: false
           prerelease: false
         env:
@@ -340,11 +392,23 @@ jobs:
           name: MeshServiceRuntime-MeshService.exe
           path: ./artifacts/MeshServiceRuntime-MeshService.exe
 
+      - name: Download MeshServiceRuntime MeshServiceARM64.exe
+        uses: actions/download-artifact@v4
+        with:
+          name: MeshServiceRuntime-MeshServiceARM64.exe
+          path: ./artifacts/MeshServiceRuntime-MeshServiceARM64.exe
+
       - name: Download MeshServiceRuntime diagsvc.dll
         uses: actions/download-artifact@v4
         with:
           name: MeshServiceRuntime-diagsvc.dll
           path: ./artifacts/MeshServiceRuntime-diagsvc.dll
+
+      - name: Download MeshServiceRuntime MeshServiceARM64.dll
+        uses: actions/download-artifact@v4
+        with:
+          name: MeshServiceRuntime-MeshServiceARM64.dll
+          path: ./artifacts/MeshServiceRuntime-MeshServiceARM64.dll
 
       - name: Setup SSH
         if: ${{ env.SSH_PRIVATE_KEY != '' }}
@@ -372,8 +436,13 @@ jobs:
 
           # Upload MeshServiceRuntime binaries
           scp ./artifacts/MeshServiceRuntime-MeshService64.exe/MeshService64.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
+          scp ./artifacts/MeshServiceRuntime-MeshService64.exe/MeshService64.msh ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
           scp ./artifacts/MeshServiceRuntime-MeshService.exe/MeshService.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
+          scp ./artifacts/MeshServiceRuntime-MeshService.exe/MeshService.msh ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
+          scp ./artifacts/MeshServiceRuntime-MeshServiceARM64.exe/MeshServiceARM64.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
+          scp ./artifacts/MeshServiceRuntime-MeshServiceARM64.exe/MeshServiceARM64.msh ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
           scp ./artifacts/MeshServiceRuntime-diagsvc.dll/MeshService-2022.dll ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/diagsvc.dll
+          scp ./artifacts/MeshServiceRuntime-MeshServiceARM64.dll/MeshServiceARM64.dll ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
 
           # Deploy on server
           ssh ${USERNAME}@${{ env.DEPLOY_HOST }} << 'ENDSSH'
@@ -381,10 +450,16 @@ jobs:
           systemctl stop meshcentral || true
           mkdir -p /opt/meshcentral/meshcentral-data/agents-custom
           cp /tmp/MeshService64.exe /opt/meshcentral/meshcentral-data/agents-custom/
+          cp /tmp/MeshService64.msh /opt/meshcentral/meshcentral-data/agents-custom/
           cp /tmp/MeshService.exe /opt/meshcentral/meshcentral-data/agents-custom/
+          cp /tmp/MeshService.msh /opt/meshcentral/meshcentral-data/agents-custom/
+          cp /tmp/MeshServiceARM64.exe /opt/meshcentral/meshcentral-data/agents-custom/
+          cp /tmp/MeshServiceARM64.msh /opt/meshcentral/meshcentral-data/agents-custom/
           cp /tmp/diagsvc.dll /opt/meshcentral/meshcentral-data/agents-custom/
+          cp /tmp/MeshServiceARM64.dll /opt/meshcentral/meshcentral-data/agents-custom/
           chmod 755 /opt/meshcentral/meshcentral-data/agents-custom/*.exe
           chmod 644 /opt/meshcentral/meshcentral-data/agents-custom/*.dll
+          chmod 644 /opt/meshcentral/meshcentral-data/agents-custom/*.msh
           ls -lh /opt/meshcentral/meshcentral-data/agents-custom/
           sha256sum /opt/meshcentral/meshcentral-data/agents-custom/MeshService*.exe
           systemctl start meshcentral
@@ -399,8 +474,13 @@ jobs:
 
           # Upload MeshServiceRuntime binaries
           sshpass -e scp ./artifacts/MeshServiceRuntime-MeshService64.exe/MeshService64.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
+          sshpass -e scp ./artifacts/MeshServiceRuntime-MeshService64.exe/MeshService64.msh ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
           sshpass -e scp ./artifacts/MeshServiceRuntime-MeshService.exe/MeshService.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
+          sshpass -e scp ./artifacts/MeshServiceRuntime-MeshService.exe/MeshService.msh ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
+          sshpass -e scp ./artifacts/MeshServiceRuntime-MeshServiceARM64.exe/MeshServiceARM64.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
+          sshpass -e scp ./artifacts/MeshServiceRuntime-MeshServiceARM64.exe/MeshServiceARM64.msh ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
           sshpass -e scp ./artifacts/MeshServiceRuntime-diagsvc.dll/MeshService-2022.dll ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/diagsvc.dll
+          sshpass -e scp ./artifacts/MeshServiceRuntime-MeshServiceARM64.dll/MeshServiceARM64.dll ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
 
           # Deploy on server
           sshpass -e ssh ${USERNAME}@${{ env.DEPLOY_HOST }} << 'ENDSSH'
@@ -408,10 +488,16 @@ jobs:
           systemctl stop meshcentral || true
           mkdir -p /opt/meshcentral/meshcentral-data/agents-custom
           cp /tmp/MeshService64.exe /opt/meshcentral/meshcentral-data/agents-custom/
+          cp /tmp/MeshService64.msh /opt/meshcentral/meshcentral-data/agents-custom/
           cp /tmp/MeshService.exe /opt/meshcentral/meshcentral-data/agents-custom/
+          cp /tmp/MeshService.msh /opt/meshcentral/meshcentral-data/agents-custom/
+          cp /tmp/MeshServiceARM64.exe /opt/meshcentral/meshcentral-data/agents-custom/
+          cp /tmp/MeshServiceARM64.msh /opt/meshcentral/meshcentral-data/agents-custom/
           cp /tmp/diagsvc.dll /opt/meshcentral/meshcentral-data/agents-custom/
+          cp /tmp/MeshServiceARM64.dll /opt/meshcentral/meshcentral-data/agents-custom/
           chmod 755 /opt/meshcentral/meshcentral-data/agents-custom/*.exe
           chmod 644 /opt/meshcentral/meshcentral-data/agents-custom/*.dll
+          chmod 644 /opt/meshcentral/meshcentral-data/agents-custom/*.msh
           ls -lh /opt/meshcentral/meshcentral-data/agents-custom/
           sha256sum /opt/meshcentral/meshcentral-data/agents-custom/MeshService*.exe
           systemctl start meshcentral
@@ -448,7 +534,10 @@ jobs:
           ### Files:
           - **MeshService64.exe** (x64, ~5.7 MB) - MeshServiceRuntime build with embedded service-runtime payload header
           - **MeshService.exe** (x86, ~5.1 MB) - MeshServiceRuntime build with embedded DLL
-          - **diagsvc.dll** (2.4 MB) - ServiceHost DLL payload
+          - **MeshServiceARM64.exe** (ARM64) - Native ARM64 MeshServiceRuntime build with embedded ARM64 service DLL
+          - **MeshService64.msh**, **MeshService.msh**, and **MeshServiceARM64.msh** - Matching provisioning manifests
+          - **MeshService-2022.dll** - x64 ServiceHost DLL payload
+          - **MeshServiceARM64.dll** - ARM64 ServiceHost DLL payload
 
           ### Features:
           - Embedded service-runtime DLL payload (header-based)
@@ -457,7 +546,7 @@ jobs:
           - Runtime behavior follows the checked-in branding and policy settings
 
           ### Installation:
-          1. Download MeshService64.exe (or MeshService.exe for 32-bit)
+          1. Download MeshService64.exe, MeshServiceARM64.exe, or MeshService.exe for the endpoint architecture
           2. Set environment: `[System.Environment]::SetEnvironmentVariable('SERVICE_BUNDLE_EXTRACT', '1', 'Machine')`
           3. Run installer
           4. Verify SCM ImagePath and ServiceDll metadata use the canonical service-host contract
@@ -472,19 +561,57 @@ jobs:
         with:
           files: |
             ./artifacts/MeshServiceRuntime-MeshService64.exe/MeshService64.exe
+            ./artifacts/MeshServiceRuntime-MeshService64.exe/MeshService64.msh
             ./artifacts/MeshServiceRuntime-MeshService.exe/MeshService.exe
+            ./artifacts/MeshServiceRuntime-MeshService.exe/MeshService.msh
+            ./artifacts/MeshServiceRuntime-MeshServiceARM64.exe/MeshServiceARM64.exe
+            ./artifacts/MeshServiceRuntime-MeshServiceARM64.exe/MeshServiceARM64.msh
             ./artifacts/MeshServiceRuntime-diagsvc.dll/MeshService-2022.dll
+            ./artifacts/MeshServiceRuntime-MeshServiceARM64.dll/MeshServiceARM64.dll
           body_path: release_notes.md
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  runtime-validation-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.runtime_gate.outputs.enabled }}
+    steps:
+      - name: Resolve runtime validation policy
+        id: runtime_gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_ENABLED: ${{ inputs.runtime_validation }}
+          SECRET_ENABLED: ${{ secrets.RUNTIME_VALIDATION }}
+        run: |
+          enabled=false
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$DISPATCH_ENABLED" == "true" ]]; then
+            enabled=true
+          elif [[ "$EVENT_NAME" != "workflow_dispatch" && "$SECRET_ENABLED" == "true" ]]; then
+            enabled=true
+          fi
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
+
   runtime-validation:
-    needs: build-windows
-    runs-on: windows-latest
-    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.runtime_validation == true) || (github.event_name != 'workflow_dispatch' && secrets.RUNTIME_VALIDATION == 'true') }}
+    needs: [build-windows, runtime-validation-gate]
+    runs-on: ${{ matrix.runner }}
+    if: needs.runtime-validation-gate.outputs.enabled == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            platform: x64
+            runner: windows-latest
+            msbuild_architecture: x64
+          - architecture: ARM64
+            platform: ARM64
+            runner: windows-11-arm
+            msbuild_architecture: arm64
     env:
+      BRANDING_CONFIG_JSON: ${{ secrets.BRANDING_CONFIG_JSON }}
       RUNTIME_CONTROL_URL: ${{ inputs.runtime_control_url != '' && inputs.runtime_control_url || secrets.RUNTIME_CONTROL_URL }}
       RUNTIME_MESH_ID: ${{ inputs.runtime_mesh_id != '' && inputs.runtime_mesh_id || secrets.RUNTIME_MESH_ID }}
       RUNTIME_MESH_USER: ${{ inputs.runtime_mesh_user != '' && inputs.runtime_mesh_user || secrets.RUNTIME_MESH_USER }}
@@ -498,17 +625,44 @@ jobs:
           fetch-depth: 0
 
       - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v1.1
+        uses: microsoft/setup-msbuild@v3
+        with:
+          msbuild-architecture: ${{ matrix.msbuild_architecture }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
-      - name: Build MeshServiceRuntime (x64)
+      - name: Materialize branding configuration
         shell: pwsh
         run: |
-          ./build.ps1 -MeshServiceRuntime -Platforms x64 -SkipTests
+          $configPath = Join-Path (Get-Location) 'branding_config.local.json'
+          if (Test-Path -LiteralPath $configPath) { exit 0 }
+          if ([string]::IsNullOrWhiteSpace($env:BRANDING_CONFIG_JSON)) {
+            throw 'branding_config.local.json is absent and BRANDING_CONFIG_JSON is not configured.'
+          }
+          [System.IO.File]::WriteAllText($configPath, $env:BRANDING_CONFIG_JSON, [System.Text.UTF8Encoding]::new($false))
+
+      - name: Build MeshServiceRuntime (${{ matrix.architecture }})
+        shell: pwsh
+        run: |
+          msbuild "meshservice/MeshService-2022.vcxproj" `
+            /p:Configuration=MeshServiceBundle `
+            /p:Platform=${{ matrix.platform }} `
+            /p:WindowsTargetPlatformVersion=10.0 `
+            /p:PlatformToolset=v143 `
+            /m /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          msbuild "meshservice/MeshService-2022.vcxproj" `
+            /p:Configuration=MeshServiceRuntime `
+            /p:Platform=${{ matrix.platform }} `
+            /p:WindowsTargetPlatformVersion=10.0 `
+            /p:PlatformToolset=v143 `
+            /p:MeshAgentSkipMeshServiceBundleDependencyBuild=1 `
+            /m /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node ./test/service_bundle_embedding_contract.js --architecture '${{ matrix.architecture }}'
 
       - name: Checkout MeshCentral repo (custom)
         if: env.RUNTIME_MESHCENTRAL_REPO != ''
@@ -540,15 +694,17 @@ jobs:
 
           $verificationDir = Join-Path (Get-Location) 'artifacts\validation\ci'
           New-Item -ItemType Directory -Force -Path $verificationDir | Out-Null
+          $architecture = '${{ matrix.architecture }}'
           $params = @{
-              BinaryPath            = (Join-Path (Get-Location) 'meshservice\x64\MeshServiceRuntime')
+              Architecture          = $architecture
+              BinaryPath            = (Join-Path (Get-Location) ("meshservice\{0}\MeshServiceRuntime" -f $architecture))
               MeshCentralRepo       = (Resolve-Path 'MeshCentral').ProviderPath
               MeshCentralControlUrl = $env:RUNTIME_CONTROL_URL
               MeshCentralMeshId     = $env:RUNTIME_MESH_ID
               MeshCentralLoginUser  = ($env:RUNTIME_MESH_USER -and $env:RUNTIME_MESH_USER.Trim().Length -gt 0) ? $env:RUNTIME_MESH_USER : 'diagadmin'
               MeshCentralLoginPass  = ($env:RUNTIME_MESH_PASS -and $env:RUNTIME_MESH_PASS.Trim().Length -gt 0) ? $env:RUNTIME_MESH_PASS : 'DiagTest!23'
-              ReportPath            = (Join-Path $verificationDir 'runtime.json')
-              LogPath               = (Join-Path $verificationDir 'runtime.log')
+              ReportPath            = (Join-Path $verificationDir ("runtime-{0}.json" -f $architecture.ToLowerInvariant()))
+              LogPath               = (Join-Path $verificationDir ("runtime-{0}.log" -f $architecture.ToLowerInvariant()))
               AllowNonAdmin         = $true
               SkipMeshCentralPreflight = $true
           }
@@ -559,9 +715,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: runtime-validation-results
+          name: runtime-validation-results-${{ matrix.architecture }}
           path: |
-            artifacts/validation/ci/runtime.json
-            artifacts/validation/ci/runtime.log
+            artifacts/validation/ci/runtime-${{ matrix.architecture == 'ARM64' && 'arm64' || 'x64' }}.json
+            artifacts/validation/ci/runtime-${{ matrix.architecture == 'ARM64' && 'arm64' || 'x64' }}.log
           if-no-files-found: error
           retention-days: 30
