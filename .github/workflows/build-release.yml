@@ -767,6 +767,19 @@ jobs:
           repository: hira-edu/MeshCentral
           path: MeshCentral
 
+      - name: Expose MeshCentral checkout at the sibling contract path
+        shell: pwsh
+        run: |
+          $target = (Resolve-Path -LiteralPath 'MeshCentral').ProviderPath
+          $workspaceParent = Split-Path -Parent $env:GITHUB_WORKSPACE
+          $sibling = Join-Path $workspaceParent 'MeshCentral'
+          if (Test-Path -LiteralPath $sibling) {
+            $existing = Get-Item -LiteralPath $sibling -Force
+            if ($existing.Target -contains $target) { exit 0 }
+            throw "Unexpected path already exists at $sibling"
+          }
+          New-Item -ItemType Junction -Path $sibling -Target $target | Out-Null
+
       - name: Run runtime validation
         id: runtime_validation
         shell: pwsh
