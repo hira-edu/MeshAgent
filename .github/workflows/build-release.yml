@@ -68,7 +68,7 @@ env:
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
     defaults:
       run:
         working-directory: MeshAgent
@@ -628,7 +628,7 @@ jobs:
         include:
           - architecture: x64
             platform: x64
-            runner: windows-latest
+            runner: windows-2022
             msbuild_architecture: x64
           - architecture: ARM64
             platform: ARM64

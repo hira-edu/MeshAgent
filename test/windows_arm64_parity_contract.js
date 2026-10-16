@@ -151,6 +151,8 @@ for (const required of [
     'output_name: MeshServiceARM64.exe',
     'msh_output_name: MeshServiceARM64.msh',
     'MeshServiceRuntime-MeshServiceARM64.dll',
+    'runs-on: windows-2022',
+    'runner: windows-2022',
     'windows-11-arm',
     'architecture: ARM64',
     'Architecture          = $architecture',
@@ -159,6 +161,7 @@ for (const required of [
 ]) {
     assert(releaseWorkflow.includes(required), `release workflow omits ARM64 parity marker: ${required}`);
 }
+assert(!releaseWorkflow.includes('windows-latest'), 'v143 Windows jobs must not float to a newer Visual Studio runner image');
 const signDllIndex = releaseWorkflow.indexOf('Sign native 64-bit MeshServiceRuntime DLL before embedding');
 const buildRuntimeIndex = releaseWorkflow.indexOf('Build MeshService MeshServiceRuntime (${{ matrix.arch }})');
 const validateEmbeddedIndex = releaseWorkflow.indexOf('Validate embedded service DLL parity');
