@@ -107,6 +107,29 @@ function resolveSourceSet(args) {
     };
 }
 
+function peMachine(file) {
+    ensureFile(file, 'runtime binary');
+    const bytes = fs.readFileSync(file);
+    const offset = bytes.length >= 64 ? bytes.readUInt32LE(60) : 0;
+    if (bytes.toString('ascii', 0, 2) !== 'MZ' || offset < 64 || offset + 6 > bytes.length ||
+        bytes.toString('ascii', offset, offset + 4) !== 'PE\0\0') {
+        throw new Error(`Invalid PE image: ${file}`);
+    }
+    return bytes.readUInt16LE(offset + 4);
+}
+
+function resolveProbeInputs(sourceSet, consolePath) {
+    const machine = peMachine(sourceSet.exe);
+    const architecture = machine === 0xaa64 ? 'arm64' : machine === 0x8664 ? 'x64' : null;
+    if (!architecture) { throw new Error('Grouped regression requires an x64 or ARM64 package'); }
+    const runner = consolePath || path.join(REPO_ROOT, 'meshconsole', 'Release',
+        architecture === 'arm64' ? 'MeshConsoleARM64.exe' : 'MeshConsole64.exe');
+    for (const file of [sourceSet.dll, runner]) {
+        if (peMachine(file) !== machine) { throw new Error(`Runtime binary architecture mismatch: ${file}`); }
+    }
+    return { architecture, exe: sourceSet.exe, dll: sourceSet.dll, runner };
+}
+
 function copyIfPresent(sourcePath, destinationPath) {
     if (!sourcePath) { return null; }
     ensureDir(path.dirname(destinationPath));
@@ -504,7 +527,7 @@ function runJsSelfTest(runCommand, sourceSet, phaseDir) {
     return result;
 }
 
-function runMeshCentralSameSizeContracts(runCommand, phaseDir) {
+function runMeshCentralSameSizeContracts(runCommand, phaseDir, inputs) {
     const tests = [
         {
             name: 'meshcentral-desktop-same-size-contract',
@@ -574,9 +597,18 @@ function runMeshCentralSameSizeContracts(runCommand, phaseDir) {
     ];
 
     const records = [];
+    const probeArgs = {
+        'http-request-alignment-runtime': ['--runner', inputs.runner],
+        'rundll32-bridge-smoke': ['--dll', inputs.dll],
+        'kvm-initial-frame-runtime': ['--exe', inputs.exe, '--dll', inputs.dll],
+        'kvm-system-picture-runtime': ['--exe', inputs.exe, '--dll', inputs.dll],
+        'service-bundle-embedding-contract': ['--architecture', inputs.architecture,
+            '--exe', inputs.exe, '--dll', inputs.dll]
+    };
     for (const test of tests) {
         ensureFile(test.script, `${test.name} script`);
-        const record = runCommand(test.name, 'node', [test.script, '--evidence', test.evidenceDir], {
+        const record = runCommand(test.name, 'node', [test.script, '--evidence', test.evidenceDir,
+            ...(probeArgs[test.name] || [])], {
             cwd: REPO_ROOT,
             timeoutMs: 240000
         });
@@ -875,7 +907,11 @@ function main() {
     );
     const guiLogPath = getArg(args, 'gui-log', DEFAULT_GUI_LOG);
     const resolvedSourceSet = resolveSourceSet(args);
+    const probeInputs = resolveProbeInputs(resolvedSourceSet,
+        args['source-console'] ? path.resolve(args['source-console']) : null);
     const sourceSet = cacheSourceSet(resolvedSourceSet, path.join(evidenceRoot, 'source-cache'));
+    probeInputs.exe = sourceSet.exe;
+    probeInputs.dll = sourceSet.dll;
     const commandsPath = path.join(evidenceRoot, 'commands.txt');
     const commandRecords = [];
     const commandContext = {
@@ -925,7 +961,7 @@ function main() {
             },
             {
                 name: 'meshcentral_same_size_contracts',
-                action: () => runMeshCentralSameSizeContracts(runCommand, path.join(evidenceRoot, 'meshcentral_same_size_contracts'))
+                action: () => runMeshCentralSameSizeContracts(runCommand, path.join(evidenceRoot, 'meshcentral_same_size_contracts'), probeInputs)
             },
             {
                 name: 'native_cli',
@@ -1043,9 +1079,12 @@ function main() {
     }
 }
 
-try {
-    main();
-} catch (error) {
-    console.error(error && error.stack ? error.stack : error);
-    process.exitCode = 1;
+module.exports = { resolveProbeInputs, runMeshCentralSameSizeContracts };
+if (require.main === module) {
+    try {
+        main();
+    } catch (error) {
+        console.error(error && error.stack ? error.stack : error);
+        process.exitCode = 1;
+    }
 }

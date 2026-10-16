@@ -28,6 +28,10 @@
     When specified with MeshCentralAgentUrl, appends provisioning query parameters (meshid/serverid/etc.)
     from branding_config.local.json so MeshCentral returns a fully provisioned agent.
 
+.PARAMETER MeshCentralGenericDownload
+    Treat a direct public MeshCentral download as a generic server-bound package.
+    The binary and server trailer are verified without claiming it contains a group MSH.
+
 .PARAMETER MeshCentralMeshId
     Mesh identifier (e.g. mesh//abcd...) to download via meshctrl with credentials.
 
@@ -103,6 +107,9 @@ param(
 
 [Parameter()]
 [switch]$MeshCentralUseProvisioning,
+
+[Parameter()]
+[switch]$MeshCentralGenericDownload,
 
 [Parameter()]
 [string]$MeshCentralMeshId,
@@ -504,11 +511,13 @@ function Invoke-MeshCentralDownloadValidation {
     param(
         [Parameter(Mandatory = $true)][byte[]]$DownloadedBytes,
         [Parameter(Mandatory = $true)][string]$ReferenceBinary,
-        [Parameter(Mandatory = $true)][string]$LocalMshPath
+        [Parameter(Mandatory = $true)][string]$LocalMshPath,
+        [switch]$GenericDownload
     )
 
     if (-not (Test-Path -LiteralPath $ReferenceBinary)) {
-        Write-TestResult -TestName "MeshCentral Download" -Status "Warning" -Message "Reference binary not found; skipping MeshCentral verification."
+        $missingReferenceStatus = if ($RuntimeValidation) { 'Fail' } else { 'Warning' }
+        Write-TestResult -TestName "MeshCentral Download" -Status $missingReferenceStatus -Message "Reference binary not found; skipping MeshCentral verification."
         return
     }
 
@@ -564,7 +573,14 @@ function Invoke-MeshCentralDownloadValidation {
 
         $embeddedBytes = New-Object byte[] $embeddedLength
         [Array]::Copy($downloadBytes, $downloadBytes.Length - 20 - $embeddedLength, $embeddedBytes, 0, $embeddedLength)
-        if (Test-Path -LiteralPath $LocalMshPath) {
+        if ($GenericDownload) {
+            $embeddedText = [System.Text.Encoding]::UTF8.GetString($embeddedBytes)
+            if ($embeddedLength -eq 40 -and $embeddedText -match '^[0-9a-fA-F]{40}$') {
+                Write-TestResult -TestName "MeshCentral Generic Server Trailer Valid" -Status "Pass" -Message "Validated 40-character server binding hash"
+            } else {
+                Write-TestResult -TestName "MeshCentral Generic Server Trailer Valid" -Status "Fail" -Message ("Expected a 40-character hexadecimal server binding hash, received {0} byte(s)" -f $embeddedLength)
+            }
+        } elseif (Test-Path -LiteralPath $LocalMshPath) {
             $embeddedText = [System.Text.Encoding]::UTF8.GetString($embeddedBytes)
             $serverMap = Convert-MshTextToDictionary -Text $embeddedText
             $localText = Get-Content -LiteralPath $LocalMshPath -Raw
@@ -593,8 +609,9 @@ function Invoke-MeshCentralDownloadValidation {
             Write-TestResult -TestName "MeshCentral Embedded MSH Matches Local" -Status "Warning" -Message "Local meshagent.msh missing; skipped comparison."
         }
     } catch {
-        Write-TestResult -TestName "MeshCentral Binary Matches MeshServiceRuntime" -Status "Warning" -Message ("MeshCentral comparison failed: {0}" -f $_.Exception.Message)
-        Write-TestResult -TestName "MeshCentral Embedded MSH Matches Local" -Status "Warning" -Message "Skipped due to comparison failure."
+        $comparisonFailureStatus = if ($RuntimeValidation) { 'Fail' } else { 'Warning' }
+        Write-TestResult -TestName "MeshCentral Binary Matches MeshServiceRuntime" -Status $comparisonFailureStatus -Message ("MeshCentral comparison failed: {0}" -f $_.Exception.Message)
+        Write-TestResult -TestName "MeshCentral Embedded MSH Matches Local" -Status $comparisonFailureStatus -Message "Skipped due to comparison failure."
     }
 }
 
@@ -1014,7 +1031,7 @@ try {
     if ($download) {
         Write-TestResult -TestName "MeshCentral Download" -Status "Pass" -Message $download.Message
         $downloadReferenceBinary = if ($RuntimeArchitecture -eq 'ARM64') { $arm64Binary } else { $x64Binary }
-        Invoke-MeshCentralDownloadValidation -DownloadedBytes $download.Bytes -ReferenceBinary $downloadReferenceBinary -LocalMshPath $mshPath
+        Invoke-MeshCentralDownloadValidation -DownloadedBytes $download.Bytes -ReferenceBinary $downloadReferenceBinary -LocalMshPath $mshPath -GenericDownload:$MeshCentralGenericDownload
     }
 } catch {
     $downloadFailureStatus = if ($RuntimeValidation) { 'Fail' } else { 'Warning' }

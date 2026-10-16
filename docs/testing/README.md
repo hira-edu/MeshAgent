@@ -316,6 +316,13 @@ agent type 4 for x64 and 43 for ARM64.
 When runtime validation is enabled in `build-release.yml`, the workflow runs
 the same gate as separate x64 and ARM64 jobs; the ARM64 leg uses the native
 `windows-11-arm` runner rather than treating cross-compilation as runtime proof.
+For credential-free validation against an already deployed server, set
+`runtime_agent_base_url` to its `/meshagents` endpoint. This mode verifies that
+the public type 4 and type 43 packages contain the exact locally built binary
+and a valid generic server-binding trailer. Authenticated control URL, mesh ID,
+and credentials remain available when group-specific embedded-MSH comparison is
+required. Runtime jobs build and verify matching console, EXE, and DLL machines
+before any install, update, or uninstall mutation.
 Fresh installation after uninstall generates a new endpoint identity. A backup
 of the `.db` alone cannot restore an identity backed by a Windows CNG key;
 identity-preserving recovery also requires the corresponding certificate and

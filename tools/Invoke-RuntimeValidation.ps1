@@ -25,11 +25,19 @@
 .PARAMETER MeshCentralControlUrl
     WebSocket control URL used by meshctrl. Defaults to ws://127.0.0.1:3000.
 
+.PARAMETER MeshCentralAgentUrl
+    Direct public MeshCentral agent URL. When supplied, the wrapper does not require
+    meshctrl, a mesh ID, or MeshCentral credentials.
+
+.PARAMETER MeshCentralGenericDownload
+    Validate the direct download as a generic server-bound package rather than a
+    group-provisioned package with an embedded MSH.
+
 .PARAMETER MeshCentralMeshId
     Device group identifier. If omitted, the helper falls back to provisioning.meshId from branding_config.local.json.
 
 .PARAMETER MeshCentralLoginUser / MeshCentralLoginPass
-    Credentials passed to meshctrl AgentDownload. Defaults match the local diagadmin account.
+    Credentials passed to meshctrl AgentDownload. Both are required for authenticated group downloads.
 
 .PARAMETER ReportPath
     Destination for the JSON report emitted by test.ps1 (default: artifacts/validation/runtime/runtime.json).
@@ -53,9 +61,11 @@ param(
     [string]$MeshCentralRepo = (Join-Path (Split-Path $PSScriptRoot -Parent) '..\MeshCentral'),
     [string]$MeshCtrlPath,
     [string]$MeshCentralControlUrl = 'ws://127.0.0.1:3000',
+    [string]$MeshCentralAgentUrl,
+    [switch]$MeshCentralGenericDownload,
     [string]$MeshCentralMeshId,
-    [string]$MeshCentralLoginUser = 'diagadmin',
-    [string]$MeshCentralLoginPass = 'DiagTest!23',
+    [string]$MeshCentralLoginUser,
+    [string]$MeshCentralLoginPass,
     [string]$ReportPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'artifacts\validation\runtime\runtime.json'),
     [string]$LogPath,
     [switch]$AllowNonAdmin,
@@ -338,21 +348,26 @@ if ($MeshCentralRepo -and (Test-Path -LiteralPath $MeshCentralRepo)) {
     $meshCentralRepoResolved = Resolve-ExistingPath $MeshCentralRepo
 }
 
-$meshCtrlResolved = Resolve-MeshCtrlPath -ExplicitPath $MeshCtrlPath -RepoRoot $meshCentralRepoResolved
+$meshCtrlResolved = $null
+if ([string]::IsNullOrWhiteSpace($MeshCentralAgentUrl)) {
+    $meshCtrlResolved = Resolve-MeshCtrlPath -ExplicitPath $MeshCtrlPath -RepoRoot $meshCentralRepoResolved
+}
 
 if (-not $SkipMeshCentralPreflight) {
     Invoke-MeshCentralPreflight -RepoPath $meshCentralRepoResolved -BinaryRoot $binaryRoot -NativeArchitecture $Architecture
 }
 
-if (-not $MeshCentralMeshId) {
+if ([string]::IsNullOrWhiteSpace($MeshCentralAgentUrl) -and -not $MeshCentralMeshId) {
     $MeshCentralMeshId = Resolve-MeshIdFromBranding -RepoRoot $repoRoot
 }
 
-if (-not $MeshCentralMeshId) {
+if ([string]::IsNullOrWhiteSpace($MeshCentralAgentUrl) -and -not $MeshCentralMeshId) {
     throw "MeshCentral Mesh ID could not be resolved. Provide -MeshCentralMeshId or update branding_config.local.json."
 }
 
-Test-MeshCentralReachable -ControlUrl $MeshCentralControlUrl | Out-Null
+if ([string]::IsNullOrWhiteSpace($MeshCentralAgentUrl)) {
+    Test-MeshCentralReachable -ControlUrl $MeshCentralControlUrl | Out-Null
+}
 
 $testScript = Join-Path $repoRoot 'test.ps1'
 if (-not (Test-Path -LiteralPath $testScript)) {
@@ -375,14 +390,20 @@ $testArgs = @{
     BinaryPath            = $binaryRoot
     RuntimeArchitecture   = $Architecture
     RuntimeValidation     = $true
-    MeshCentralMeshId     = $MeshCentralMeshId
-    MeshCentralControlUrl = $MeshCentralControlUrl
-    MeshCentralLoginUser  = $MeshCentralLoginUser
-    MeshCentralLoginPass  = $MeshCentralLoginPass
-    MeshCtrlPath          = $meshCtrlResolved
     ReportPath            = $ReportPath
     BrandingConfigPath    = $brandingState.Path
     RuntimeEvidencePath   = (Join-Path $reportDir 'grouped-regression')
+}
+
+if (-not [string]::IsNullOrWhiteSpace($MeshCentralAgentUrl)) {
+    $testArgs.MeshCentralAgentUrl = $MeshCentralAgentUrl
+    $testArgs.MeshCentralGenericDownload = [bool]$MeshCentralGenericDownload
+} else {
+    $testArgs.MeshCentralMeshId = $MeshCentralMeshId
+    $testArgs.MeshCentralControlUrl = $MeshCentralControlUrl
+    $testArgs.MeshCentralLoginUser = $MeshCentralLoginUser
+    $testArgs.MeshCentralLoginPass = $MeshCentralLoginPass
+    $testArgs.MeshCtrlPath = $meshCtrlResolved
 }
 
 Write-Host "[RuntimeValidation] Launching test.ps1 with MeshCentral download verification..." -ForegroundColor Cyan

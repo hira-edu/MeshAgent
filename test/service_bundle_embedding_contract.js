@@ -96,11 +96,14 @@ function main(options = {}) {
     if (requestedArchitecture != null && !['x64', 'arm64'].includes(requestedArchitecture)) {
         throw new Error(`unsupported architecture: ${requestedArchitecture}`);
     }
+    if ((args.exe || args.dll) && (!args.exe || !args.dll || !requestedArchitecture || legacyEvidence)) {
+        throw new Error('Explicit bundle inputs require --exe, --dll and --architecture without legacy evidence');
+    }
     const allDefinitions = [
         ['x64', path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe'), path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll')],
         ['arm64', path.resolve('meshservice', 'ARM64', 'MeshServiceRuntime', 'MeshService-2022.exe'), path.resolve('meshservice', 'ARM64', 'MeshServiceBundle', 'MeshService-2022.dll')]
     ];
-    const definitions = legacyEvidence ? allDefinitions.slice(0, 1) :
+    const definitions = args.exe ? [[requestedArchitecture, path.resolve(args.exe), path.resolve(args.dll)]] : legacyEvidence ? allDefinitions.slice(0, 1) :
         (requestedArchitecture == null ? allDefinitions : allDefinitions.filter(([architecture]) => architecture === requestedArchitecture));
     const architectures = {};
 

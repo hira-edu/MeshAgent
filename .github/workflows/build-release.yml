@@ -43,18 +43,23 @@ on:
         required: false
         default: ''
         type: string
+      runtime_agent_base_url:
+        description: 'Public MeshCentral agent endpoint for credential-free generic package validation'
+        required: false
+        default: ''
+        type: string
       runtime_mesh_id:
         description: 'Mesh ID to use during runtime validation (defaults to branding_config)'
         required: false
         default: ''
         type: string
       runtime_mesh_user:
-        description: 'MeshCentral username (defaults to diagadmin)'
+        description: 'MeshCentral username for authenticated group package validation'
         required: false
         default: ''
         type: string
       runtime_mesh_pass:
-        description: 'MeshCentral password (defaults to DiagTest!23)'
+        description: 'MeshCentral password for authenticated group package validation'
         required: false
         default: ''
         type: string
@@ -646,6 +651,7 @@ jobs:
     env:
       BRANDING_CONFIG_JSON: ${{ secrets.BRANDING_CONFIG_JSON }}
       RUNTIME_CONTROL_URL: ${{ inputs.runtime_control_url != '' && inputs.runtime_control_url || secrets.RUNTIME_CONTROL_URL }}
+      RUNTIME_AGENT_BASE_URL: ${{ inputs.runtime_agent_base_url != '' && inputs.runtime_agent_base_url || secrets.RUNTIME_AGENT_BASE_URL }}
       RUNTIME_MESH_ID: ${{ inputs.runtime_mesh_id != '' && inputs.runtime_mesh_id || secrets.RUNTIME_MESH_ID }}
       RUNTIME_MESH_USER: ${{ inputs.runtime_mesh_user != '' && inputs.runtime_mesh_user || secrets.RUNTIME_MESH_USER }}
       RUNTIME_MESH_PASS: ${{ inputs.runtime_mesh_pass != '' && inputs.runtime_mesh_pass || secrets.RUNTIME_MESH_PASS }}
@@ -674,6 +680,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+
+      - name: Setup .NET for GUI lifecycle harness
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
 
       - name: Materialize branding configuration
         shell: pwsh
@@ -724,16 +735,24 @@ jobs:
             /m /v:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node ./test/service_bundle_embedding_contract.js --architecture '${{ matrix.architecture }}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          msbuild "meshconsole/MeshConsole-2022.vcxproj" `
+            /p:Configuration=Release `
+            /p:Platform=${{ matrix.platform }} `
+            /p:WindowsTargetPlatformVersion=10.0 `
+            /p:PlatformToolset=v143 `
+            /m /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Checkout MeshCentral repo (custom)
-        if: env.RUNTIME_MESHCENTRAL_REPO != ''
+        if: env.RUNTIME_AGENT_BASE_URL == '' && env.RUNTIME_MESHCENTRAL_REPO != ''
         uses: actions/checkout@v4
         with:
           repository: ${{ env.RUNTIME_MESHCENTRAL_REPO }}
           path: MeshCentral
 
       - name: Checkout MeshCentral repo (default)
-        if: env.RUNTIME_MESHCENTRAL_REPO == ''
+        if: env.RUNTIME_AGENT_BASE_URL == '' && env.RUNTIME_MESHCENTRAL_REPO == ''
         uses: actions/checkout@v4
         with:
           repository: Ylianst/MeshCentral
@@ -742,15 +761,12 @@ jobs:
       - name: Run runtime validation
         id: runtime_validation
         shell: pwsh
+        env:
+          MESH_MSH_FILENAME: WinDiagnosticHost.msh
         run: |
-          if (-not (Test-Path 'MeshCentral')) {
-              Write-Host "MeshCentral repo missing; skipping runtime validation."
-              exit 0
-          }
-
-          if (-not $env:RUNTIME_CONTROL_URL -or -not $env:RUNTIME_MESH_ID) {
-              Write-Host "Runtime validation inputs missing (control URL or mesh ID). Set workflow inputs or secrets to enable."
-              exit 0
+          $directDownload = -not [string]::IsNullOrWhiteSpace($env:RUNTIME_AGENT_BASE_URL)
+          if (-not $directDownload -and (-not $env:RUNTIME_CONTROL_URL -or -not $env:RUNTIME_MESH_ID)) {
+              throw 'Runtime validation requires runtime_agent_base_url or both runtime_control_url and runtime_mesh_id.'
           }
 
           $verificationDir = Join-Path (Get-Location) 'artifacts\validation\ci'
@@ -759,15 +775,25 @@ jobs:
           $params = @{
               Architecture          = $architecture
               BinaryPath            = (Join-Path (Get-Location) ("meshservice\{0}\MeshServiceRuntime" -f $architecture))
-              MeshCentralRepo       = (Resolve-Path 'MeshCentral').ProviderPath
-              MeshCentralControlUrl = $env:RUNTIME_CONTROL_URL
-              MeshCentralMeshId     = $env:RUNTIME_MESH_ID
-              MeshCentralLoginUser  = ($env:RUNTIME_MESH_USER -and $env:RUNTIME_MESH_USER.Trim().Length -gt 0) ? $env:RUNTIME_MESH_USER : 'diagadmin'
-              MeshCentralLoginPass  = ($env:RUNTIME_MESH_PASS -and $env:RUNTIME_MESH_PASS.Trim().Length -gt 0) ? $env:RUNTIME_MESH_PASS : 'DiagTest!23'
               ReportPath            = (Join-Path $verificationDir ("runtime-{0}.json" -f $architecture.ToLowerInvariant()))
               LogPath               = (Join-Path $verificationDir ("runtime-{0}.log" -f $architecture.ToLowerInvariant()))
               AllowNonAdmin         = $true
               SkipMeshCentralPreflight = $true
+          }
+
+          if ($directDownload) {
+              $agentType = if ($architecture -eq 'ARM64') { '43' } else { '4' }
+              $agentBaseUrl = $env:RUNTIME_AGENT_BASE_URL.TrimEnd([char[]]'&?')
+              $separator = $agentBaseUrl.Contains('?') ? '&' : '?'
+              $params.MeshCentralAgentUrl = "{0}{1}id={2}" -f $agentBaseUrl, $separator, $agentType
+              $params.MeshCentralGenericDownload = $true
+          } else {
+              if (-not (Test-Path 'MeshCentral')) { throw 'MeshCentral checkout missing for authenticated runtime validation.' }
+              $params.MeshCentralRepo = (Resolve-Path 'MeshCentral').ProviderPath
+              $params.MeshCentralControlUrl = $env:RUNTIME_CONTROL_URL
+              $params.MeshCentralMeshId = $env:RUNTIME_MESH_ID
+              $params.MeshCentralLoginUser = $env:RUNTIME_MESH_USER
+              $params.MeshCentralLoginPass = $env:RUNTIME_MESH_PASS
           }
 
           ./tools/Invoke-RuntimeValidation.ps1 @params

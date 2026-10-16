@@ -164,12 +164,18 @@ for (const required of [
     'ssh-key: ${{ secrets.RUNTIME_COMPONENT_DEPLOY_KEY }}',
     '/p:RuntimeComponentSourceRoot="$env:GITHUB_WORKSPACE\\runtime-source"',
     'Architecture          = $architecture',
+    'runtime_agent_base_url',
+    'MeshCentralGenericDownload',
+    'meshconsole/MeshConsole-2022.vcxproj',
+    'actions/setup-dotnet@v4',
     'cp /tmp/MeshServiceARM64.exe',
     'cp /tmp/MeshServiceARM64.dll'
 ]) {
     assert(releaseWorkflow.includes(required), `release workflow omits ARM64 parity marker: ${required}`);
 }
 assert(!releaseWorkflow.includes('windows-latest'), 'v143 Windows jobs must not float to a newer Visual Studio runner image');
+assert(!releaseWorkflow.includes("? $env:RUNTIME_MESH_USER : 'diagadmin'"), 'runtime validation must not fall back to a shared username');
+assert(!releaseWorkflow.includes("? $env:RUNTIME_MESH_PASS : 'DiagTest!23'"), 'runtime validation must not fall back to a shared password');
 const signDllIndex = releaseWorkflow.indexOf('Sign native 64-bit MeshServiceRuntime DLL before embedding');
 const buildRuntimeIndex = releaseWorkflow.indexOf('Build MeshService MeshServiceRuntime (${{ matrix.arch }})');
 const validateEmbeddedIndex = releaseWorkflow.indexOf('Validate embedded service DLL parity');
