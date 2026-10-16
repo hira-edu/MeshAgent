@@ -238,7 +238,7 @@ Studio toolset must be installed; a host without them fails the build instead
 of silently omitting ARM64.
 
 The private `coordinated-release.yml` workflow uses the same three-architecture release
-matrix. Tag releases and optional server deployment include the matching `.msh`
+matrix. Coordinated release builds include the matching `.msh`
 files and both native service DLLs. Each native 64-bit matrix leg verifies its
 PE machine and exact embedded-DLL equality before uploading artifacts; when
 signing is configured, the service DLL is signed before it is embedded.
@@ -251,7 +251,7 @@ Set `BRANDING_CONFIG_JSON` and `PROVISIONING_MSH` secrets to the local branding
 JSON and complete provisioning manifest for releases, deployment, and runtime
 validation. CI validates them before generating its local input files. Ordinary
 builds without these inputs use a build-only fixture pointing at
-`validation.invalid`; those builds cannot publish or deploy. Tag and deployment
+`validation.invalid`; those builds cannot publish or deploy. Deployment
 runs fail when configured inputs are missing or branding contains placeholders.
 
 Each x64 and ARM64 `MeshServiceBundle` configuration embeds the x86 and x64 persistent
