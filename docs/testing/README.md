@@ -260,6 +260,16 @@ connection reuse guards. TLS diagnostic snapshots are injected; this probe does
 not exercise a live TLS handshake or relay. It requires Clang and Windows SDK
 headers and does not start or modify an installed service.
 
+`python3 test/asyncsocket_tls_error_queue_native.py` runs the production TLS
+receive and queued-write functions with real OpenSSL memory-BIO peers and local
+socket pairs. It checks that a fatal alert on another connection cannot turn
+healthy reads, partial handshakes, or queued writes into fatal errors, including
+an error left by a buffer-reallocation callback between reads. Corrupt
+records and real peer alerts must still disconnect with their own diagnostics;
+clean TLS shutdown remains a quiet EOF. The probe uses ASan/UBSan and the bundled
+OpenSSL libraries on macOS. Other POSIX hosts can specify `--openssl-include`
+and `--openssl-lib-dir`. Evidence goes under `artifacts/validation/`.
+
 `python3 test/native_update_state_runtime.py` compiles production update
 functions with process, datastore, and file-I/O mocks. It checks durable force
 consumption, interrupted consumption, late activation completion, transfer

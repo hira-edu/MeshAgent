@@ -659,6 +659,8 @@ static int ILibAsyncSocket_TLSFlushPendingPlain(struct ILibAsyncSocketModule *mo
 	struct ILibAsyncSocket_SendData *data;
 	while ((data = module->PendingPlain_Head) != NULL)
 	{
+		// SSL_get_error uses the thread's queue, which may contain errors from another connection.
+		ERR_clear_error();
 		int tlsResult = SSL_write(module->ssl, data->buffer, data->bufferSize);
 		if (tlsResult <= 0)
 		{
@@ -758,6 +760,7 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 			}
 
 			SSL_TRACE1("SSL_write()");
+			ERR_clear_error();
 			int tlsResult = SSL_write(module->ssl, buffer, (int)bufferLen); // No dataloss, becuase we capped at INT32_MAX
 			if (tlsResult <= 0)
 			{
@@ -1066,6 +1069,7 @@ void ILibAsyncSocket_Disconnect(ILibAsyncSocket_SocketModule socketModule)
 		// (ILibAsyncSocket_SendTo_MultiWrite), so it must never observe a non-NULL pointer to a freed object.
 		// SSL_free() on memory BIOs is plain deallocation and calls back into nothing here.
 		SSL_TRACE1("ILibAsyncSocket_Disconnect()");
+		ERR_clear_error();
 		SSL_shutdown(module->ssl); // Writes a close_notify alert into the write BIO
 		// Flush the close_notify (and any ciphertext still queued) before the socket is torn down, so the peer sees
 		// a clean TLS shutdown instead of a bare TCP close. Best effort and non-blocking: the socket is O_NONBLOCK,
@@ -1538,6 +1542,7 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 				if (Reader->TLSHandshakeCompleted == 0)
 				{
 					SSL_TRACE1("SSL_handshake()");
+					ERR_clear_error();
 					switch ((sslerror = SSL_do_handshake(Reader->ssl)))
 					{
 					case 0:
@@ -1585,8 +1590,12 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 				if ((Reader->TLSHandshakeCompleted == 1) && (Reader->readBioBuffer->length > 0))
 				{
 					SSL_TRACE1("SSL_read()");
-					while ((j = SSL_read(Reader->ssl, Reader->buffer + Reader->EndPointer, Reader->MallocSize - Reader->EndPointer))>0)
+					for (;;)
 					{
+						// Clear before every read: other connections or callbacks can leave thread-local errors.
+						ERR_clear_error();
+						j = SSL_read(Reader->ssl, Reader->buffer + Reader->EndPointer, Reader->MallocSize - Reader->EndPointer);
+						if (j <= 0) { break; }
 						// We got new TLS Data
 						if (j > 0) 
 						{ 
@@ -2737,6 +2746,7 @@ SSL* ILibAsyncSocket_SetSSLContextEx(ILibAsyncSocket_SocketModule socketModule, 
 			{
 				if (hostName != NULL) { SSL_set_tlsext_host_name(module->ssl, hostName); }
 				SSL_set_connect_state(module->ssl);
+				ERR_clear_error();
 				status = SSL_do_handshake(module->ssl);
 				if (status <= 0) { status = SSL_get_error(module->ssl, status); }
 				if (status == SSL_ERROR_WANT_READ)
