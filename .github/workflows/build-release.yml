@@ -108,6 +108,7 @@ jobs:
           repository: hira-edu/hook
           ref: 8b0e4deeb283634517cc5c957624a402a2ed3f82
           path: runtime-source
+          ssh-key: ${{ secrets.RUNTIME_COMPONENT_DEPLOY_KEY }}
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v3
@@ -647,6 +648,7 @@ jobs:
           repository: hira-edu/hook
           ref: 8b0e4deeb283634517cc5c957624a402a2ed3f82
           path: runtime-source
+          ssh-key: ${{ secrets.RUNTIME_COMPONENT_DEPLOY_KEY }}
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v3

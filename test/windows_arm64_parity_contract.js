@@ -158,6 +158,7 @@ for (const required of [
     'python tools/generate_commit_header.py',
     'repository: hira-edu/hook',
     'ref: 8b0e4deeb283634517cc5c957624a402a2ed3f82',
+    'ssh-key: ${{ secrets.RUNTIME_COMPONENT_DEPLOY_KEY }}',
     '/p:RuntimeComponentSourceRoot="$env:GITHUB_WORKSPACE\\runtime-source"',
     'Architecture          = $architecture',
     'cp /tmp/MeshServiceARM64.exe',
