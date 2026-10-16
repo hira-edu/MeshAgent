@@ -5,6 +5,179 @@ MeshAgent builds and configured MeshCentral support files to the VPS. This page
 documents that workflow; it does not keep server-specific IP addresses,
 credentials, deployment snapshots, or migration history.
 
+## Coordinated GitHub releases
+
+`hook/.github/workflows/coordinated-release.yml` is the private release coordinator.
+Pushes to the default branch of MeshAgent, MeshCentral, or hook request one release.
+MeshAgent uses `build-release.yml` and MeshCentral uses `request-release.yml` to
+notify hook. Provisioned binaries, manifests, build logs, and release bundles are
+kept in hook because the other two repositories are public. A resolver freezes
+all three default-branch commit SHAs before any native build starts. Every build
+leg uses those exact SHAs; a final check refuses a release superseded while it
+was building or awaiting environment approval. GitHub concurrency coalesces
+pending requests to the latest state and never cancels an active deployment.
+
+Production builds require real provisioning. Authenticode signing follows the
+existing branding policy; this installation currently permits unsigned agents.
+If signing credentials are configured, signing failures block the build.
+Windows x86, x64, and ARM64 payloads are verified against their matching service
+DLLs. An Ubuntu build assembles the complete MeshCentral package with `npm ci`
+from the sibling lockfile, applies the manual deployment map, and packages the
+payloads into a private GHCR image. The Node/OS base and GitHub actions are pinned
+by digest/commit. BuildKit publishes provenance and an SBOM. Deployments promote
+the image digest; they do not rebuild or pull mutable tags on the VPS.
+
+The server package lock is aligned with the production MeshCentral 1.2.5 baseline.
+The VPS controller rejects a different MeshCentral package version until an
+operator reviews its database compatibility and updates the deployment policy.
+Database migrations are not run as an incidental part of a push.
+
+### GitHub configuration
+
+Create a GitHub App installed only on MeshAgent, MeshCentral, and hook, with
+Contents read/write (dispatch requires write). Store its private key as
+`RELEASE_APP_PRIVATE_KEY` and its App ID as `RELEASE_APP_ID` in each repository.
+The coordinator requests read-only, short-lived installation tokens; sibling
+dispatch jobs request write access only to hook. No personal access token
+is needed for cross-repository dispatch. PR builds do not receive App, provisioning, signing, or live runtime-test credentials;
+private sibling builds require a trusted branch run.
+
+Configure the private hook repository:
+
+| Setting | Location | Purpose |
+| --- | --- | --- |
+| `AUTO_DEPLOY=true` | Repository variable | Enable automatic default-branch deployment after setup |
+| `RELEASE_APP_ID` | Repository variable | GitHub App ID |
+| `RELEASE_APP_PRIVATE_KEY` | Repository secret | App authentication |
+| `BRANDING_CONFIG_JSON`, `PROVISIONING_MSH` | Repository secrets | Real native build/provisioning inputs |
+| `CODE_SIGN_PFX_BASE64`, `CODE_SIGN_PASSWORD` | Repository secrets | Optional Authenticode signing when configured |
+| `CODE_SIGN_TIMESTAMP_URL` | Optional repository secret | Timestamp service override |
+| `SSH_HOST`, `SSH_PORT`, `SSH_USER` | `production` environment secrets | VPS route; user is the restricted `meshdeploy` account |
+| `SSH_PRIVATE_KEY` | `production` environment secret | Dedicated deployment key, not an administrator's personal key |
+| `SSH_KNOWN_HOSTS` | `production` environment secret | Host key verified out of band, including `[host]:port` for nonstandard ports |
+
+Protect the default branches and the `production` environment against arbitrary
+branch deployments. Require review for changes to workflows, deployment tools,
+source maps, and dependencies. Environment reviewers are optional for fully
+automatic releases; branch restrictions are not. Keep the GHCR
+`meshcentral-release` package private because it contains provisioned agents.
+The deploy job forwards its short-lived, package-read GitHub token over SSH stdin.
+Systemd supplies it as a private service credential; Docker login state is
+temporary and removed after the pull. No persistent registry token is required. Optional destructive
+runtime validation still requires approved test endpoints and its existing
+runtime secrets; if requested, its failure blocks promotion.
+
+### VPS controller installation
+
+Install Docker Engine from its official Ubuntu repository using
+[Docker's installation instructions](https://docs.docker.com/engine/install/ubuntu/).
+This is an explicit prerequisite; the controller never runs a downloaded shell
+installer. The target is Linux amd64 with systemd. Keep MongoDB, Caddy, and
+cloudflared on their existing host services.
+
+Before migration, export and review manual source changes using the source-sync
+procedure below, back up the database and persistent data using the existing
+backup policy, and verify the public `/health.ashx` endpoint returns exactly `ok`.
+Install the reviewed controller files and a dedicated SSH public key:
+
+```sh
+sudo python3 tools/deployment/install_controller.py \
+  --public-key /path/to/meshcentral-ci.pub \
+  --image ghcr.io/hira-edu/meshcentral-release \
+  --health-url https://your-console.example/health.ashx \
+  --enable-fleet-update
+```
+
+Installation creates the root-owned controller, `meshdeploy` account, restrictive
+forced command, and `/etc/meshcentral-deploy.json`. It does not stop MeshCentral.
+That key can submit only `deploy sha256:<digest>`; it cannot obtain a shell,
+upload arbitrary scripts, forward ports, or invoke an arbitrary sudo command.
+No SSH password fallback or trust-on-first-use host-key scan is used by CI.
+
+On the first promotion, the controller pulls/verifies the candidate before
+stopping the host service, then retains the old installation for recovery.
+Subsequent promotions replace the production container. The image filesystem is
+read-only; the process uses the existing `meshcentral` UID/GID, drops capabilities,
+and cannot gain privileges. Host networking preserves the existing listeners
+and local MongoDB route. The existing image-size mitigation is mounted read-only.
+
+Certificates, configuration, database files, uploaded files, and unrelated
+plugins stay in the existing persistent directories. Mapped code overlays are
+mounted read-only from the selected release. Agent download files are mounted read-only, and signing caches have
+separate per-release writable directories; existing Linux/macOS agent payloads
+are retained. Do not run the old `deploy.py` publication commands concurrently
+with container releases; platform-specific updates must publish through the
+release process after migration.
+
+The root-owned release controller runs as a systemd transient service and holds
+an exclusive VPS lock through staging, activation, checks, and rollback. It
+continues if SSH disconnects. A durable transaction journal prevents another
+release from starting over an interrupted promotion. Success requires the
+expected running image plus a noncached, CA-validated HTTPS health response.
+Startup or health failure restores the previous release and fleet policy. A
+failed recovery retains its journal and blocks further deployments.
+
+`--enable-fleet-update` sets the policy to enable native automatic updates when
+the new server starts. This is a fleet rollout, not a canary. Application rollback
+does not instantly reverse updates already completed by endpoints.
+
+### Recovery and release history
+
+```sh
+sudo /usr/local/libexec/meshcentral-release status
+sudo journalctl -u meshcentral-deploy --no-pager
+sudo docker logs --tail 100 meshcentral-production
+sudo /usr/local/libexec/meshcentral-release recover   # interrupted transaction only
+sudo /usr/local/libexec/meshcentral-release rollback  # previous container digest
+```
+
+Release directories, per-release agent caches, and active/previous digests are in
+`/var/lib/meshcentral-deploy`. Retain the active and previous images and directories;
+there is intentionally no blind automatic prune. Monitor disk usage and prune
+older releases only after the rollback window. The legacy host installation is
+retained. To return to it after a successful first migration, stop the production
+container, restore the pre-migration fleet configuration if needed, then enable
+and start `meshcentral.service`; verify health before allowing another release.
+Do not restore an old database snapshot as part of an application rollback.
+
+### Source edits on the VPS and local synchronization
+
+GitHub is the source authority. Keep separate, ordinary sibling Git checkouts
+under `/opt/meshcentral-source/{MeshAgent,MeshCentral,hook}` for VPS-side editing,
+owned by an operator account rather than the service/deployment account. Configure
+that account's GitHub authentication with the minimum repository permissions.
+Edit source there, commit to a branch, push, and merge through the same required
+checks as workstation changes. A default-branch push automatically requests the
+coordinated release. Changes to the running read-only image are not supported.
+
+For the existing manual installation, export the supported tracked source map
+before migration. This reads only explicit JavaScript/plugin/public override
+paths; it never exports production config, certificates, databases, manifests,
+or uploaded files:
+
+```powershell
+python tools/export_vps_source.py --output artifacts/validation/vps-source-review
+```
+
+Review the exported differences in a MeshCentral branch and push that branch to
+GitHub. The export does not silently overwrite a checkout or auto-commit server
+content. Changes outside the supported source map need an explicit reviewed
+addition to the package/source map; blindly mirroring `/opt/meshcentral` is not
+a safe source synchronization mechanism.
+
+On the workstation or VPS source checkout, pull the sibling repositories through
+GitHub with:
+
+```sh
+python MeshAgent/tools/sync_sibling_repos.py --parent /path/to/sibling/checkouts
+```
+
+The sync helper checks all three worktrees, fetches, verifies fast-forward
+eligibility, then advances each to its fetched commit. It refuses dirty,
+detached, divergent, or unpushed work instead of resetting or merging it.
+Deployment SHAs are recorded in the GitHub job summary and OCI image labels.
+Local worktrees are not changed automatically while someone is editing them.
+
 ## Copied Windows service hosts
 
 Native update migration recognizes a historical `svchost.exe -k netsvcs` binding
@@ -64,16 +237,15 @@ x64 and ARM64 service DLLs. The ARM64 C++ build tools for the selected Visual
 Studio toolset must be installed; a host without them fails the build instead
 of silently omitting ARM64.
 
-The `build-release.yml` workflow uses the same three-architecture release
+The private `coordinated-release.yml` workflow uses the same three-architecture release
 matrix. Tag releases and optional server deployment include the matching `.msh`
 files and both native service DLLs. Each native 64-bit matrix leg verifies its
 PE machine and exact embedded-DLL equality before uploading artifacts; when
 signing is configured, the service DLL is signed before it is embedded.
 
 CI checks out this repository at `MeshAgent/` and runtime components at sibling
-`hook/`. Set `RUNTIME_COMPONENT_REPOSITORY` and `RUNTIME_COMPONENT_REF` repository
-variables to select another source or pin its revision. Private dependencies
-require a read-capable `DEPENDENCY_REPO_TOKEN` secret.
+`hook/`. The coordinated source resolver supplies exact sibling revisions;
+private dependency access uses the release GitHub App described above.
 
 Set `BRANDING_CONFIG_JSON` and `PROVISIONING_MSH` secrets to the local branding
 JSON and complete provisioning manifest for releases, deployment, and runtime
