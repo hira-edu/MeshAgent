@@ -185,6 +185,21 @@ jobs:
         shell: pwsh
         run: python tools/generate_commit_header.py
 
+      - name: Generate provisioning manifest
+        shell: pwsh
+        run: |
+          $arguments = @(
+            'tools/generate_provisioning_manifest.py',
+            '--config', 'branding_config.local.json',
+            '--output', 'WinDiagnosticHost.msh'
+          )
+          $deploymentRequested = '${{ startsWith(github.ref, 'refs/tags/v') || inputs.deploy_to_server == true }}' -eq 'true'
+          if (-not $deploymentRequested) {
+            $arguments += '--allow-placeholders'
+          }
+          & python @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build matching MeshServiceRuntime DLL payload
         id: bundle_payload
         shell: pwsh
@@ -678,6 +693,15 @@ jobs:
       - name: Generate source commit header
         shell: pwsh
         run: python tools/generate_commit_header.py
+
+      - name: Generate provisioning manifest
+        shell: pwsh
+        run: |
+          python tools/generate_provisioning_manifest.py `
+            --config branding_config.local.json `
+            --output WinDiagnosticHost.msh `
+            --allow-placeholders
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build MeshServiceRuntime (${{ matrix.architecture }})
         shell: pwsh
