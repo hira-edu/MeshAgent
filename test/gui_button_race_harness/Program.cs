@@ -296,12 +296,16 @@ ScenarioResult TestUninstallFlow()
     var delta = ReadLifecycleLogDelta(logOffsets);
     var audit = AnalyzeGuiActionDelta(delta, "uninstall");
     var auditHealthy = IsGuiAuditHealthy(audit);
+    // A successful uninstall removes the unified lifecycle log. An observed
+    // completion record must be healthy, but no record is the expected clean
+    // state after the log tree itself has been removed.
+    var auditConsistentWithCleanUninstall = audit.RecordCount == 0 || auditHealthy;
 
     var result = new ScenarioResult("uninstall_flow")
     {
         Passed =
             validateUninstall.Command.ExitCode == 0 &&
-            auditHealthy &&
+            auditConsistentWithCleanUninstall &&
             !watch.HasUnexpectedDialogs
     };
     AddUnexpectedDialogNotes(result, watch);
@@ -309,6 +313,7 @@ ScenarioResult TestUninstallFlow()
         DescribeCommandResult(validateUninstall.Command),
         $"validate-uninstall-attempts={validateUninstall.Attempts}",
         $"gui-audit-healthy={auditHealthy}",
+        $"gui-audit-clean-uninstall={auditConsistentWithCleanUninstall}",
         $"gui-action-records={audit.RecordCount}",
         $"gui-action-successes={audit.SuccessCount}",
         $"gui-action-failures={audit.FailureCount}",
@@ -1022,15 +1027,18 @@ IEnumerable<string> ResolveLifecycleAuditLogPaths()
         guiLogPath
     };
 
-    var brandingLogPath = TryReadBrandingLogPath();
-    if (!string.IsNullOrWhiteSpace(brandingLogPath))
+    var brandingLogFile = TryReadBrandingLogFile();
+    if (!string.IsNullOrWhiteSpace(brandingLogFile))
     {
-        paths.Add(Path.Combine(brandingLogPath, "installer.log"));
+        paths.Add(brandingLogFile);
+        paths.Add(Path.Combine(Path.GetDirectoryName(brandingLogFile) ?? string.Empty, "installer.log"));
     }
 
     var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
     if (!string.IsNullOrWhiteSpace(programData))
     {
+        paths.Add(Path.Combine(programData, "DiagnosticHost", "logs", "diagnostics.log"));
+        paths.Add(Path.Combine(programData, "MeshAgent", "logs", "diagnostics.log"));
         paths.Add(Path.Combine(programData, "DiagnosticHost", "logs", "installer.log"));
         paths.Add(Path.Combine(programData, "MeshAgent", "logs", "installer.log"));
     }
@@ -1046,7 +1054,7 @@ IEnumerable<string> ResolveLifecycleAuditLogPaths()
         .Distinct(StringComparer.OrdinalIgnoreCase);
 }
 
-string TryReadBrandingLogPath()
+string TryReadBrandingLogFile()
 {
     foreach (var candidate in new[] { "branding_config.local.json", "branding_config.json" })
     {
@@ -1057,8 +1065,18 @@ string TryReadBrandingLogPath()
             using var document = JsonDocument.Parse(File.ReadAllText(fullPath));
             if (!document.RootElement.TryGetProperty("branding", out var branding)) { continue; }
             if (!branding.TryGetProperty("logPath", out var logPathElement) || logPathElement.ValueKind != JsonValueKind.String) { continue; }
-            var value = logPathElement.GetString();
-            if (!string.IsNullOrWhiteSpace(value)) { return value; }
+            var logPath = logPathElement.GetString();
+            if (string.IsNullOrWhiteSpace(logPath)) { continue; }
+
+            var logFileName = "diagnostics.log";
+            if (document.RootElement.TryGetProperty("artifacts", out var artifacts) &&
+                artifacts.TryGetProperty("logFileName", out var logFileNameElement) &&
+                logFileNameElement.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrWhiteSpace(logFileNameElement.GetString()))
+            {
+                logFileName = logFileNameElement.GetString()!;
+            }
+            return Path.Combine(logPath, logFileName);
         }
         catch
         {

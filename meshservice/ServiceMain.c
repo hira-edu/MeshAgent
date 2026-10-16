@@ -9029,13 +9029,21 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 					600000,
 					&actionExitCode);
 				launchError = result ? ERROR_SUCCESS : GetLastError();
-				ServiceDeploy_LogInstallEvent(
-					L"[GUI] action=complete lifecycle=%ls source=%ls sourceDll=%ls launchError=%lu exitCode=%lu",
-					MeshRuntimeHost_LifecycleActionNameW(lifecycleAction),
-					lifecycleSourceExe != NULL ? lifecycleSourceExe : L"(none)",
-					lifecycleSourceDll != NULL ? lifecycleSourceDll : (lifecycleSourceExe != NULL ? L"(embedded)" : L"(none)"),
-					launchError,
-					actionExitCode);
+				// A successful uninstall removes the unified diagnostic log and its
+				// directory. The GUI is a separate process from the lifecycle host, so
+				// writing its completion record here would recreate those paths after
+				// the uninstall had converged. Keep the pre-action record and all failure
+				// completion records; clean success is represented by the absent tree.
+				if (lifecycleAction != MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL || !result)
+				{
+					ServiceDeploy_LogInstallEvent(
+						L"[GUI] action=complete lifecycle=%ls source=%ls sourceDll=%ls launchError=%lu exitCode=%lu",
+						MeshRuntimeHost_LifecycleActionNameW(lifecycleAction),
+						lifecycleSourceExe != NULL ? lifecycleSourceExe : L"(none)",
+						lifecycleSourceDll != NULL ? lifecycleSourceDll : (lifecycleSourceExe != NULL ? L"(embedded)" : L"(none)"),
+						launchError,
+						actionExitCode);
+				}
 			}
 
 			if (result)

@@ -701,9 +701,14 @@ function runNativeCliPhase(runCommand, sourceSet, phaseDir) {
 
     // Refusal must happen before quiescing the installed service, even for an
     // alias whose pathname is outside the installation directory.
-    const installedAlias = path.join(phaseDir, 'installed-image-hardlink.exe');
-    fs.linkSync(installedExe, installedAlias);
+    // Hosted runners place the checkout on D: while ProgramData is on C:.
+    // A hardlink must stay on the installed image's volume, so use the runner
+    // temp directory instead of the evidence directory for this file-identity
+    // guard probe.
+    const installedAliasDir = fs.mkdtempSync(path.join(os.tmpdir(), 'meshagent-installed-alias-'));
+    const installedAlias = path.join(installedAliasDir, 'installed-image-hardlink.exe');
     try {
+        fs.linkSync(installedExe, installedAlias);
         for (const [label, executable, args] of [
             ['installed-install-refused', installedExe, ['-install']],
             ['installed-update-refused-quiet', installedExe, ['-update', '--quiet']],
@@ -714,7 +719,10 @@ function runNativeCliPhase(runCommand, sourceSet, phaseDir) {
             assert(record.exitCode === 1603, `${label} must return ERROR_INSTALL_FAILURE`);
             if (args.length > 1) { assert(!record.stdout && !record.stderr, `${label} emitted quiet output`); }
         }
-    } finally { fs.unlinkSync(installedAlias); }
+    } finally {
+        if (fs.existsSync(installedAlias)) { fs.unlinkSync(installedAlias); }
+        if (fs.existsSync(installedAliasDir)) { fs.rmdirSync(installedAliasDir); }
+    }
 
     const update = runCommand('native-update', updateSource.exe, ['-update', '--quiet'], {
         cwd: path.dirname(updateSource.exe),

@@ -153,7 +153,15 @@ function main() {
             guiHarness.includes('var audit = AnalyzeGuiActionDelta(delta, "update");') &&
             guiHarness.includes('var audit = AnalyzeGuiActionDelta(delta, "uninstall");') &&
             guiHarness.includes('return audit.SuccessCount > 0 && audit.FailureCount == 0;') &&
-            guiHarness.includes('LineMatchesGuiLifecycleAction(line, token)')
+            guiHarness.includes('LineMatchesGuiLifecycleAction(line, token)'),
+        runtimeHarnessReadsUnifiedDiagnosticLog:
+            guiHarness.includes('string TryReadBrandingLogFile()') &&
+            guiHarness.includes('artifacts.TryGetProperty("logFileName"') &&
+            guiHarness.includes('var logFileName = "diagnostics.log";'),
+        successfulGuiUninstallDoesNotRecreateRemovedLogTree:
+            serviceMain.includes('lifecycleAction != MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL || !result') &&
+            guiHarness.includes('var auditConsistentWithCleanUninstall = audit.RecordCount == 0 || auditHealthy;') &&
+            guiHarness.includes('auditConsistentWithCleanUninstall &&')
     };
 
     for (const [name, passed] of Object.entries(checks)) {
