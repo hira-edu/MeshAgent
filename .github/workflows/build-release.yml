@@ -156,11 +156,6 @@ jobs:
           Copy-Item -LiteralPath $trackedConfigPath -Destination $configPath
           Write-Host "Using tracked branding_config.json for non-deployment validation"
 
-      - name: Embed branding headers
-        shell: pwsh
-        run: |
-          ./tools/embed_provisioning_simple.ps1 -ConfigPath ./branding_config.local.json
-
       - name: Restore NuGet packages
         shell: pwsh
         run: |
