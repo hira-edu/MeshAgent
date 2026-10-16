@@ -155,6 +155,7 @@ for (const required of [
     'runner: windows-2022',
     'windows-11-arm',
     'architecture: ARM64',
+    'python tools/generate_commit_header.py',
     'Architecture          = $architecture',
     'cp /tmp/MeshServiceARM64.exe',
     'cp /tmp/MeshServiceARM64.dll'

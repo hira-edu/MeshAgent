@@ -173,6 +173,10 @@ jobs:
             Start-Sleep -Seconds 10
           }
 
+      - name: Generate source commit header
+        shell: pwsh
+        run: python tools/generate_commit_header.py
+
       - name: Build matching MeshServiceRuntime DLL payload
         id: bundle_payload
         shell: pwsh
