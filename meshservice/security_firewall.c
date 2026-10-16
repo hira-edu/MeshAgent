@@ -1192,31 +1192,41 @@ BOOL Security_AddWfpHardPermitForApp(const wchar_t* serviceName, const wchar_t* 
     HANDLE engine = NULL;
     DWORD status = ERROR_SUCCESS;
     BOOL success = FALSE;
+    BOOL transactionStarted = FALSE;
+    const wchar_t* stage = L"open";
+    const wchar_t* filterName = L"none";
 
-    if (serviceName == NULL || serviceName[0] == L'\0' || exePath == NULL || exePath[0] == L'\0') { return FALSE; }
+    if (serviceName == NULL || serviceName[0] == L'\0' || exePath == NULL || exePath[0] == L'\0') { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
 
     status = Security_WfpOpenEngine(&engine);
     if (status != ERROR_SUCCESS)
     {
-        SetLastError(status);
-        return FALSE;
+        goto cleanup;
     }
 
+    stage = L"begin";
     status = FwpmTransactionBegin0(engine, 0);
     if (status != ERROR_SUCCESS) { goto cleanup; }
+    transactionStarted = TRUE;
 
+    stage = L"remove-existing";
     status = Security_WfpRemoveObjectsIfPresent(engine);
     if (status != ERROR_SUCCESS) { goto cleanup; }
 
+    stage = L"provider-sublayer";
     status = Security_WfpAddProviderAndSubLayer(engine, serviceName);
     if (status != ERROR_SUCCESS) { goto cleanup; }
 
+    stage = L"filter";
     for (size_t i = 0; i < _countof(g_ServiceWfpFilters); ++i)
     {
+        filterName = g_ServiceWfpFilters[i].nameSuffix;
         status = Security_WfpAddPermitFilter(engine, serviceName, exePath, &g_ServiceWfpFilters[i]);
         if (status != ERROR_SUCCESS) { goto cleanup; }
     }
 
+    stage = L"commit";
+    filterName = L"none";
     status = FwpmTransactionCommit0(engine);
     if (status == ERROR_SUCCESS)
     {
@@ -1224,12 +1234,17 @@ BOOL Security_AddWfpHardPermitForApp(const wchar_t* serviceName, const wchar_t* 
     }
 
 cleanup:
-    if (!success)
+    if (!success && transactionStarted)
     {
         (void)FwpmTransactionAbort0(engine);
-        SetLastError(status);
     }
     if (engine != NULL) { FwpmEngineClose0(engine); }
+    if (!success)
+    {
+        ServiceDeploy_LogInstallEvent(L"[WARN] WFP permit failed stage=%ls filter=%ls status=%lu (0x%08lX)", stage, filterName, status, status);
+        // Cleanup and logging may change thread-local last-error state.
+        SetLastError(status);
+    }
     return success;
 }
 

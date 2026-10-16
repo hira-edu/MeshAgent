@@ -2,12 +2,15 @@
 """Exercise extracted production TLS receive/queued-write code with real OpenSSL.
 
 Uses disposable local socket pairs, memory BIO peers and an ephemeral certificate.
-Only transport scheduling/logging are stubbed; no installed agent is run. macOS
-uses the bundled OpenSSL archives; other POSIX hosts can supply library paths.
+Only transport scheduling/logging are stubbed; no installed agent is run. Windows
+uses loopback TCP and bundled x64 libraries; macOS uses bundled archives. Other
+POSIX hosts can supply library paths.
 """
 import argparse
 import hashlib
+import os
 import platform
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -16,20 +19,50 @@ from connection_failure_telemetry_native import extract
 ROOT = Path(__file__).resolve().parents[1]
 
 PRELUDE = r'''
+#ifdef _WIN32
+#define WIN32 1
+#define WINSOCK2 1
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#define close closesocket
+#define ILibAsyncSocket_LastSocketError() WSAGetLastError()
+#define ILibAsyncSocket_RecvErrorIsTransient(e) ((e)==WSAEWOULDBLOCK || (e)==WSAENOBUFS || (e)==WSAEINTR)
+static int probe_pair(SOCKET sv[2]) {
+ SOCKET listener=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+ struct sockaddr_in address={0};address.sin_family=AF_INET;address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+ if(listener==INVALID_SOCKET||bind(listener,(struct sockaddr*)&address,sizeof(address))||listen(listener,1))return -1;
+ int len=sizeof(address);if(getsockname(listener,(struct sockaddr*)&address,&len))return -1;
+ sv[0]=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+ if(sv[0]==INVALID_SOCKET||connect(sv[0],(struct sockaddr*)&address,sizeof(address)))return -1;
+ sv[1]=accept(listener,NULL,NULL);closesocket(listener);
+ u_long nonblocking=1;
+ return sv[1]==INVALID_SOCKET?-1:ioctlsocket(sv[0],FIONBIO,&nonblocking);
+}
+#define PROBE_FAMILY AF_INET
+#else
 #define _POSIX 1
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netdb.h>
 #include <unistd.h>
 #include <errno.h>
+#define SOCKET int
+#define ILibAsyncSocket_LastSocketError() errno
+#define ILibAsyncSocket_RecvErrorIsTransient(e) ((e)==EAGAIN || (e)==EINTR)
+#define probe_pair(sv) socketpair(AF_UNIX,SOCK_STREAM,0,sv)
+#define PROBE_FAMILY AF_UNIX
+#define strcpy_s(d,n,s) strcpy(d,s)
+#endif
 #include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/buffer.h>
-#define SOCKET int
 #define MEMORYCHUNKSIZE 4096
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
@@ -41,8 +74,6 @@ PRELUDE = r'''
 #define ILIBCRITICALEXIT(e) abort()
 #define ignore_result(x) ((void)(x))
 #define memmove_s(d,n,s,l) memmove(d,s,l)
-#define ILibAsyncSocket_LastSocketError() errno
-#define ILibAsyncSocket_RecvErrorIsTransient(e) ((e)==EAGAIN || (e)==EINTR)
 #define ILibSpinLock_Lock(x) ((void)0)
 #define ILibSpinLock_UnLock(x) ((void)0)
 #define ILibLifeTime_Add(...) abort()
@@ -53,16 +84,17 @@ PRELUDE = r'''
 #define ILib6to4(...) ((void)0)
 typedef struct ILibAsyncSocket_SendData { int UserFree, bufferSize; char *buffer; struct ILibAsyncSocket_SendData *Next; } ILibAsyncSocket_SendData;
 typedef struct ILibAsyncSocketModule {
- int internalSocket,PAUSE,BeginPointer,EndPointer,MallocSize,MaxBufferSize;
+ SOCKET internalSocket;
+ int PAUSE,BeginPointer,EndPointer,MallocSize,MaxBufferSize;
  int FinConnect,SSLConnect,TLSHandshakeCompleted,TLS_HandshakeError_Occurred,SendLock;
  int timeout_milliSeconds;
  char *buffer; void *user,*OnInterrupt,*timeout_handler,*LifeTime;
  struct sockaddr_in6 SourceAddress,RemoteAddress;
- struct { const char *stage; int tlsError; unsigned long opensslError; } diagnostics;
+ struct { const char *stage; int nativeError,tlsError; unsigned long opensslError; } diagnostics;
  SSL *ssl; BIO *readBio,*writeBio; BUF_MEM *readBioBuffer,*writeBioBuffer;
  char readBioBuffer_mem[MEMORYCHUNKSIZE];
  ILibAsyncSocket_SendData *PendingPlain_Head,*PendingPlain_Tail,*PendingSend_Head,*PendingSend_Tail;
- unsigned int PendingBytesToSend;
+ unsigned int PendingBytesToSend,TotalBytesSent;
  void (*OnData)(void *,char *,int *,int,void **,void **,int *);
  void (*OnConnect)(void *,int,void *);
  void (*OnDisconnect)(void *,void *);
@@ -70,10 +102,10 @@ typedef struct ILibAsyncSocketModule {
 } ILibAsyncSocketModule;
 static char ILibAsyncSocket_ScratchPad[4096], ILibScratchPad[4096];
 static int disconnects,received;
-static void ILibAsyncSocket_RecordFailure(ILibAsyncSocketModule *r,const char *stage,int native,int tls,unsigned long err) {
- if(r->diagnostics.stage)return;
- r->diagnostics.stage=stage; r->diagnostics.tlsError=tls; r->diagnostics.opensslError=err;
- printf("failure stage=%s tlsError=%d opensslError=%lu hex=%lx\n",stage,tls,err,err);
+static char last_log[2048];
+static void ILIBLOGMESSAGEX(const char *format,...) {
+ va_list args;va_start(args,format);vsnprintf(last_log,sizeof(last_log),format,args);va_end(args);
+ puts(last_log);
 }
 static void ILibAsyncSocket_ClearPendingSend(ILibAsyncSocketModule *r) { assert(!r->PendingSend_Head); }
 static unsigned int ILibAsyncSocket_TLSPendingBytes(ILibAsyncSocketModule *r) { return r->writeBioBuffer->length; }
@@ -154,8 +186,8 @@ static void run(int seed,int scenario) {
  }
  assert(SSL_is_init_finished(c)&&SSL_is_init_finished(s));ERR_clear_error();
  }
- int sv[2];assert(socketpair(AF_UNIX,SOCK_STREAM,0,sv)==0);
- ILibAsyncSocketModule r={0};r.internalSocket=sv[0];r.RemoteAddress.sin6_family=AF_UNIX;
+ SOCKET sv[2];assert(probe_pair(sv)==0);
+ ILibAsyncSocketModule r={0};r.internalSocket=sv[0];r.RemoteAddress.sin6_family=PROBE_FAMILY;
  r.ssl=c;r.FinConnect=1;r.SSLConnect=r.TLSHandshakeCompleted=(scenario!=3);r.MallocSize=4096;r.buffer=malloc(4096);
  r.OnData=ondata;r.OnDisconnect=onclose;
  if(scenario==5) {
@@ -190,6 +222,10 @@ static void run(int seed,int scenario) {
   assert(r.diagnostics.stage && strcmp(r.diagnostics.stage,"tls_read")==0);
   assert(r.diagnostics.tlsError==SSL_ERROR_SSL);
   assert(ERR_GET_REASON(r.diagnostics.opensslError)==(scenario==1?SSL_R_DECRYPTION_FAILED_OR_BAD_RECORD_MAC:SSL_R_SSLV3_ALERT_BAD_RECORD_MAC));
+  assert(strstr(last_log,"tlsVersion=TLSv1.2"));
+  const char *reason=ERR_reason_error_string(r.diagnostics.opensslError);
+  assert(strstr(last_log,reason?reason:(scenario==1?"local_bad_record_mac":"peer_bad_record_mac")));
+  assert(strstr(last_log,scenario==1?"opensslReason=281":"opensslReason=1020"));
  } else if(scenario==2) {
   assert(r.diagnostics.stage && strcmp(r.diagnostics.stage,"peer_eof")==0);
   assert(!r.diagnostics.tlsError && !r.diagnostics.opensslError);
@@ -212,6 +248,9 @@ static void pending_write(void) {
  free(data);SSL_free(r.ssl);SSL_CTX_free(ctx);ERR_clear_error();
 }
 int main(void) {
+#ifdef _WIN32
+ WSADATA winsock;assert(WSAStartup(MAKEWORD(2,2),&winsock)==0);
+#endif
  printf("runtime=%s\n",OpenSSL_version(OPENSSL_VERSION));initcert();
  run(0,0);run(1,0);run(2,0); // Healthy connection with clean, injected, and real peer-error queues.
  run(0,5); // Callback leaves a fatal error between two iterations of the production read loop.
@@ -231,25 +270,41 @@ def main():
     parser.add_argument("--openssl-lib-dir", type=Path)
     parser.add_argument("--out", type=Path, default=ROOT / "artifacts/validation/asyncsocket-tls-error-queue")
     args = parser.parse_args()
-    if platform.system() == "Windows":
-        parser.error("This socketpair harness requires a POSIX host")
+    windows = platform.system() == "Windows"
     lib_dir = args.openssl_lib_dir
     if lib_dir is None:
-        if platform.system() != "Darwin":
+        if windows:
+            lib_dir = ROOT / "openssl/libstatic"
+        elif platform.system() != "Darwin":
             parser.error("Supply --openssl-include and --openssl-lib-dir for your OpenSSL build")
-        arch = "osx-arm-64" if platform.machine() == "arm64" else "osx-x86-64"
-        lib_dir = ROOT / "openssl/libstatic/macos" / arch
+        else:
+            arch = "osx-arm-64" if platform.machine() == "arm64" else "osx-x86-64"
+            lib_dir = ROOT / "openssl/libstatic/macos" / arch
     args.out.mkdir(parents=True, exist_ok=True)
     source = args.source.read_text()
-    code = PRELUDE + "\n" + extract(source, "ILibAsyncSocket_TLSFlushPendingPlain") + "\n" + extract(source, "ILibProcessAsyncSocket") + "\n" + TESTS
+    code = PRELUDE + "\n" + extract(source, "ILibAsyncSocket_RecordFailure") + "\n" + extract(source, "ILibAsyncSocket_TLSFlushPendingPlain") + "\n" + extract(source, "ILibProcessAsyncSocket") + "\n" + TESTS
     harness = args.out / "probe.c"
-    binary = args.out / "probe"
+    binary = args.out / ("probe.exe" if windows else "probe")
     harness.write_text(code)
     command = [args.cc, "-std=gnu11", "-g", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
-               "-Wno-incompatible-pointer-types", "-I" + str(args.openssl_include), str(harness),
-               str(lib_dir / "libssl.a"), str(lib_dir / "libcrypto.a"), "-lpthread", "-o", str(binary)]
-    subprocess.run(command, check=True)
-    result = subprocess.run([str(binary.resolve())], capture_output=True, text=True)
+               "-Wno-incompatible-pointer-types", "-I" + str(args.openssl_include), str(harness)]
+    if windows:
+        command += [str(lib_dir / 'libssl64MT.lib'), str(lib_dir / 'libcrypto64MT.lib'), '-lws2_32', '-lcrypt32', '-ladvapi32', '-luser32']
+    else:
+        command += [str(lib_dir / 'libssl.a'), str(lib_dir / 'libcrypto.a'), '-lpthread']
+    command += ['-o', str(binary)]
+    build = subprocess.run(command, capture_output=True, text=True)
+    (args.out / 'build.log').write_text(build.stdout + build.stderr)
+    if build.returncode:
+        print(build.stdout + build.stderr, end='')
+        build.check_returncode()
+    env = os.environ.copy()
+    compiler = shutil.which(args.cc)
+    if windows and compiler:
+        runtimes = list(Path(compiler).parent.parent.glob('lib/clang/*/lib/windows/clang_rt.asan_dynamic-*.dll'))
+        if runtimes:
+            env['PATH'] = str(runtimes[0].parent) + os.pathsep + env.get('PATH', '')
+    result = subprocess.run([str(binary.resolve())], capture_output=True, text=True, env=env, timeout=30)
     evidence = "source_sha256=" + hashlib.sha256(source.encode()).hexdigest() + "\n" + result.stdout + result.stderr
     (args.out / "results.txt").write_text(evidence)
     print(evidence, end="")

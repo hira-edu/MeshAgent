@@ -452,11 +452,21 @@ state, HTTP status, WebSocket close code, socket/TLS error codes, heartbeat/data
 ages, uptime, and PID. `[TRANSPORT_FAILURE]` preserves the first native socket or
 TLS failure before cleanup, with the bytes sent on that connection
 (`totalBytesSent`, including the TLS handshake) for comparison with the bytes
-the server received. `[TRANSPORT_ZERO_SEND]` records a `send()` that accepted
+the server received. It includes the numeric socket peer and port (or `unknown`
+when unavailable), TLS version, and OpenSSL reason code and text. Builds without
+OpenSSL error strings still distinguish `peer_bad_record_mac` (received alert)
+from `local_bad_record_mac` (local record decryption/authentication failure).
+Other unavailable reason strings appear as `unknown`. Peer lookup does not
+perform DNS resolution. `[TRANSPORT_ZERO_SEND]` records a `send()` that accepted
 0 bytes of TLS ciphertext; the data stays queued, and the record is written at
 counts 1, 2, 4, 8, ... per connection. `[AUTH_FAILURE]` identifies rejected authentication.
 These records do not require `controlChannelDebug`, `logUpdate`, or
 `SERVICE_CONTROLCHANNEL_TRACE` and do not log packet bodies, credentials, or keys.
+
+WFP permit failures record the failing operation, filter suffix when applicable,
+and original Windows status in decimal and hexadecimal. Firewall convergence
+warnings include `wfpError`, captured before subsequent checks can change it.
+Transaction cleanup preserves the original failure status.
 
 Each server-authenticated session writes one always-on
 `[CONTROLCHANNEL_CONNECTED] descriptor= idleTimeoutSeconds= previousRetryMs= pid=`

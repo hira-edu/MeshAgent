@@ -58,7 +58,8 @@ typedef struct ILibAsyncSocket_ConnectionDiagnostics {
 typedef struct ILibAsyncSocketModule ILibAsyncSocketModule;
 struct ILibAsyncSocketModule {
     SOCKET internalSocket;
-    unsigned int PendingBytesToSend;
+    unsigned int PendingBytesToSend, TotalBytesSent;
+    int SendLock;
     int FinConnect, PAUSE, BeginPointer, EndPointer, MallocSize, MaxBufferSize;
     int timeout_milliSeconds;
     char *buffer;
@@ -90,6 +91,8 @@ static void ILIBLOGMESSAGEX(char *format, ...) {
     WSASetLastError(777);
 }
 static void ILibAsyncSocket_ClearPendingSend(void *socket) { ((ILibAsyncSocketModule *)socket)->PendingBytesToSend=0; }
+static void ILibSpinLock_Lock(int *lock) { assert(*lock==0); *lock=1; }
+static void ILibSpinLock_UnLock(int *lock) { assert(*lock==1); *lock=0; }
 static void ILib6to4(struct sockaddr *address) { (void)address; }
 static long long ILibGetUptime(void) { return 10000; }
 static int ILibIsChainBeingDestroyed(void *chain) { (void)chain; return destroying; }
@@ -170,6 +173,7 @@ static void snapshot_cases(void) {
     WSASetLastError(10054);
     ILibAsyncSocket_RecordFailure(&reader,"tls_handshake",0,1,1234);
     assert(WSAGetLastError()==10054 && logs==1);
+    assert(strstr(logLines[0],"peer=unknown port=unknown"));
     ILibAsyncSocket_RecordFailure(&reader,"receive",10054,0,0);
     assert(logs==1 && reader.diagnostics.opensslError==1234 && reader.diagnostics.tlsError==1);
     ILibAsyncSocket_ConnectionDiagnostics copy;
@@ -181,9 +185,20 @@ static void snapshot_cases(void) {
     ILibWebClient_GetConnectionDiagnostics(NULL,&copy,&closeCode); assert(copy.stage==NULL && closeCode==0);
     puts("PASS: first TLS error, close code, null getters and socket error state are preserved");
 }
+static void peer_case(void) {
+    ILibAsyncSocketModule reader; SOCKET peer=peer_pair(&reader);
+    struct sockaddr_in address; int len=sizeof(address);
+    assert(getsockname(peer,(struct sockaddr*)&address,&len)==0);
+    char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"peer=127.0.0.1 port=%u",ntohs(address.sin_port));
+    WSASetLastError(10054);
+    ILibAsyncSocket_RecordFailure(&reader,"receive",10054,0,0);
+    assert(WSAGetLastError()==10054 && logs==1 && strstr(logLines[0],endpoint));
+    closesocket(peer); closesocket(reader.internalSocket); free(reader.buffer);
+    puts("PASS: actual numeric TCP peer and port recorded without clobbering socket error");
+}
 int main(void) {
     WSADATA winsock; assert(WSAStartup(MAKEWORD(2,2),&winsock)==0);
-    quiet_cases(); eof_case(); reset_case(); snapshot_cases(); close_frames(); WSACleanup(); return 0;
+    quiet_cases(); eof_case(); reset_case(); snapshot_cases(); peer_case(); close_frames(); WSACleanup(); return 0;
 }
 '''
 

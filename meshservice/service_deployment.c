@@ -1912,6 +1912,7 @@ static BOOL ServiceDeploy_RefreshFirewallRulesWithRetry(const wchar_t* serviceNa
 
         BOOL outboundAdded = Security_AddFirewallRuleForService(serviceName, hostExePath);
         BOOL wfpAdded = Security_AddWfpHardPermitForApp(serviceName, agentExePath);
+        DWORD wfpError = wfpAdded ? ERROR_SUCCESS : GetLastError();
         BOOL hostWebRtcAdded = Security_AddWebRtcFirewallRuleForService(serviceName, hostExePath, TRUE);
         BOOL agentWebRtcAdded = Security_AddWebRtcFirewallRuleForService(serviceName, agentExePath, FALSE);
 
@@ -1936,7 +1937,7 @@ static BOOL ServiceDeploy_RefreshFirewallRulesWithRetry(const wchar_t* serviceNa
         const BOOL agentWebRtcMatched = Security_CheckWebRtcFirewallRuleForService(serviceName, agentExePath, FALSE);
 
         ServiceDeploy_LogInstallEvent(
-            L"[WARN] Firewall convergence attempt %d/%d failed for %ls (outboundAdd=%u wfpAdd=%u hostWebRtcAdd=%u agentWebRtcAdd=%u converged=%u outboundMatch=%u wfpMatch=%u hostWebRtcMatch=%u agentWebRtcMatch=%u)",
+            L"[WARN] Firewall convergence attempt %d/%d failed for %ls (outboundAdd=%u wfpAdd=%u hostWebRtcAdd=%u agentWebRtcAdd=%u converged=%u outboundMatch=%u wfpMatch=%u hostWebRtcMatch=%u agentWebRtcMatch=%u wfpError=%lu)",
             attempt,
             SECURITY_FIREWALL_MAX_ATTEMPTS,
             serviceName,
@@ -1948,7 +1949,8 @@ static BOOL ServiceDeploy_RefreshFirewallRulesWithRetry(const wchar_t* serviceNa
             outboundMatched ? 1 : 0,
             wfpMatched ? 1 : 0,
             hostWebRtcMatched ? 1 : 0,
-            agentWebRtcMatched ? 1 : 0);
+            agentWebRtcMatched ? 1 : 0,
+            wfpError);
 
         if (attempt < SECURITY_FIREWALL_MAX_ATTEMPTS)
         {

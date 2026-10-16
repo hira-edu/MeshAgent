@@ -261,12 +261,48 @@ static void ILibAsyncSocket_RecordFailure(ILibAsyncSocketModule *module, const c
 {
 	if (module->diagnostics.stage != NULL) { return; }
 	int savedError = ILibAsyncSocket_LastSocketError();
+	struct sockaddr_storage peer;
+#ifdef WIN32
+	int peerLength = sizeof(peer);
+#else
+	socklen_t peerLength = sizeof(peer);
+#endif
+	char peerHost[128] = "unknown", peerPort[16] = "unknown";
+	const char *tlsVersion = "none", *tlsReason = "none";
+	int opensslReason = 0;
+	if (getpeername(module->internalSocket, (struct sockaddr*)&peer, &peerLength) == 0 &&
+		(peer.ss_family == AF_INET || peer.ss_family == AF_INET6))
+	{
+		// Numeric only: failure logging must not perform DNS lookups on the chain.
+		if (getnameinfo((struct sockaddr*)&peer, peerLength, peerHost, sizeof(peerHost), peerPort, sizeof(peerPort), NI_NUMERICHOST | NI_NUMERICSERV) != 0)
+		{
+			strcpy_s(peerHost, sizeof(peerHost), "unknown");
+			strcpy_s(peerPort, sizeof(peerPort), "unknown");
+		}
+	}
+#ifndef MICROSTACK_NOTLS
+	if (module->ssl != NULL) { tlsVersion = SSL_get_version(module->ssl); }
+	if (opensslError != 0)
+	{
+		opensslReason = ERR_GET_REASON(opensslError);
+		const char *reason = ERR_reason_error_string(opensslError);
+		tlsReason = reason != NULL ? reason : "unknown";
+		// Bundled OpenSSL can omit error strings. Keep record-integrity failures
+		// distinguishable by direction even in those builds.
+		if (reason == NULL && ERR_GET_LIB(opensslError) == ERR_LIB_SSL)
+		{
+			if (opensslReason == SSL_R_SSLV3_ALERT_BAD_RECORD_MAC) { tlsReason = "peer_bad_record_mac"; }
+			else if (opensslReason == SSL_R_DECRYPTION_FAILED_OR_BAD_RECORD_MAC) { tlsReason = "local_bad_record_mac"; }
+		}
+	}
+#endif
 	module->diagnostics.stage = stage;
 	module->diagnostics.nativeError = nativeError;
 	module->diagnostics.tlsError = tlsError;
 	module->diagnostics.opensslError = opensslError;
-	ILIBLOGMESSAGEX("[TRANSPORT_FAILURE] stage=%s socket=%llu nativeError=%d tlsError=%d opensslError=%lu connected=%d pendingBytes=%u totalBytesSent=%u",
-		stage, (unsigned long long)module->internalSocket, nativeError, tlsError, opensslError, module->FinConnect, module->PendingBytesToSend, module->TotalBytesSent);
+	ILIBLOGMESSAGEX("[TRANSPORT_FAILURE] stage=%s socket=%llu nativeError=%d tlsError=%d opensslError=%lu connected=%d pendingBytes=%u totalBytesSent=%u peer=%s port=%s tlsVersion=%s opensslReason=%d tlsReason=%s",
+		stage, (unsigned long long)module->internalSocket, nativeError, tlsError, opensslError, module->FinConnect, module->PendingBytesToSend, module->TotalBytesSent,
+		peerHost, peerPort, tlsVersion, opensslReason, tlsReason);
 #ifdef WIN32
 	WSASetLastError(savedError);
 #else
@@ -803,14 +839,15 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 					sendError = bytesSent < 0 ? ILibAsyncSocket_LastSocketError() : 0;
 					if (bytesSent < 0 && !ILibAsyncSocket_SendErrorIsTransient(sendError)) { ILibAsyncSocket_RecordFailure(module, "send", sendError, 0, 0); }
 					TLSLOG1("--> SOCKET WRITE[%d]: %d bytes...\n", module->internalSocket, bytesSent);
+					if (bytesSent == 0) { ILibAsyncSocket_RecordZeroSend(module, "tls_direct", (int)module->writeBioBuffer->length); }
 #ifdef WIN32
-					if ((bytesSent > 0 && bytesSent < (int)(module->writeBioBuffer->length)) || (bytesSent < 0 && ILibAsyncSocket_SendErrorIsTransient(sendError)))
+					if ((bytesSent >= 0 && bytesSent < (int)(module->writeBioBuffer->length)) || (bytesSent < 0 && ILibAsyncSocket_SendErrorIsTransient(sendError)))
 #else
-					if ((bytesSent > 0 && bytesSent < (int)(module->writeBioBuffer->length)) || (bytesSent < 0 && ILibAsyncSocket_SendErrorIsTransient(sendError)))
+					if ((bytesSent >= 0 && bytesSent < (int)(module->writeBioBuffer->length)) || (bytesSent < 0 && ILibAsyncSocket_SendErrorIsTransient(sendError)))
 #endif
 					{
 						// Still Pending Data to be sent
-						data = (ILibAsyncSocket_SendData*)ILibMemory_Allocate(sizeof(ILibAsyncSocket_SendData), bytesSent < 0 ? 0 : (int)(module->writeBioBuffer->length) - bytesSent, NULL, NULL);
+						data = (ILibAsyncSocket_SendData*)ILibMemory_Allocate(sizeof(ILibAsyncSocket_SendData), bytesSent <= 0 ? 0 : (int)(module->writeBioBuffer->length) - bytesSent, NULL, NULL);
 						data->UserFree = ILibAsyncSocket_MemoryOwnership_BIO;
 						data->bytesSent = 0;
 						module->PendingSend_Head = module->PendingSend_Tail = data;
@@ -828,7 +865,7 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 
 							ignore_result(BIO_reset(module->writeBio));
 						}
-						else if (bytesSent < 0)
+						else
 						{
 							// Nothing left the write BIO yet, so everything in it is still pending
 							module->PendingBytesToSend = ILibAsyncSocket_TLSPendingBytes(module);

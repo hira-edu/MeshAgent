@@ -267,8 +267,23 @@ healthy reads, partial handshakes, or queued writes into fatal errors, including
 an error left by a buffer-reallocation callback between reads. Corrupt
 records and real peer alerts must still disconnect with their own diagnostics;
 clean TLS shutdown remains a quiet EOF. The probe uses ASan/UBSan and the bundled
-OpenSSL libraries on macOS. Other POSIX hosts can specify `--openssl-include`
+OpenSSL libraries on macOS and Windows x64 (using loopback TCP instead of Unix
+socket pairs). It also checks the TLS version and decoded failure reason in the
+production diagnostics. Other POSIX hosts can specify `--openssl-include`
 and `--openssl-lib-dir`. Evidence goes under `artifacts/validation/`.
+
+`python test/asyncsocket_tls_send_native.py` exercises the production TLS send
+and PostSelect write paths with real TLS 1.2/1.3 memory peers on Windows x64.
+Injected socket acceptance covers short writes, zero-byte writes, would-block,
+buffer exhaustion, interrupted calls, and fatal resets. Multi-buffer sends and
+immediate caller-buffer reuse must deliver every plaintext byte in order with
+correct ciphertext accounting. The probe uses Clang ASan/UBSan and the bundled
+OpenSSL libraries; it does not run an installed agent or use a remote endpoint.
+
+`python test/wfp_failure_telemetry_native.py` injects WFP failures at each
+transaction stage and clobbers last-error during cleanup and logging. It checks
+original status retention, stage/filter identification, and transaction cleanup
+without changing firewall rules. It requires Windows SDK and Clang ASan/UBSan.
 
 `python3 test/native_update_state_runtime.py` compiles production update
 functions with process, datastore, and file-I/O mocks. It checks durable force
