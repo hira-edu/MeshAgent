@@ -229,6 +229,7 @@ typedef struct ILibAsyncSocketModule
 	struct ILibAsyncSocket_SendData *PendingSend_Tail;
 	ILibSpinLock SendLock;
 	long long pausedProbeTick;	// ILibGetUptime() of the last peer-close probe while paused
+	unsigned int zeroSendCount;	// Zero-byte send() results for TLS ciphertext on this connection (diagnostics)
 
 	int MaxBufferSize;
 	int MaxBufferSizeExceeded;
@@ -264,8 +265,24 @@ static void ILibAsyncSocket_RecordFailure(ILibAsyncSocketModule *module, const c
 	module->diagnostics.nativeError = nativeError;
 	module->diagnostics.tlsError = tlsError;
 	module->diagnostics.opensslError = opensslError;
-	ILIBLOGMESSAGEX("[TRANSPORT_FAILURE] stage=%s socket=%llu nativeError=%d tlsError=%d opensslError=%lu connected=%d pendingBytes=%u",
-		stage, (unsigned long long)module->internalSocket, nativeError, tlsError, opensslError, module->FinConnect, module->PendingBytesToSend);
+	ILIBLOGMESSAGEX("[TRANSPORT_FAILURE] stage=%s socket=%llu nativeError=%d tlsError=%d opensslError=%lu connected=%d pendingBytes=%u totalBytesSent=%u",
+		stage, (unsigned long long)module->internalSocket, nativeError, tlsError, opensslError, module->FinConnect, module->PendingBytesToSend, module->TotalBytesSent);
+#ifdef WIN32
+	WSASetLastError(savedError);
+#else
+	errno = savedError;
+#endif
+}
+
+// send() reported 0 bytes for non-empty TLS ciphertext. Logged at power-of-two counts per connection, so a
+// repeating condition stays visible without flooding the log.
+static void ILibAsyncSocket_RecordZeroSend(ILibAsyncSocketModule *module, const char *stage, int requested)
+{
+	unsigned int count = ++module->zeroSendCount;
+	if ((count & (count - 1)) != 0) { return; }
+	int savedError = ILibAsyncSocket_LastSocketError();
+	ILIBLOGMESSAGEX("[TRANSPORT_ZERO_SEND] stage=%s socket=%llu requested=%d count=%u totalBytesSent=%u",
+		stage, (unsigned long long)module->internalSocket, requested, count, module->TotalBytesSent);
 #ifdef WIN32
 	WSASetLastError(savedError);
 #else
@@ -1053,7 +1070,15 @@ void ILibAsyncSocket_Disconnect(ILibAsyncSocket_SocketModule socketModule)
 		// Flush the close_notify (and any ciphertext still queued) before the socket is torn down, so the peer sees
 		// a clean TLS shutdown instead of a bare TCP close. Best effort and non-blocking: the socket is O_NONBLOCK,
 		// and whatever cannot go out immediately is dropped when the BIOs are freed just below.
-		if (module->writeBioBuffer != NULL && module->writeBioBuffer->length > 0 && module->internalSocket != (SOCKET)~0)
+		// Ciphertext pulled out of the write BIO by a partial send is older than everything still in the BIO, so it
+		// must go out first and completely; otherwise the BIO is not sent, since out-of-order records fail the peer's MAC.
+		int flushInOrder = 1;
+		if (module->PendingSend_Head != NULL && module->PendingSend_Head->buffer != NULL && module->PendingSend_Head->bytesSent < module->PendingSend_Head->bufferSize && module->internalSocket != (SOCKET)~0)
+		{
+			int remaining = module->PendingSend_Head->bufferSize - module->PendingSend_Head->bytesSent;
+			flushInOrder = (send(module->internalSocket, module->PendingSend_Head->buffer + module->PendingSend_Head->bytesSent, remaining, MSG_NOSIGNAL) == remaining);
+		}
+		if (flushInOrder != 0 && module->writeBioBuffer != NULL && module->writeBioBuffer->length > 0 && module->internalSocket != (SOCKET)~0)
 		{
 			BIO_clear_retry_flags(module->writeBio);
 			ignore_result(send(module->internalSocket, module->writeBioBuffer->data, (int)(module->writeBioBuffer->length), MSG_NOSIGNAL));
@@ -1138,6 +1163,7 @@ void ILibAsyncSocket_ConnectTo(void* socketModule, struct sockaddr *localInterfa
 
 	// Clean up
 	memset(&module->diagnostics, 0, sizeof(module->diagnostics));
+	module->zeroSendCount = 0;
 	memset(&(module->RemoteAddress), 0, sizeof(struct sockaddr_in6));
 	memset(&(module->LocalAddress) , 0, sizeof(struct sockaddr_in6));
 	memset(&(module->SourceAddress), 0, sizeof(struct sockaddr_in6));
@@ -1375,6 +1401,7 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_ProcessEncryptedBuffer(ILibAsyncSocke
 			{
 				BIO_clear_retry_flags(Reader->writeBio);
 				j = send(Reader->internalSocket, Reader->writeBioBuffer->data, (int)(Reader->writeBioBuffer->length), MSG_NOSIGNAL); // Klockwork says this can block, but it won't, because it's a nonblocking socket
+				if (j > 0) { Reader->TotalBytesSent += j; }
 				if (j < 0)
 				{
 					int error = ILibAsyncSocket_LastSocketError();
@@ -1702,6 +1729,9 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 		//
 		// This means the socket was gracefully closed by the remote endpoint
 		//
+		// Hold SendLock across the teardown, as ILibAsyncSocket_Disconnect() does: senders test internalSocket and ssl
+		// and append to the pending list under this lock, so none may see them half torn down or the SSL object freed.
+		ILibSpinLock_Lock(&(Reader->SendLock));
 		SEM_TRACK(AsyncSocket_TrackLock("ILibProcessAsyncSocket", 1, Reader);)
 			ILibAsyncSocket_ClearPendingSend(Reader);
 		SEM_TRACK(AsyncSocket_TrackUnLock("ILibProcessAsyncSocket", 2, Reader);)
@@ -1724,12 +1754,11 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 		if (Reader->ssl != NULL)
 		{
 			SSL_free(Reader->ssl); // Frees SSL session and BIO buffer at the same time
-			ILibSpinLock_Lock(&(Reader->SendLock));
 			Reader->ssl = NULL;
-			ILibSpinLock_UnLock(&(Reader->SendLock));
 		}
 #endif
-		
+		ILibSpinLock_UnLock(&(Reader->SendLock));
+
 		//
 		// Inform the user the socket has closed
 		//
@@ -2364,6 +2393,7 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 						if (bytesSent > 0)
 						{
 							module->PendingSend_Head->bytesSent += bytesSent;
+							module->TotalBytesSent += bytesSent;
 							if (module->PendingSend_Head->bytesSent == module->PendingSend_Head->bufferSize && module->PendingSend_Head->UserFree == ILibAsyncSocket_MemoryOwnership_CHAIN)
 							{
 								free(module->PendingSend_Head->buffer);
@@ -2387,6 +2417,7 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 						{
 							TRY_TO_SEND = 0;
 							// The buffer stays queued; only a non-transient socket error is a failure.
+							if (bytesSent == 0) { ILibAsyncSocket_RecordZeroSend(module, "tls_node_drain", module->PendingSend_Head->bufferSize - module->PendingSend_Head->bytesSent); }
 							if (bytesSent == 0 || ILibAsyncSocket_SendErrorIsTransient(sendError)) { sendDeferred = 1; }
 						}
 					}
@@ -2403,10 +2434,13 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 					sendError = bytesSent < 0 ? ILibAsyncSocket_LastSocketError() : 0;
 					if (bytesSent < 0 && !ILibAsyncSocket_SendErrorIsTransient(sendError)) { ILibAsyncSocket_RecordFailure(module, "send", sendError, 0, 0); }
 					TLSLOG1("  << BIOBUFFER[%d] drain: %d of %d bytes >>\n", module->internalSocket, bytesSent, (int)module->writeBioBuffer->length);
+					// A zero-byte send() took nothing, so the ciphertext stays in the write BIO for the next writable event,
+					// as the pending-node drain above already does. Discarding it would desynchronise the TLS record stream.
+					if (bytesSent == 0) { ILibAsyncSocket_RecordZeroSend(module, "tls_bio_drain", (int)(module->writeBioBuffer->length)); }
 #ifdef WIN32
-					if ((bytesSent > 0 && bytesSent < (int)(module->writeBioBuffer->length)) || (bytesSent < 0 && ILibAsyncSocket_SendErrorIsTransient(sendError)))
+					if ((bytesSent > 0 && bytesSent < (int)(module->writeBioBuffer->length)) || bytesSent == 0 || (bytesSent < 0 && ILibAsyncSocket_SendErrorIsTransient(sendError)))
 #else
-					if ((bytesSent > 0 && bytesSent < (int)(module->writeBioBuffer->length)) || (bytesSent < 0 && ILibAsyncSocket_SendErrorIsTransient(sendError)))
+					if ((bytesSent > 0 && bytesSent < (int)(module->writeBioBuffer->length)) || bytesSent == 0 || (bytesSent < 0 && ILibAsyncSocket_SendErrorIsTransient(sendError)))
 #endif
 					{
 						if (bytesSent > 0) 
@@ -2458,9 +2492,8 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 				}
 				else
 				{
-					// All data was sent
+					// All data was sent (the node drain above already counted its bytes in TotalBytesSent)
 					ignore_result(BIO_reset(module->writeBio));
-					module->TotalBytesSent += bytesSent;
 					module->PendingBytesToSend = (unsigned int)(module->writeBioBuffer->length);
 					if (module->PendingSend_Head->buffer != NULL && module->PendingSend_Head->UserFree == ILibAsyncSocket_MemoryOwnership_CHAIN) { free(module->PendingSend_Head->buffer); }
 					free(module->PendingSend_Head);
@@ -2786,6 +2819,7 @@ void ILibAsyncSocket_UseThisSocket(ILibAsyncSocket_SocketModule socketModule, in
 	if (UseThisSocket != INVALID_SOCKET) { ILibAsyncSocket_EnableKeepAlive(UseThisSocket); }
 #endif
 	memset(&module->diagnostics, 0, sizeof(module->diagnostics));
+	module->zeroSendCount = 0;
 	module->OnInterrupt = InterruptPtr;
 	module->user = user;
 	module->FinConnect = 1;

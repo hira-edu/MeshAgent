@@ -448,7 +448,11 @@ The agent always writes control-channel failures.
 `[CONTROLCHANNEL_FAILURE]` records the failed stage, connection/authentication
 state, HTTP status, WebSocket close code, socket/TLS error codes, heartbeat/data
 ages, uptime, and PID. `[TRANSPORT_FAILURE]` preserves the first native socket or
-TLS failure before cleanup; `[AUTH_FAILURE]` identifies rejected authentication.
+TLS failure before cleanup, with the bytes sent on that connection
+(`totalBytesSent`, including the TLS handshake) for comparison with the bytes
+the server received. `[TRANSPORT_ZERO_SEND]` records a `send()` that accepted
+0 bytes of TLS ciphertext; the data stays queued, and the record is written at
+counts 1, 2, 4, 8, ... per connection. `[AUTH_FAILURE]` identifies rejected authentication.
 These records do not require `controlChannelDebug`, `logUpdate`, or
 `SERVICE_CONTROLCHANNEL_TRACE` and do not log packet bodies, credentials, or keys.
 
