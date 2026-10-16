@@ -116,8 +116,8 @@ async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const runtimeHostPath = getSystemRuntimeHostPath();
-    const dllPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
-    const logPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'service-host-debug.log');
+    const dllPath = args.dll ? path.resolve(args.dll) : path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
+    const logPath = path.join(path.dirname(dllPath), 'service-host-debug.log');
     const controlPipeName = `\\\\.\\pipe\\MeshKvm_${process.pid}_${Date.now()}_in`;
     const dataPipeName = `\\\\.\\pipe\\MeshKvm_${process.pid}_${Date.now()}_out`;
     const shutdownMode = String(args.shutdown || 'pipe-close').toLowerCase();

@@ -70,6 +70,18 @@ files and both native service DLLs. Each native 64-bit matrix leg verifies its
 PE machine and exact embedded-DLL equality before uploading artifacts; when
 signing is configured, the service DLL is signed before it is embedded.
 
+CI checks out this repository at `MeshAgent/` and runtime components at sibling
+`hook/`. Set `RUNTIME_COMPONENT_REPOSITORY` and `RUNTIME_COMPONENT_REF` repository
+variables to select another source or pin its revision. Private dependencies
+require a read-capable `DEPENDENCY_REPO_TOKEN` secret.
+
+Set `BRANDING_CONFIG_JSON` and `PROVISIONING_MSH` secrets to the local branding
+JSON and complete provisioning manifest for releases, deployment, and runtime
+validation. CI validates them before generating its local input files. Ordinary
+builds without these inputs use a build-only fixture pointing at
+`validation.invalid`; those builds cannot publish or deploy. Tag and deployment
+runs fail when configured inputs are missing or branding contains placeholders.
+
 Each x64 and ARM64 `MeshServiceBundle` configuration embeds the x86 and x64 persistent
 `RuntimeLoader` controller executables built from a sibling checkout. Each
 controller contains and owns its architecture-specific runtime image. The build looks for

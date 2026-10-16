@@ -867,20 +867,20 @@ def read_pe_machine(path):
     return int.from_bytes(header[pe_offset + 4:pe_offset + 6], "little")
 
 
-def _pe_rva_to_file_offset(image, sections, rva):
+def _pe_rva_to_file_offset(image, sections, rva, size=1):
     """Translate a PE relative virtual address to a bounded file offset."""
     for virtual_address, virtual_size, raw_offset, raw_size in sections:
         span = max(virtual_size, raw_size)
         if virtual_address <= rva < virtual_address + span:
             delta = rva - virtual_address
-            if delta >= raw_size or raw_offset + delta >= len(image):
+            if size < 1 or delta + size > raw_size or raw_offset + delta + size > len(image):
                 break
             return raw_offset + delta
     raise ValueError(f"PE RVA 0x{rva:X} is not backed by file data")
 
 
 def read_pe_export_names(path):
-    """Return the named exports from a PE image without loading executable code."""
+    """Return named, locally backed PE exports without loading executable code."""
     image = Path(path).read_bytes()
     if len(image) < 0x40 or image[:2] != b"MZ":
         raise ValueError(f"Not a PE image: {path}")
@@ -925,19 +925,24 @@ def read_pe_export_names(path):
             raise ValueError(f"Invalid PE section bounds: {path}")
         sections.append((virtual_address, virtual_size, raw_offset, raw_size))
 
-    export_offset = _pe_rva_to_file_offset(image, sections, export_rva)
-    if export_offset + 40 > len(image):
+    export_offset = _pe_rva_to_file_offset(image, sections, export_rva, 40)
+    if export_size < 40:
         raise ValueError(f"Truncated PE export directory: {path}")
+    function_count = int.from_bytes(image[export_offset + 20:export_offset + 24], "little")
     name_count = int.from_bytes(image[export_offset + 24:export_offset + 28], "little")
+    functions_rva = int.from_bytes(image[export_offset + 28:export_offset + 32], "little")
     names_rva = int.from_bytes(image[export_offset + 32:export_offset + 36], "little")
-    if name_count > 1_000_000:
+    ordinals_rva = int.from_bytes(image[export_offset + 36:export_offset + 40], "little")
+    if name_count > 1_000_000 or function_count > 1_000_000:
         raise ValueError(f"Unreasonable PE export count: {path}")
     if name_count == 0:
         return set()
 
-    names_offset = _pe_rva_to_file_offset(image, sections, names_rva)
-    if names_offset + name_count * 4 > len(image):
-        raise ValueError(f"Truncated PE export name table: {path}")
+    if function_count == 0:
+        raise ValueError(f"Named PE exports have no function table: {path}")
+    names_offset = _pe_rva_to_file_offset(image, sections, names_rva, name_count * 4)
+    ordinals_offset = _pe_rva_to_file_offset(image, sections, ordinals_rva, name_count * 2)
+    functions_offset = _pe_rva_to_file_offset(image, sections, functions_rva, function_count * 4)
     exports = set()
     for index in range(name_count):
         name_rva_offset = names_offset + index * 4
@@ -946,6 +951,18 @@ def read_pe_export_names(path):
         terminator = image.find(b"\0", name_offset, min(len(image), name_offset + 4096))
         if terminator < 0:
             raise ValueError(f"Unterminated PE export name: {path}")
+        _pe_rva_to_file_offset(image, sections, name_rva, terminator - name_offset + 1)
+        ordinal_offset = ordinals_offset + index * 2
+        ordinal = int.from_bytes(image[ordinal_offset:ordinal_offset + 2], "little")
+        if ordinal >= function_count:
+            raise ValueError(f"PE export ordinal is outside the function table: {path}")
+        function_offset = functions_offset + ordinal * 4
+        function_rva = int.from_bytes(image[function_offset:function_offset + 4], "little")
+        # Required lifecycle exports must be implemented in this image. A name
+        # with a null address or an unresolved forwarder is not an entry point.
+        if function_rva == 0 or export_rva <= function_rva < export_rva + export_size:
+            continue
+        _pe_rva_to_file_offset(image, sections, function_rva)
         exports.add(image[name_offset:terminator])
     return exports
 

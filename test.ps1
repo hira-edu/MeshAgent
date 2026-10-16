@@ -52,6 +52,9 @@
 .PARAMETER RuntimeArchitecture
     Native service architecture used by grouped runtime lifecycle checks: x64 or ARM64.
 
+.PARAMETER FullRelease
+    Require and inspect all Windows release architectures instead of only RuntimeArchitecture.
+
 .PARAMETER RuntimeEvidencePath
     Evidence directory for grouped regression results. Defaults to artifacts/validation/runtime.
 
@@ -88,6 +91,9 @@ param(
 [Parameter()]
 [ValidateSet('x64', 'ARM64')]
 [string]$RuntimeArchitecture = 'x64',
+
+[Parameter()]
+[switch]$FullRelease,
 
 [Parameter()]
 [string]$RuntimeEvidencePath,
@@ -281,7 +287,8 @@ function Get-MeshCentralAgentDownload {
         [string]$MeshCentralControlUrl,
         [string]$MeshCentralLoginUser,
         [string]$MeshCentralLoginPass,
-        [string]$MeshCtrlPath
+        [string]$MeshCtrlPath,
+        [ValidateSet('4', '43')][string]$AgentType = '4'
     )
 
     $hasMeshId = -not [string]::IsNullOrWhiteSpace($MeshCentralMeshId)
@@ -311,7 +318,7 @@ function Get-MeshCentralAgentDownload {
                 '--loginpass', $MeshCentralLoginPass,
                 '--url', $MeshCentralControlUrl,
                 '--id', $MeshCentralMeshId,
-                '--type', '4'
+                '--type', $AgentType
             )
 
             $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -328,6 +335,7 @@ function Get-MeshCentralAgentDownload {
             $stdout = $proc.StandardOutput.ReadToEnd()
             $stderr = $proc.StandardError.ReadToEnd()
             $proc.WaitForExit()
+            if ($proc.ExitCode -ne 0) { throw "meshctrl AgentDownload exited with code $($proc.ExitCode)." }
 
             $match = [regex]::Match($stdout, 'Downloaded .* to \"(.*)\"')
             if (-not $match.Success) {
@@ -903,7 +911,7 @@ $x64BinaryCandidates = @(
 if ($RuntimeArchitecture -eq 'x64') {
     $x64BinaryCandidates = @((Join-Path $BinaryPath "MeshService-2022.exe")) + $x64BinaryCandidates
 }
-$x64Binary = Resolve-BinaryPath -Candidates $x64BinaryCandidates
+$x64Binary = if ($FullRelease -or $RuntimeArchitecture -eq 'x64') { Resolve-BinaryPath -Candidates $x64BinaryCandidates } else { $null }
 $x64Size = $null
 
 $arm64BinaryCandidates = @(
@@ -913,14 +921,14 @@ $arm64BinaryCandidates = @(
 if ($RuntimeArchitecture -eq 'ARM64') {
     $arm64BinaryCandidates = @((Join-Path $BinaryPath "MeshService-2022.exe")) + $arm64BinaryCandidates
 }
-$arm64Binary = Resolve-BinaryPath -Candidates $arm64BinaryCandidates
+$arm64Binary = if ($FullRelease -or $RuntimeArchitecture -eq 'ARM64') { Resolve-BinaryPath -Candidates $arm64BinaryCandidates } else { $null }
 $arm64Size = $null
 
 $x86BinaryCandidates = @(
     Join-Path $BinaryPath "MeshService.exe"
     Join-Path $repoRoot "meshservice\MeshServiceRuntime\MeshService-2022.exe"
 )
-$x86Binary = Resolve-BinaryPath -Candidates $x86BinaryCandidates
+$x86Binary = if ($FullRelease) { Resolve-BinaryPath -Candidates $x86BinaryCandidates } else { $null }
 $x86Size = $null
 
 # Test 1.1: x64 Binary Exists
@@ -928,7 +936,7 @@ if ($x64Binary -and (Test-Path $x64Binary)) {
     $x64Item = Get-Item $x64Binary
     $x64Size = $x64Item.Length
     Write-TestResult -TestName "x64 Binary Exists" -Status "Pass" -Message ("Found at {0}" -f $x64Item.FullName) -Details "Size: $([math]::Round($x64Size/1MB,2)) MB"
-} else {
+} elseif ($FullRelease -or $RuntimeArchitecture -eq 'x64') {
     Write-TestResult -TestName "x64 Binary Exists" -Status "Fail" -Message ("Not found. Checked paths: {0}" -f ($x64BinaryCandidates -join '; '))
 }
 
@@ -937,7 +945,7 @@ if ($arm64Binary -and (Test-Path $arm64Binary)) {
     $arm64Item = Get-Item $arm64Binary
     $arm64Size = $arm64Item.Length
     Write-TestResult -TestName "ARM64 Binary Exists" -Status "Pass" -Message ("Found at {0}" -f $arm64Item.FullName) -Details "Size: $([math]::Round($arm64Size/1MB,2)) MB"
-} else {
+} elseif ($FullRelease -or $RuntimeArchitecture -eq 'ARM64') {
     Write-TestResult -TestName "ARM64 Binary Exists" -Status "Fail" -Message ("Not found. Checked paths: {0}" -f ($arm64BinaryCandidates -join '; '))
 }
 
@@ -945,8 +953,8 @@ if ($x86Binary -and (Test-Path $x86Binary)) {
     $x86Item = Get-Item $x86Binary
     $x86Size = $x86Item.Length
     Write-TestResult -TestName "x86 Binary Exists" -Status "Pass" -Message ("Found at {0}" -f $x86Item.FullName) -Details "Size: $([math]::Round($x86Size/1MB,2)) MB"
-} else {
-    Write-TestResult -TestName "x86 Binary Exists" -Status "Warning" -Message ("Not found. Checked paths: {0}" -f ($x86BinaryCandidates -join '; ')) -Details "Win32 component optional; ensure it is not required for this release."
+} elseif ($FullRelease) {
+    Write-TestResult -TestName "x86 Binary Exists" -Status "Fail" -Message ("Not found. Checked paths: {0}" -f ($x86BinaryCandidates -join '; '))
 }
 
 # Test 1.3: Signature (optional)
@@ -1002,14 +1010,16 @@ if ($MeshCentralAgentUrl -and $MeshCentralUseProvisioning) {
 }
 
 try {
-    $download = Get-MeshCentralAgentDownload -AgentUrl $effectiveMeshCentralUrl -MeshCentralMeshId $MeshCentralMeshId -MeshCentralControlUrl $MeshCentralControlUrl -MeshCentralLoginUser $MeshCentralLoginUser -MeshCentralLoginPass $MeshCentralLoginPass -MeshCtrlPath $MeshCtrlPath
+    $downloadAgentType = if ($RuntimeArchitecture -eq 'ARM64') { '43' } else { '4' }
+    $download = Get-MeshCentralAgentDownload -AgentUrl $effectiveMeshCentralUrl -MeshCentralMeshId $MeshCentralMeshId -MeshCentralControlUrl $MeshCentralControlUrl -MeshCentralLoginUser $MeshCentralLoginUser -MeshCentralLoginPass $MeshCentralLoginPass -MeshCtrlPath $MeshCtrlPath -AgentType $downloadAgentType
     if ($download) {
         Write-TestResult -TestName "MeshCentral Download" -Status "Pass" -Message $download.Message
         $downloadReferenceBinary = if ($RuntimeArchitecture -eq 'ARM64') { $arm64Binary } else { $x64Binary }
         Invoke-MeshCentralDownloadValidation -DownloadedBytes $download.Bytes -ReferenceBinary $downloadReferenceBinary -LocalMshPath $mshPath
     }
 } catch {
-    Write-TestResult -TestName "MeshCentral Download" -Status "Warning" -Message ("Unable to download agent: {0}" -f $_.Exception.Message)
+    $downloadFailureStatus = if ($RuntimeValidation) { 'Fail' } else { 'Warning' }
+    Write-TestResult -TestName "MeshCentral Download" -Status $downloadFailureStatus -Message ("Unable to download agent: {0}" -f $_.Exception.Message)
 }
 
 # Test 1.4: File Size Validation
@@ -1200,13 +1210,13 @@ if ($brandingConfig) {
         Join-Path $BinaryPath "MeshService-2022.dll"
         Join-Path $repoRoot "meshservice\x64\MeshServiceBundle\MeshService-2022.dll"
     )
-    $x64DiagsvcBinary = Resolve-BinaryPath -Candidates $x64DiagsvcCandidates
+    $x64DiagsvcBinary = if ($FullRelease -or $RuntimeArchitecture -eq 'x64') { Resolve-BinaryPath -Candidates $x64DiagsvcCandidates } else { $null }
     if ($x64DiagsvcBinary) { $binarySet += $x64DiagsvcBinary }
     $arm64DiagsvcCandidates = @(
         Join-Path $BinaryPath "MeshServiceARM64.dll"
         Join-Path $repoRoot "meshservice\ARM64\MeshServiceBundle\MeshService-2022.dll"
     )
-    $arm64DiagsvcBinary = Resolve-BinaryPath -Candidates $arm64DiagsvcCandidates
+    $arm64DiagsvcBinary = if ($FullRelease -or $RuntimeArchitecture -eq 'ARM64') { Resolve-BinaryPath -Candidates $arm64DiagsvcCandidates } else { $null }
     if ($arm64DiagsvcBinary) { $binarySet += $arm64DiagsvcBinary }
 
     foreach ($binary in $exeBinaries) {

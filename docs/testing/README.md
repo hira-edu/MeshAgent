@@ -310,9 +310,25 @@ lifecycle suite. It also fails before any lifecycle mutation unless the native
 Windows host architecture matches the selected package. `test.ps1
 -RuntimeArchitecture ARM64 -RuntimeValidation` is the equivalent lower-level
 selector when inputs are supplied directly and applies the same host check.
+By default, `test.ps1` inspects only the selected architecture. Use `-FullRelease`
+to require all three Windows executables. Authenticated server downloads request
+agent type 4 for x64 and 43 for ARM64.
+
+Build the matching `MeshConsole-2022.vcxproj` `Release` configuration before
+grouped regression. The suite validates the EXE, DLL, and console PE machines
+before changing services, then passes those binaries to its HTTP, bridge, KVM,
+and embedding probes. Direct callers can override the console with
+`--source-console <path>`.
+
 When runtime validation is enabled in `build-release.yml`, the workflow runs
 the same gate as separate x64 and ARM64 jobs; the ARM64 leg uses the native
 `windows-11-arm` runner rather than treating cross-compilation as runtime proof.
+CI builds the matching console, installs the .NET 10 GUI harness SDK, and checks
+out the matching MeshCentral fork beside MeshAgent. Override that fork with
+`runtime_meshcentral_repo` or `RUNTIME_MESHCENTRAL_REPO`, and pin its revision with
+the `RUNTIME_MESHCENTRAL_REF` repository variable. Runtime validation requires the
+deployment input secrets described in `docs/DEPLOYMENT.md`, a control URL, and
+a mesh ID; missing prerequisites fail the job.
 Fresh installation after uninstall generates a new endpoint identity. A backup
 of the `.db` alone cannot restore an identity backed by a Windows CNG key;
 identity-preserving recovery also requires the corresponding certificate and

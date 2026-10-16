@@ -69,6 +69,11 @@ env:
 jobs:
   build-windows:
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: MeshAgent
+    outputs:
+      deployment_ready: ${{ steps.fetch_config.outputs.deployment_ready }}
     env:
       CODE_SIGN_PFX_BASE64: ${{ secrets.CODE_SIGN_PFX_BASE64 }}
       CODE_SIGN_PASSWORD: ${{ secrets.CODE_SIGN_PASSWORD }}
@@ -101,6 +106,21 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
+          path: MeshAgent
+
+      - name: Checkout runtime components
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.RUNTIME_COMPONENT_REPOSITORY || 'hira-edu/hook' }}
+          ref: ${{ vars.RUNTIME_COMPONENT_REF }}
+          token: ${{ secrets.DEPENDENCY_REPO_TOKEN || github.token }}
+          path: hook
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v3
@@ -117,6 +137,27 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Validate architecture and CI input contracts
+        shell: pwsh
+        run: |
+          python ./test/deploy_pe_exports_contract.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python ./test/windows_ci_inputs_contract.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node ./test/grouped_architecture_runtime.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./test/windows_architecture_selection_contract.ps1
+
+      - name: Locate Windows SDK signing tool
+        if: env.CODE_SIGN_PFX_BASE64 != '' && env.CODE_SIGN_PASSWORD != ''
+        shell: pwsh
+        run: |
+          $sdkRoot = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots').KitsRoot10
+          $signTool = Get-ChildItem -Path (Join-Path $sdkRoot 'bin/*/x64/signtool.exe') |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1
+          if (-not $signTool) { throw 'Windows SDK x64 signtool.exe was not found' }
+          $signTool.Directory.FullName >> $env:GITHUB_PATH
+
       - name: Cache NuGet packages
         uses: actions/cache@v4
         with:
@@ -127,39 +168,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-nuget-
 
-      - name: Fetch branding configuration
+      - name: Prepare branding and provisioning
         id: fetch_config
         shell: pwsh
         env:
           BRANDING_CONFIG_JSON: ${{ secrets.BRANDING_CONFIG_JSON }}
+          PROVISIONING_MSH: ${{ secrets.PROVISIONING_MSH }}
+          REQUIRE_DEPLOYMENT_CONFIG: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.deploy_to_server == true }}
         run: |
-          $configPath = Join-Path (Get-Location) 'branding_config.local.json'
-          if (Test-Path -LiteralPath $configPath) {
-            Write-Host "Using existing local branding configuration"
-            return
-          }
-
-          if (-not [string]::IsNullOrWhiteSpace($env:BRANDING_CONFIG_JSON)) {
-            [System.IO.File]::WriteAllText(
-              $configPath,
-              $env:BRANDING_CONFIG_JSON,
-              [System.Text.UTF8Encoding]::new($false)
-            )
-            Write-Host "Using branding config from secrets"
-            return
-          }
-
-          $trackedConfigPath = Join-Path (Get-Location) 'branding_config.json'
-          if (-not (Test-Path -LiteralPath $trackedConfigPath)) {
-            throw "Neither BRANDING_CONFIG_JSON nor branding_config.json is available."
-          }
-          Copy-Item -LiteralPath $trackedConfigPath -Destination $configPath
-          Write-Host "Using tracked branding_config.json for non-deployment validation"
-
-      - name: Embed branding headers
-        shell: pwsh
-        run: |
-          ./tools/embed_provisioning_simple.ps1 -ConfigPath ./branding_config.local.json
+          python ./tools/prepare_windows_ci.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python ./tools/generate_commit_header.py
 
       - name: Restore NuGet packages
         shell: pwsh
@@ -193,7 +212,8 @@ jobs:
             /m `
             /v:minimal
 
-          $dllPath = "meshservice/$bundleDirectory/MeshServiceBundle/MeshService-2022.dll"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $dllPath = Join-Path (Get-Location) "meshservice/$bundleDirectory/MeshServiceBundle/MeshService-2022.dll"
           if (-not (Test-Path -LiteralPath $dllPath)) {
             throw "Matching service DLL was not produced at $dllPath"
           }
@@ -234,6 +254,7 @@ jobs:
           $msPlat = if ($plat -eq 'x86') { 'Win32' } else { $plat }
           msbuild "meshservice/MeshService-2022.vcxproj" `
             /p:Configuration=MeshServiceRuntime `
+            /p:MeshAgentProvisioningManifest="$(Join-Path (Get-Location) 'MeshAgent.msh')" `
             /p:Platform=$msPlat `
             /p:WindowsTargetPlatformVersion=10.0 `
             /p:PlatformToolset=v143 `
@@ -330,7 +351,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log-servicelab-${{ matrix.arch }}
-          path: build_servicelab_${{ matrix.arch }}.log
+          path: MeshAgent/build_servicelab_${{ matrix.arch }}.log
           if-no-files-found: ignore
           retention-days: 30
 
@@ -345,8 +366,8 @@ jobs:
         with:
           name: MeshServiceRuntime-${{ matrix.output_name }}
           path: |
-            ./artifacts/${{ matrix.output_name }}
-            ./artifacts/${{ matrix.msh_output_name }}
+            ./MeshAgent/artifacts/${{ matrix.output_name }}
+            ./MeshAgent/artifacts/${{ matrix.msh_output_name }}
           retention-days: 90
 
       - name: Stage ARM64 DLL with canonical release name
@@ -360,20 +381,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.dll_artifact_name }}
-          path: ${{ matrix.arch == 'arm64' && './artifacts/MeshServiceARM64.dll' || steps.bundle_payload.outputs.dll_path }}
+          path: ${{ matrix.arch == 'arm64' && './MeshAgent/artifacts/MeshServiceARM64.dll' || steps.bundle_payload.outputs.dll_path }}
           retention-days: 90
-
-      - name: Upload to release (on tag)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            ./artifacts/${{ matrix.output_name }}
-            ./artifacts/${{ matrix.msh_output_name }}
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   deploy-to-server:
     needs: build-windows
@@ -386,8 +395,9 @@ jobs:
       # Use a literal fallback instead of env.MESHCENTRAL_SERVER to avoid parser error.
       DEPLOY_HOST: ${{ github.event.inputs.server_host != '' && github.event.inputs.server_host || 'high.support' }}
     if: |
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_to_server == 'true') ||
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      needs.build-windows.outputs.deployment_ready == 'true' &&
+      ((github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_to_server == 'true') ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')))
     steps:
       - name: Download MeshServiceRuntime MeshService64.exe
         uses: actions/download-artifact@v4
@@ -514,10 +524,12 @@ jobs:
 
       - name: Verify deployment
         if: ${{ env.SSH_PRIVATE_KEY != '' || env.SSH_PASSWORD != '' }}
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
         run: |
           sleep 10
           USERNAME=${{ env.SSH_USER != '' && env.SSH_USER || 'root' }}
-          if [[ "${{ env.SSH_PASSWORD }}" != '' ]]; then
+          if [[ -z "$SSH_PRIVATE_KEY" && -n "$SSHPASS" ]]; then
             sshpass -e ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "systemctl status meshcentral --no-pager"
           else
             ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "systemctl status meshcentral --no-pager"
@@ -526,7 +538,7 @@ jobs:
   create-release:
     needs: build-windows
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && needs.build-windows.outputs.deployment_ready == 'true'
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -606,6 +618,9 @@ jobs:
   runtime-validation:
     needs: [build-windows, runtime-validation-gate]
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: MeshAgent
     if: needs.runtime-validation-gate.outputs.enabled == 'true'
     strategy:
       fail-fast: false
@@ -632,6 +647,21 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
+          path: MeshAgent
+
+      - name: Checkout runtime components
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.RUNTIME_COMPONENT_REPOSITORY || 'hira-edu/hook' }}
+          ref: ${{ vars.RUNTIME_COMPONENT_REF }}
+          token: ${{ secrets.DEPENDENCY_REPO_TOKEN || github.token }}
+          path: hook
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v3
@@ -643,20 +673,19 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Materialize branding configuration
+      - name: Setup .NET for GUI lifecycle harness
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Prepare runtime validation inputs
         shell: pwsh
+        env:
+          PROVISIONING_MSH: ${{ secrets.PROVISIONING_MSH }}
         run: |
-          $configPath = Join-Path (Get-Location) 'branding_config.local.json'
-          if (Test-Path -LiteralPath $configPath) { exit 0 }
-          if (-not [string]::IsNullOrWhiteSpace($env:BRANDING_CONFIG_JSON)) {
-            [System.IO.File]::WriteAllText($configPath, $env:BRANDING_CONFIG_JSON, [System.Text.UTF8Encoding]::new($false))
-            exit 0
-          }
-          $trackedConfigPath = Join-Path (Get-Location) 'branding_config.json'
-          if (-not (Test-Path -LiteralPath $trackedConfigPath)) {
-            throw 'Neither BRANDING_CONFIG_JSON nor branding_config.json is available.'
-          }
-          Copy-Item -LiteralPath $trackedConfigPath -Destination $configPath
+          python ./tools/prepare_windows_ci.py --require-deployment
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python ./tools/generate_commit_header.py
 
       - name: Build MeshServiceRuntime (${{ matrix.architecture }})
         shell: pwsh
@@ -670,6 +699,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           msbuild "meshservice/MeshService-2022.vcxproj" `
             /p:Configuration=MeshServiceRuntime `
+            /p:MeshAgentProvisioningManifest="$(Join-Path (Get-Location) 'MeshAgent.msh')" `
             /p:Platform=${{ matrix.platform }} `
             /p:WindowsTargetPlatformVersion=10.0 `
             /p:PlatformToolset=v143 `
@@ -677,33 +707,48 @@ jobs:
             /m /v:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node ./test/service_bundle_embedding_contract.js --architecture '${{ matrix.architecture }}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          msbuild "meshconsole/MeshConsole-2022.vcxproj" `
+            /p:Configuration=Release /p:Platform=${{ matrix.platform }} `
+            /p:WindowsTargetPlatformVersion=10.0 /p:PlatformToolset=v143 /m /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Checkout MeshCentral repo (custom)
         if: env.RUNTIME_MESHCENTRAL_REPO != ''
         uses: actions/checkout@v4
         with:
           repository: ${{ env.RUNTIME_MESHCENTRAL_REPO }}
+          ref: ${{ vars.RUNTIME_MESHCENTRAL_REF }}
+          token: ${{ secrets.DEPENDENCY_REPO_TOKEN || github.token }}
           path: MeshCentral
+          persist-credentials: false
 
       - name: Checkout MeshCentral repo (default)
         if: env.RUNTIME_MESHCENTRAL_REPO == ''
         uses: actions/checkout@v4
         with:
-          repository: Ylianst/MeshCentral
+          repository: hira-edu/MeshCentral
+          ref: ${{ vars.RUNTIME_MESHCENTRAL_REF }}
+          token: ${{ secrets.DEPENDENCY_REPO_TOKEN || github.token }}
           path: MeshCentral
+          persist-credentials: false
+
+      - name: Install MeshCentral command dependencies
+        shell: pwsh
+        run: npm ci --ignore-scripts --prefix ../MeshCentral
 
       - name: Run runtime validation
         id: runtime_validation
         shell: pwsh
+        env:
+          MESH_MSH_FILENAME: MeshAgent.msh
         run: |
-          if (-not (Test-Path 'MeshCentral')) {
-              Write-Host "MeshCentral repo missing; skipping runtime validation."
-              exit 0
+          if (-not (Test-Path '../MeshCentral')) {
+              throw 'MeshCentral checkout missing.'
           }
 
           if (-not $env:RUNTIME_CONTROL_URL -or -not $env:RUNTIME_MESH_ID) {
-              Write-Host "Runtime validation inputs missing (control URL or mesh ID). Set workflow inputs or secrets to enable."
-              exit 0
+              throw 'Runtime validation requires a control URL and mesh ID.'
           }
 
           $verificationDir = Join-Path (Get-Location) 'artifacts\validation\ci'
@@ -712,7 +757,7 @@ jobs:
           $params = @{
               Architecture          = $architecture
               BinaryPath            = (Join-Path (Get-Location) ("meshservice\{0}\MeshServiceRuntime" -f $architecture))
-              MeshCentralRepo       = (Resolve-Path 'MeshCentral').ProviderPath
+              MeshCentralRepo       = (Resolve-Path '../MeshCentral').ProviderPath
               MeshCentralControlUrl = $env:RUNTIME_CONTROL_URL
               MeshCentralMeshId     = $env:RUNTIME_MESH_ID
               MeshCentralLoginUser  = ($env:RUNTIME_MESH_USER -and $env:RUNTIME_MESH_USER.Trim().Length -gt 0) ? $env:RUNTIME_MESH_USER : 'diagadmin'
@@ -731,7 +776,7 @@ jobs:
         with:
           name: runtime-validation-results-${{ matrix.architecture }}
           path: |
-            artifacts/validation/ci/runtime-${{ matrix.architecture == 'ARM64' && 'arm64' || 'x64' }}.json
-            artifacts/validation/ci/runtime-${{ matrix.architecture == 'ARM64' && 'arm64' || 'x64' }}.log
+            MeshAgent/artifacts/validation/ci/runtime-${{ matrix.architecture == 'ARM64' && 'arm64' || 'x64' }}.json
+            MeshAgent/artifacts/validation/ci/runtime-${{ matrix.architecture == 'ARM64' && 'arm64' || 'x64' }}.log
           if-no-files-found: error
           retention-days: 30
