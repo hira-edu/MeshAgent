@@ -43,11 +43,20 @@ def main():
     repository = env['MESHCENTRAL_REPOSITORY']
     runtime_repository = env['RUNTIME_COMPONENT_REPOSITORY']
     agent_repository = env['MESHAGENT_REPOSITORY']
+    # A newer commit on any sibling queues its own coordinated run, so a stale build is
+    # superseded rather than broken. Only a coordinator that gates its build and promotion
+    # on the reported outputs may opt in; any other caller still gets the failing refusal.
+    report_superseded = env.get('REPORT_SUPERSEDED') == 'true'
     if args.check_current:
-        if (head(agent_repository) != env['MESHAGENT_SHA'] or
-                head(repository) != env['MESHCENTRAL_SHA'] or
-                head(runtime_repository) != env['RUNTIME_COMPONENT_SHA']):
-            raise ValueError('A newer default-branch commit exists; refusing a stale deployment')
+        current = (head(agent_repository) == env['MESHAGENT_SHA'] and
+                   head(repository) == env['MESHCENTRAL_SHA'] and
+                   head(runtime_repository) == env['RUNTIME_COMPONENT_SHA'])
+        if not current:
+            if not report_superseded:
+                raise ValueError('A newer default-branch commit exists; refusing a stale deployment')
+            print('::notice::A newer default-branch commit exists; this superseded build will not be promoted')
+        with open(env['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
+            stream.write('current=' + str(current).lower() + '\n')
         return
     event = json.loads(Path(env['GITHUB_EVENT_PATH']).read_text(encoding='utf-8'))
     deploy = requested(env['GITHUB_EVENT_NAME'], event, env)
@@ -56,6 +65,7 @@ def main():
     if env['GITHUB_REPOSITORY'] != runtime_repository:
         raise ValueError('Run the coordinator in the private runtime repository')
     runtime_sha = env['GITHUB_SHA']
+    superseded = False
     if deploy:
         if env['GITHUB_EVENT_NAME'] == 'repository_dispatch':
             payload = event.get('client_payload', {})
@@ -65,9 +75,14 @@ def main():
             # Dispatch delivery order is not guaranteed. Treat it as a wake-up signal;
             # build the frozen current heads even when an older notification arrives last.
         if head(runtime_repository) != runtime_sha or head(agent_repository) != agent_sha:
-            raise ValueError('Refusing a stale coordinated release')
+            if not report_superseded:
+                raise ValueError('Refusing a stale coordinated release')
+            # The newer commit's own run builds and deploys; this one must not.
+            print('::notice::A newer default-branch commit exists; this superseded run will not build or deploy')
+            superseded, deploy = True, False
     with open(env['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
         stream.write('deploy_requested=' + str(deploy).lower() + '\n')
+        stream.write('superseded=' + str(superseded).lower() + '\n')
         stream.write('meshagent_sha=' + agent_sha + '\n')
         stream.write('meshcentral_sha=' + central_sha + '\n')
         stream.write('runtime_sha=' + runtime_sha + '\n')

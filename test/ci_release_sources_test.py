@@ -61,6 +61,23 @@ class SourceSelectionTests(unittest.TestCase):
         self.assertIn('meshagent_sha=' + 'a' * 40, result)
         self.assertIn('meshcentral_sha=' + 'b' * 40, result)
         self.assertIn('runtime_sha=' + 'c' * 40, result)
+        self.assertIn('superseded=false', result)
+
+    def test_stale_run_fails_unless_the_coordinator_reports_superseded_runs(self):
+        for repository in ('owner/MeshAgent', 'owner/hook'):
+            original = self.heads[repository]
+            self.heads[repository] = 'd' * 40
+            with self.subTest(repository=repository):
+                self.output.unlink(missing_ok=True)
+                with self.assertRaisesRegex(ValueError, 'stale'):
+                    self.invoke()
+                self.assertFalse(self.output.exists())
+                with mock.patch.dict(os.environ, {'REPORT_SUPERSEDED': 'true'}):
+                    self.invoke()
+                result = self.output.read_text()
+                self.assertIn('deploy_requested=false', result)
+                self.assertIn('superseded=true', result)
+            self.heads[repository] = original
 
     def test_invalid_dispatch_never_produces_deploy_output(self):
         for repository, sha in [('outside/repo', 'c' * 40), ('owner/MeshAgent', 'not-a-sha')]:
@@ -84,6 +101,19 @@ class SourceSelectionTests(unittest.TestCase):
             with self.subTest(repository=repository), self.assertRaisesRegex(ValueError, 'newer'):
                 self.invoke('--check-current')
             self.heads[repository] = original
+
+    def test_reporting_coordinator_gets_current_flag_instead_of_failure(self):
+        with mock.patch.dict(os.environ, {'REPORT_SUPERSEDED': 'true'}):
+            self.invoke('--check-current')
+            self.assertEqual(self.output.read_text(), 'current=true\n')
+            for repository in self.heads:
+                original = self.heads[repository]
+                self.heads[repository] = 'd' * 40
+                with self.subTest(repository=repository):
+                    self.output.unlink()
+                    self.invoke('--check-current')
+                    self.assertEqual(self.output.read_text(), 'current=false\n')
+                self.heads[repository] = original
 
 
 class SynchronizationTests(unittest.TestCase):

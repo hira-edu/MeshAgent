@@ -14,7 +14,9 @@ notify hook. Provisioned binaries, manifests, build logs, and release bundles ar
 kept in hook because the other two repositories are public. A resolver freezes
 all three default-branch commit SHAs before any native build starts. Every build
 leg uses those exact SHAs; a final check refuses a release superseded while it
-was building or awaiting environment approval. GitHub concurrency coalesces
+was building or awaiting environment approval. A superseded run ends without
+building or promoting rather than failing, because the newer commit's own run
+releases it. GitHub concurrency coalesces
 pending requests to the latest state and never cancels an active deployment.
 
 Production builds require real provisioning. Authenticode signing follows the
