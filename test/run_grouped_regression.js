@@ -915,6 +915,7 @@ function main() {
     );
     const guiLogPath = getArg(args, 'gui-log', DEFAULT_GUI_LOG);
     const resolvedSourceSet = resolveSourceSet(args);
+    // Validate every native probe input before any lifecycle mutation.
     const probeInputs = resolveProbeInputs(resolvedSourceSet,
         args['source-console'] ? path.resolve(args['source-console']) : null);
     const sourceSet = cacheSourceSet(resolvedSourceSet, path.join(evidenceRoot, 'source-cache'));

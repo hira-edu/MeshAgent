@@ -78,7 +78,7 @@ function main() {
     const tlsPartialSend = extractSpan(
         tlsImmediateSend,
         'if (bytesSent > 0)',
-        'else if (bytesSent < 0)'
+        '// Nothing left the write BIO yet'
     );
     const tlsCompleteSend = extractSpan(
         tlsImmediateSend,
@@ -103,7 +103,7 @@ function main() {
             tlsCompleteSend.includes('module->TotalBytesSent += bytesSent;') &&
             tlsCompleteSend.includes('ILibAsyncSocket_RecordSendActivity(module, bytesSent);'),
         tlsWouldBlockDoesNotFakeActivity:
-            !extractSpan(tlsImmediateSend, 'else if (bytesSent < 0)', 'retVal = ILibAsyncSocket_NOT_ALL_DATA_SENT_YET;')
+            !extractSpan(tlsImmediateSend, '// Nothing left the write BIO yet', 'retVal = ILibAsyncSocket_NOT_ALL_DATA_SENT_YET;')
                 .includes('ILibAsyncSocket_RecordSendActivity(module, bytesSent);'),
         nonTlsImmediateSendUsesSameHelper:
             nonTlsSendActivity.includes('ILibAsyncSocket_RecordSendActivity(module, bytesSent);'),

@@ -424,11 +424,20 @@ handling remains part of MeshAgent and is not an endpoint-selection fallback.
 The MeshCentral KVM viewer starts without synthesizing keyboard or mouse input.
 Screen-size updates release only keys recorded as pressed by that viewer before
 resetting its stream state; they do not send a blanket modifier-key reset.
+Browser key-up and mouse-up events are forwarded only after a corresponding
+press handled by that viewer. Delayed AltGr/Ctrl detection is cancelled on
+keyboard release, screen reset, and session teardown so pending input cannot
+leak into a new session. Keyboard cleanup releases tracked Unicode presses too.
+The page's view-only flag (`stopInput`) survives screen-size resets and
+reconnects; the server multiplexer or agent core still drop view-only input.
 This behavior is implemented in the standard and minified
 `agent-desktop-0.0.2` viewer assets in the MeshCentral repository and requires
 those assets to be published and the viewer page reloaded. The regression probe
 is `node test/meshcentral_desktop_startup_input_runtime.js --browsers`; it checks
 both assets in Chromium, Firefox, and WebKit without connecting to an endpoint.
+The default Node fixture also covers unmatched browser releases, normal typing
+and clicks, pending Ctrl cleanup, releases arriving after reconnect, and
+view-only sessions across screen resets.
 
 ## Connection failure diagnostics
 
@@ -452,11 +461,21 @@ state, HTTP status, WebSocket close code, socket/TLS error codes, heartbeat/data
 ages, uptime, and PID. `[TRANSPORT_FAILURE]` preserves the first native socket or
 TLS failure before cleanup, with the bytes sent on that connection
 (`totalBytesSent`, including the TLS handshake) for comparison with the bytes
-the server received. `[TRANSPORT_ZERO_SEND]` records a `send()` that accepted
+the server received. It includes the numeric socket peer and port (or `unknown`
+when unavailable), TLS version, and OpenSSL reason code and text. Builds without
+OpenSSL error strings still distinguish `peer_bad_record_mac` (received alert)
+from `local_bad_record_mac` (local record decryption/authentication failure).
+Other unavailable reason strings appear as `unknown`. Peer lookup does not
+perform DNS resolution. `[TRANSPORT_ZERO_SEND]` records a `send()` that accepted
 0 bytes of TLS ciphertext; the data stays queued, and the record is written at
 counts 1, 2, 4, 8, ... per connection. `[AUTH_FAILURE]` identifies rejected authentication.
 These records do not require `controlChannelDebug`, `logUpdate`, or
 `SERVICE_CONTROLCHANNEL_TRACE` and do not log packet bodies, credentials, or keys.
+
+WFP permit failures record the failing operation, filter suffix when applicable,
+and original Windows status in decimal and hexadecimal. Firewall convergence
+warnings include `wfpError`, captured before subsequent checks can change it.
+Transaction cleanup preserves the original failure status.
 
 Each server-authenticated session writes one always-on
 `[CONTROLCHANNEL_CONNECTED] descriptor= idleTimeoutSeconds= previousRetryMs= pid=`

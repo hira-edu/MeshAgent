@@ -48,6 +48,7 @@ try {
         . $inventory
         if ($results.Count -ne 1 -or $results[0].Status -ne 'Fail') { throw 'Missing selected binary was accepted' }
 
+        # Execute the production selector and download function against a local CLI fixture.
         Invoke-Expression $agentTypeAssignment
         $meshctrl = Join-Path $fixtureRoot 'meshctrl.js'
         @'
@@ -74,10 +75,8 @@ console.log('Downloaded agent to "download.exe"');
     . $inventory
     if (@($results | Where-Object Status -eq 'Fail').Count -ne 1) { throw 'Full release accepted incomplete set' }
 
-    @'
-console.error('download failed');
-process.exit(1);
-'@ | Set-Content -LiteralPath $meshctrl -Encoding utf8
+    # A failing CLI that prints a success line must still fail runtime validation.
+    Add-Content -LiteralPath $meshctrl -Value 'process.exit(1);'
     $MeshCtrlPath = $meshctrl
     $MeshCentralMeshId = $MeshCentralLoginUser = $MeshCentralLoginPass = 'fixture'
     $MeshCentralControlUrl = 'wss://fixture.invalid'

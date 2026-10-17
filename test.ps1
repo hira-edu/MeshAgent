@@ -342,6 +342,7 @@ function Get-MeshCentralAgentDownload {
             $stdout = $proc.StandardOutput.ReadToEnd()
             $stderr = $proc.StandardError.ReadToEnd()
             $proc.WaitForExit()
+            if ($proc.ExitCode -ne 0) { throw "meshctrl AgentDownload exited with code $($proc.ExitCode)." }
 
             $match = [regex]::Match($stdout, 'Downloaded .* to \"(.*)\"')
             if (-not $match.Success) {

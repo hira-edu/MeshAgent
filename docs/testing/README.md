@@ -267,8 +267,23 @@ healthy reads, partial handshakes, or queued writes into fatal errors, including
 an error left by a buffer-reallocation callback between reads. Corrupt
 records and real peer alerts must still disconnect with their own diagnostics;
 clean TLS shutdown remains a quiet EOF. The probe uses ASan/UBSan and the bundled
-OpenSSL libraries on macOS. Other POSIX hosts can specify `--openssl-include`
+OpenSSL libraries on macOS and Windows x64 (using loopback TCP instead of Unix
+socket pairs). It also checks the TLS version and decoded failure reason in the
+production diagnostics. Other POSIX hosts can specify `--openssl-include`
 and `--openssl-lib-dir`. Evidence goes under `artifacts/validation/`.
+
+`python test/asyncsocket_tls_send_native.py` exercises the production TLS send
+and PostSelect write paths with real TLS 1.2/1.3 memory peers on Windows x64.
+Injected socket acceptance covers short writes, zero-byte writes, would-block,
+buffer exhaustion, interrupted calls, and fatal resets. Multi-buffer sends and
+immediate caller-buffer reuse must deliver every plaintext byte in order with
+correct ciphertext accounting. The probe uses Clang ASan/UBSan and the bundled
+OpenSSL libraries; it does not run an installed agent or use a remote endpoint.
+
+`python test/wfp_failure_telemetry_native.py` injects WFP failures at each
+transaction stage and clobbers last-error during cleanup and logging. It checks
+original status retention, stage/filter identification, and transaction cleanup
+without changing firewall rules. It requires Windows SDK and Clang ASan/UBSan.
 
 `python3 test/native_update_state_runtime.py` compiles production update
 functions with process, datastore, and file-I/O mocks. It checks durable force
@@ -313,10 +328,20 @@ selector when inputs are supplied directly and applies the same host check.
 By default, `test.ps1` inspects only the selected architecture. Use `-FullRelease`
 to require all three Windows executables. Authenticated server downloads request
 agent type 4 for x64 and 43 for ARM64.
+
+Build the matching `MeshConsole-2022.vcxproj` `Release` configuration before
+grouped regression. The suite validates the EXE, DLL, and console PE machines
+before changing services, then passes those binaries to its HTTP, bridge, KVM,
+and embedding probes. Direct callers can override the console with
+`--source-console <path>`.
+
 When runtime validation is enabled in `build-release.yml`, the workflow runs
 the same gate as separate x64 and ARM64 jobs; the ARM64 leg uses the native
 `windows-11-arm` runner rather than treating cross-compilation as runtime proof.
-For credential-free validation against an already deployed server, set
+CI checks out the matching MeshCentral fork beside MeshAgent; override it with
+`runtime_meshcentral_repo` or `RUNTIME_MESHCENTRAL_REPO`, and pin its revision
+with the `RUNTIME_MESHCENTRAL_REF` repository variable. A private fork needs a
+read-capable `DEPENDENCY_REPO_TOKEN` secret. For credential-free validation against an already deployed server, set
 `runtime_agent_base_url` to its `/meshagents` endpoint. This mode verifies that
 the public type 4 and type 43 packages contain the exact locally built binary
 and a valid generic server-binding trailer. Authenticated control URL, mesh ID,

@@ -70,6 +70,18 @@ files and both native service DLLs. Each native 64-bit matrix leg verifies its
 PE machine and exact embedded-DLL equality before uploading artifacts; when
 signing is configured, the service DLL is signed before it is embedded.
 
+CI checks out the runtime components (`hira-edu/hook`) at the commit pinned in
+`build-release.yml` into `runtime-source/`, using the read-only
+`RUNTIME_COMPONENT_DEPLOY_KEY` secret, and passes that path to MSBuild as
+`RuntimeComponentSourceRoot`. Update the pinned commit in the workflow to move
+to a newer runtime revision.
+
+CI writes `branding_config.local.json` from the `BRANDING_CONFIG_JSON` secret,
+or falls back to the tracked `branding_config.json`, then generates the
+provisioning manifest from it with `tools/generate_provisioning_manifest.py`.
+Ordinary builds may keep placeholder values; tag and deployment runs pass no
+`--allow-placeholders` flag, so any remaining `REPLACE_WITH_` value fails them.
+
 Each x64 and ARM64 `MeshServiceBundle` configuration embeds the x86 and x64 persistent
 `RuntimeLoader` controller executables built from a sibling checkout. Each
 controller contains and owns its architecture-specific runtime image. The build looks for
