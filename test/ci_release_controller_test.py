@@ -151,6 +151,9 @@ class InputTests(unittest.TestCase):
         for ref in ('refs/tags/v1', 'refs/heads/feature', 'refs/pull/1/merge'):
             self.assertFalse(SOURCES.requested('push', event, dict(env, GITHUB_REF=ref)))
         self.assertFalse(SOURCES.requested('push', event, dict(env, AUTO_DEPLOY='false')))
+        legacy = {'repository': {'default_branch': 'master'}, 'inputs': {'deploy_to_server': 'true'}}
+        self.assertFalse(SOURCES.requested(
+            'push', legacy, dict(env, GITHUB_REF='refs/heads/master')))
 
     def test_manifest_tamper_and_persistent_file_mount_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -173,6 +176,30 @@ class InputTests(unittest.TestCase):
             manifest['mounts'][0]['target'] = str(MANAGER.BASE / 'meshcentral-data/config.json')
             path.write_text(json.dumps(manifest))
             with self.assertRaises(ValueError):
+                MANAGER.validate_manifest(root, '1.2.5')
+
+    def test_manifest_rejects_symlinks_inside_release_not_host_ancestors(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real = root / 'real'
+            real.mkdir()
+            (real / 'meshcore.js').write_bytes(b'code')
+            link = root / 'data-core'
+            try:
+                link.symlink_to(real, target_is_directory=True)
+            except OSError as error:
+                self.skipTest('Directory symlinks are unavailable: ' + str(error))
+            manifest = {
+                'schema': 1,
+                'meshcentral_version': '1.2.5',
+                'files': {'data-core/meshcore.js': hashlib.sha256(b'code').hexdigest()},
+                'mounts': [{
+                    'source': 'data-core/meshcore.js',
+                    'target': str(MANAGER.BASE / 'meshcentral-data/meshcore.js'),
+                }],
+            }
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, 'regular files'):
                 MANAGER.validate_manifest(root, '1.2.5')
 
 

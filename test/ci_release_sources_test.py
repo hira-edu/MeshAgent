@@ -20,6 +20,7 @@ def load(name, path):
 
 
 SOURCES = load('sources', 'tools/resolve_deploy_sources.py')
+RESOLVE_HEAD = SOURCES.head
 SYNC = load('sync', 'tools/sync_sibling_repos.py')
 
 
@@ -47,6 +48,11 @@ class SourceSelectionTests(unittest.TestCase):
     def invoke(self, *arguments):
         with mock.patch.object(sys, 'argv', ['resolve', *arguments]):
             SOURCES.main()
+
+    def test_repository_head_requires_main_as_default_branch(self):
+        with mock.patch.object(SOURCES, 'api', side_effect=[{'default_branch': 'master'}]):
+            with self.assertRaisesRegex(ValueError, 'require main'):
+                RESOLVE_HEAD('owner/MeshAgent')
 
     def test_agent_event_freezes_all_sibling_commits(self):
         self.invoke()

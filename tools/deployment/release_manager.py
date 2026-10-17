@@ -76,7 +76,12 @@ def validate_manifest(directory, expected_version):
         if path.is_absolute() or '..' in path.parts or ',' in relative:
             raise ValueError('Unsafe release member')
         source = directory / relative
-        if source.is_symlink() or not source.is_file() or any(p.is_symlink() for p in source.parents):
+        release_parent = directory
+        release_parent_symlink = directory.is_symlink()
+        for part in path.parts[:-1]:
+            release_parent /= part
+            release_parent_symlink = release_parent_symlink or release_parent.is_symlink()
+        if source.is_symlink() or not source.is_file() or release_parent_symlink:
             raise ValueError('Release members must be regular files')
         with source.open('rb') as stream:
             actual = hashlib.file_digest(stream, 'sha256').hexdigest()

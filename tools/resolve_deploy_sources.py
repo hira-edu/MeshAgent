@@ -20,11 +20,15 @@ def head(repository):
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
         raise ValueError('Invalid repository name')
     branch = api(repository)['default_branch']
+    if branch != 'main':
+        raise ValueError('Coordinated releases require main as the default branch: ' + repository)
     return api(repository + '/commits/' + urllib.parse.quote(branch, safe=''))['sha']
 
 
 def requested(event_name, event, environment):
-    default_ref = 'refs/heads/' + event['repository']['default_branch']
+    if event['repository']['default_branch'] != 'main':
+        return False
+    default_ref = 'refs/heads/main'
     trusted_branch = environment['GITHUB_REF'] == default_ref
     if event_name == 'workflow_dispatch':
         return trusted_branch and str(event.get('inputs', {}).get('deploy_to_server', 'false')).lower() == 'true'
