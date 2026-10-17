@@ -424,11 +424,17 @@ handling remains part of MeshAgent and is not an endpoint-selection fallback.
 The MeshCentral KVM viewer starts without synthesizing keyboard or mouse input.
 Screen-size updates release only keys recorded as pressed by that viewer before
 resetting its stream state; they do not send a blanket modifier-key reset.
+Browser key-up and mouse-up events are forwarded only after a corresponding
+press handled by that viewer. Delayed AltGr/Ctrl detection is cancelled on
+keyboard release, screen reset, and session teardown so pending input cannot
+leak into a new session. Keyboard cleanup releases tracked Unicode presses too.
 This behavior is implemented in the standard and minified
 `agent-desktop-0.0.2` viewer assets in the MeshCentral repository and requires
 those assets to be published and the viewer page reloaded. The regression probe
 is `node test/meshcentral_desktop_startup_input_runtime.js --browsers`; it checks
 both assets in Chromium, Firefox, and WebKit without connecting to an endpoint.
+The default Node fixture also covers unmatched browser releases, normal typing
+and clicks, pending Ctrl cleanup, and releases arriving after reconnect.
 
 ## Connection failure diagnostics
 
