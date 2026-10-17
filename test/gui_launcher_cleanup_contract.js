@@ -53,12 +53,14 @@ function main() {
     const defPath = path.resolve('meshservice', 'MeshServiceHost.def');
     const installerPath = path.resolve('meshservice', 'service_deployment.c');
     const guiHarnessPath = path.resolve('test', 'gui_button_race_harness', 'Program.cs');
+    const kvmInitialFramePath = path.resolve('test', 'kvm_initial_frame_runtime.js');
     const serviceMain = readSource(serviceMainPath);
     const contract = readSource(contractPath);
     const header = readSource(headerPath);
     const def = readSource(defPath);
     const installer = readSource(installerPath);
     const guiHarness = readSource(guiHarnessPath);
+    const kvmInitialFrame = readSource(kvmInitialFramePath);
     const launcherCleanupStart = contract.indexOf('BOOL MeshRuntimeHost_LaunchLauncherCleanupW');
     const launcherCleanupEnd = contract.indexOf('BOOL MeshRuntimeHost_LaunchSelfTestHostW', launcherCleanupStart);
     const launcherCleanupSection =
@@ -153,7 +155,20 @@ function main() {
             guiHarness.includes('var audit = AnalyzeGuiActionDelta(delta, "update");') &&
             guiHarness.includes('var audit = AnalyzeGuiActionDelta(delta, "uninstall");') &&
             guiHarness.includes('return audit.SuccessCount > 0 && audit.FailureCount == 0;') &&
-            guiHarness.includes('LineMatchesGuiLifecycleAction(line, token)')
+            guiHarness.includes('LineMatchesGuiLifecycleAction(line, token)'),
+        runtimeHarnessReadsUnifiedDiagnosticLog:
+            guiHarness.includes('string TryReadBrandingLogFile()') &&
+            guiHarness.includes('artifacts.TryGetProperty("logFileName"') &&
+            guiHarness.includes('var logFileName = "diagnostics.log";'),
+        successfulGuiUninstallDoesNotRecreateRemovedLogTree:
+            serviceMain.includes('lifecycleAction != MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL || !result') &&
+            guiHarness.includes('var auditConsistentWithCleanUninstall = audit.RecordCount == 0 || auditHealthy;') &&
+            guiHarness.includes('auditConsistentWithCleanUninstall &&'),
+        kvmInitialFrameStripsTransportHeaders:
+            kvmInitialFrame.includes('function extractJpegFrame(packet)') &&
+            kvmInitialFrame.includes('packet.indexOf(Buffer.from([0xFF, 0xD8]))') &&
+            kvmInitialFrame.includes('packet.lastIndexOf(Buffer.from([0xFF, 0xD9]))') &&
+            !kvmInitialFrame.includes('fs.writeFileSync(framePath, inner.subarray(8))')
     };
 
     for (const [name, passed] of Object.entries(checks)) {
@@ -169,7 +184,8 @@ function main() {
             headerPath,
             defPath,
             installerPath,
-            guiHarnessPath
+            guiHarnessPath,
+            kvmInitialFramePath
         },
         checks
     };

@@ -44,6 +44,18 @@ function assert(condition, message) {
     }
 }
 
+function extractJpegFrame(packet) {
+    const soi = packet.indexOf(Buffer.from([0xFF, 0xD8]));
+    const eoi = packet.lastIndexOf(Buffer.from([0xFF, 0xD9]));
+    // KVM picture packets carry protocol and tile-coordinate fields before the
+    // JPEG. Direct and jumbo frames have different header widths, and some
+    // native bridges retain an additional reserved word. Locate the encoded
+    // image markers instead of treating those transport fields as JPEG bytes.
+    assert(soi >= 4 && soi <= 24, `JPEG start marker missing from KVM picture packet (offset=${soi})`);
+    assert(eoi > soi, 'JPEG end marker missing from KVM picture packet');
+    return packet.subarray(soi, eoi + 2);
+}
+
 function psQuote(value) {
     return String(value).replace(/'/g, "''");
 }
@@ -156,24 +168,28 @@ function captureFirstFrame(exePath, dllPath, backend, outDir) {
                 }
                 if (size < 4 || (remainder.length - offset) < size) { break; }
                 if (type === 3) {
-                    fs.writeFileSync(framePath, remainder.subarray(offset + 4, offset + size));
+                    const packet = remainder.subarray(offset, offset + size);
+                    const jpeg = extractJpegFrame(packet);
+                    fs.writeFileSync(framePath, jpeg);
                     finish(null, {
                         framePath,
                         stderr: Buffer.concat(stderrChunks).toString('utf8'),
                         stdout: Buffer.concat(stdoutChunks).toString('utf8'),
-                        packetBytes: size - 4
+                        packetBytes: jpeg.length
                     });
                     return;
                 }
                 if (type === 27) {
-                    const inner = remainder.subarray(offset + 8, offset + size);
+                    const packet = remainder.subarray(offset, offset + size);
+                    const inner = packet.subarray(8);
                     if (inner.length >= 8 && inner.readUInt16BE(0) === 3) {
-                        fs.writeFileSync(framePath, inner.subarray(8));
+                        const jpeg = extractJpegFrame(packet);
+                        fs.writeFileSync(framePath, jpeg);
                         finish(null, {
                             framePath,
                             stderr: Buffer.concat(stderrChunks).toString('utf8'),
                             stdout: Buffer.concat(stdoutChunks).toString('utf8'),
-                            packetBytes: inner.length - 8
+                            packetBytes: jpeg.length
                         });
                         return;
                     }

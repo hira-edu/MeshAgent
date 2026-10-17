@@ -8726,6 +8726,13 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		{
 			selfTestRuntime = 1;
 		}
+		/* Identity inspection must coexist with the running service, which owns the
+		 * writable datastore handle.  Treat -nodeid as read-only even when callers
+		 * do not know about the internal --readonly switch. */
+		if (strcasecmp(param[ri], "-nodeid") == 0)
+		{
+			readonly = 1;
+		}
 		if (ix > 2 && strncmp(param[ri], "--", 2) == 0)
 		{
 			if (ix - 2 == 8 && strncmp(param[ri] + 2, "readonly", 8) == 0 && strncmp(param[ri] + ix + 1, "1", 1) == 0)

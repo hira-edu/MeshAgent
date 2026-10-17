@@ -17,6 +17,8 @@ const signingGate = read('test/release_signing_bundle_gate.js');
 const testHarness = read('test.ps1');
 const runtimeHarness = read('tools/Invoke-RuntimeValidation.ps1');
 const releaseWorkflow = read('.github/workflows/build-release.yml');
+const agentCore = read('meshcore/agentcore.c');
+const serviceMain = read('meshservice/ServiceMain.c');
 
 function conditionedBlock(source, element, condition) {
     const escaped = condition.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -145,6 +147,8 @@ assert(runtimeHarness.includes('RuntimeArchitecture   = $Architecture'), 'runtim
 assert(runtimeHarness.includes('Assert-NativeArchitecture -RequestedArchitecture $Architecture'), 'runtime wrapper does not require a native matching host');
 assert(runtimeHarness.includes('RuntimeInformation]::OSArchitecture'), 'runtime wrapper does not inspect native OS architecture');
 assert(testHarness.includes('grouped lifecycle validation was not started'), 'lower-level runtime validation does not fail closed on a mismatched host');
+assert(agentCore.includes('strcasecmp(param[ri], "-nodeid") == 0') && agentCore.includes('readonly = 1;'), '-nodeid must inspect the live datastore read-only while the service owns the writer');
+assert(serviceMain.includes("var n='';try{n=require('_agentNodeId')();}") && serviceMain.includes("console.log(n);process.exit();"), '-nodeid must terminate outside the exception handler after validating the resolved identity');
 
 for (const required of [
     'arch: [x64, x86, arm64]',
@@ -155,13 +159,34 @@ for (const required of [
     'runner: windows-2022',
     'windows-11-arm',
     'architecture: ARM64',
+    'python tools/generate_commit_header.py',
+    'tools/generate_provisioning_manifest.py',
+    "--output', 'WinDiagnosticHost.msh'",
+    "inputs.deploy_to_server == true",
+    'repository: hira-edu/hook',
+    'ref: 8b0e4deeb283634517cc5c957624a402a2ed3f82',
+    'ssh-key: ${{ secrets.RUNTIME_COMPONENT_DEPLOY_KEY }}',
+    '/p:RuntimeComponentSourceRoot="$env:GITHUB_WORKSPACE\\runtime-source"',
     'Architecture          = $architecture',
+    'runtime_agent_base_url',
+    'MeshCentralGenericDownload',
+    'repository: hira-edu/MeshCentral',
+    'Expose MeshCentral checkout at the sibling contract path',
+    "New-Item -ItemType Junction -Path $sibling -Target $target",
+    'meshconsole/MeshConsole-2022.vcxproj',
+    'actions/setup-dotnet@v4',
+    "MeshServiceRuntime-${{ matrix.architecture == 'ARM64' && 'MeshServiceARM64.exe' || 'MeshService64.exe' }}",
+    "${{ matrix.architecture == 'ARM64' && 'MeshServiceRuntime-MeshServiceARM64.dll' || 'MeshServiceRuntime-diagsvc.dll' }}",
+    'Stage exact build artifacts and build MeshConsole',
+    'artifacts/validation/ci/grouped-regression/**',
     'cp /tmp/MeshServiceARM64.exe',
     'cp /tmp/MeshServiceARM64.dll'
 ]) {
     assert(releaseWorkflow.includes(required), `release workflow omits ARM64 parity marker: ${required}`);
 }
 assert(!releaseWorkflow.includes('windows-latest'), 'v143 Windows jobs must not float to a newer Visual Studio runner image');
+assert(!releaseWorkflow.includes("? $env:RUNTIME_MESH_USER : 'diagadmin'"), 'runtime validation must not fall back to a shared username');
+assert(!releaseWorkflow.includes("? $env:RUNTIME_MESH_PASS : 'DiagTest!23'"), 'runtime validation must not fall back to a shared password');
 const signDllIndex = releaseWorkflow.indexOf('Sign native 64-bit MeshServiceRuntime DLL before embedding');
 const buildRuntimeIndex = releaseWorkflow.indexOf('Build MeshService MeshServiceRuntime (${{ matrix.arch }})');
 const validateEmbeddedIndex = releaseWorkflow.indexOf('Validate embedded service DLL parity');
