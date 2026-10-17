@@ -100,6 +100,20 @@ async function exerciseViewer(createViewer, canvas) {
     viewer.xxKeyUp(ctrl);
     viewer.xxMouseUp({ pageX: 20, pageY: 20, button: 0 });
     phases.afterReconnectReleases = packets.slice();
+    // The page marks view-only sessions once, before the first screen packet.
+    viewer.xxStateChange(0);
+    viewer.Start();
+    viewer.parent.State = 2;
+    viewer.stopInput = true;
+    capture('viewOnlyConnect', () => screen());
+    capture('viewOnlyResize', () => screen(1024, 768));
+    phases.viewOnlyKept = viewer.stopInput === true;
+    capture('viewOnlyInput', () => {
+        viewer.mousedown({ pageX: 20, pageY: 20, button: 0 });
+        viewer.mouseup({ pageX: 20, pageY: 20, button: 0 });
+        viewer.handleKeyDown({ key: 'Alt', code: 'AltLeft', keyCode: 18 });
+        viewer.handleKeyUp({ key: 'Alt', code: 'AltLeft', keyCode: 18 });
+    });
     return phases;
 }
 
@@ -107,7 +121,7 @@ function validate(phases) {
     const errors = [];
     function check(name, fn) { try { fn(); } catch (error) { errors.push(`${name}: ${error.message}`); } }
     const input = packets => packets.filter(p => [1, 2, 15, 85].includes((p[0] << 8) | p[1]));
-    for (const phase of ['connect', 'sameSize', 'resize', 'afterRelease', 'reconnect', 'pendingCtrlReset']) {
+    for (const phase of ['connect', 'sameSize', 'resize', 'afterRelease', 'reconnect', 'pendingCtrlReset', 'viewOnlyConnect', 'viewOnlyResize']) {
         check(phase, () => {
             assert.deepStrictEqual(input(phases[phase]), [], 'screen metadata must not synthesize input');
             assert.deepStrictEqual(phases[phase].map(p => p[1]), [5, 8, 87, 14], 'keep compression, resume, lock query and touch handshake');
@@ -130,6 +144,8 @@ function validate(phases) {
     for (const phase of ['unicodeAfterBlur', 'afterPendingCtrlReset', 'afterPendingCtrlBlur', 'afterReconnectReleases']) {
         check(phase, () => assert.deepStrictEqual(input(phases[phase]), [], 'reset/blur/reconnect must not leak stale browser input'));
     }
+    check('viewOnlyKept', () => assert.strictEqual(phases.viewOnlyKept, true, 'screen packets must not clear page-imposed view-only'));
+    check('viewOnlyInput', () => assert.deepStrictEqual(input(phases.viewOnlyInput), [], 'view-only viewer must not send input'));
     return errors;
 }
 
