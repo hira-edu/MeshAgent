@@ -174,7 +174,8 @@ function main() {
     assert(afterSameSizeReset.tilesDrawn === 0, `afterSameSizeReset.tilesDrawn was not reset (${afterSameSizeReset.tilesDrawn})`);
     assert(afterSameSizeReset.killDraw === 0, `afterSameSizeReset.killDraw was not reset (${afterSameSizeReset.killDraw})`);
     assert(afterSameSizeReset.firstDraw === true, 'afterSameSizeReset.firstDraw was not armed for the new stream');
-    assert(afterSameSizeReset.stopInput === false, 'afterSameSizeReset.stopInput was not cleared');
+    // stopInput is the page's view-only flag, not per-stream state.
+    assert(afterSameSizeReset.stopInput === true, 'afterSameSizeReset cleared the page view-only stopInput');
     assert(afterSameSizeReset.firstUpKeysLength === 0, `afterSameSizeReset.firstUpKeys was not reset (${afterSameSizeReset.firstUpKeysLength})`);
     assert(afterSameSizeReset.pressedKeysLength === 0, `afterSameSizeReset.pressedKeys was not reset (${afterSameSizeReset.pressedKeysLength})`);
     assert(afterSameSizeReset.remoteInputLock === null, `afterSameSizeReset.remoteInputLock was not reset (${afterSameSizeReset.remoteInputLock})`);
@@ -188,7 +189,7 @@ function main() {
         assert(state.tilesDrawn === 0, `${phaseName}.tilesDrawn was not reset (${state.tilesDrawn})`);
         assert(state.killDraw === 0, `${phaseName}.killDraw was not reset (${state.killDraw})`);
         assert(state.firstDraw === false, `${phaseName}.firstDraw was not reset`);
-        assert(state.stopInput === false, `${phaseName}.stopInput was not reset`);
+        assert(state.stopInput === true, `${phaseName} cleared the page view-only stopInput`);
         assert(state.firstUpKeysLength === 0, `${phaseName}.firstUpKeys was not reset (${state.firstUpKeysLength})`);
         assert(state.pressedKeysLength === 0, `${phaseName}.pressedKeys was not reset (${state.pressedKeysLength})`);
         assert(state.remoteInputLock === null, `${phaseName}.remoteInputLock was not reset (${state.remoteInputLock})`);
