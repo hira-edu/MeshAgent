@@ -62,6 +62,19 @@ static const ServiceWfpFilterDescriptor g_ServiceWfpFilters[] =
     { &SECURITY_WFP_FILTER_RECV_V6_KEY, &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, L"Hard Permit RecvAccept V6" }
 };
 
+// "Host Hard Permit Connect V4/V6" filters that an earlier build added to this
+// provider and sublayer for svchost.exe. No current code creates them, and they
+// hold the sublayer and provider in use (FWP_E_IN_USE), so removal deletes them
+// and the hard-permit check rejects a chain that still contains them.
+static const GUID SECURITY_WFP_LEGACY_HOST_CONNECT_V4_KEY = { 0x8b3e5b31, 0x4a32, 0x460e, { 0x9d, 0x55, 0x24, 0x63, 0xd0, 0x18, 0xa1, 0x51 } };
+static const GUID SECURITY_WFP_LEGACY_HOST_CONNECT_V6_KEY = { 0x61f71df4, 0x3861, 0x4683, { 0xb7, 0x8c, 0xc2, 0x12, 0x49, 0xef, 0x8f, 0x86 } };
+
+static const GUID* const g_ServiceWfpLegacyFilterKeys[] =
+{
+    &SECURITY_WFP_LEGACY_HOST_CONNECT_V4_KEY,
+    &SECURITY_WFP_LEGACY_HOST_CONNECT_V6_KEY
+};
+
 #define SECURITY_FIREWALL_RULES_REG_PATH       L"SYSTEM\\CurrentControlSet\\Services\\SharedAccess\\Parameters\\FirewallPolicy\\FirewallRules"
 #define SECURITY_NRPT_POLICY_ROOT              L"SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters\\DnsPolicyConfig"
 #define SECURITY_NRPT_GENERIC_DNS_SERVERS      L"8.8.8.8;1.1.1.1;9.9.9.9"
@@ -1067,6 +1080,31 @@ static DWORD Security_WfpDeleteFilterByKeyIfPresent(HANDLE engine, const GUID* f
     return status;
 }
 
+static DWORD Security_WfpDeleteLegacyFiltersIfPresent(HANDLE engine)
+{
+    DWORD status = ERROR_SUCCESS;
+
+    for (size_t i = 0; i < _countof(g_ServiceWfpLegacyFilterKeys); ++i)
+    {
+        status = Security_WfpDeleteFilterByKeyIfPresent(engine, g_ServiceWfpLegacyFilterKeys[i]);
+        if (status != ERROR_SUCCESS) { return status; }
+    }
+    return ERROR_SUCCESS;
+}
+
+// Fails closed: a lookup error other than "not found" counts as present.
+static BOOL Security_WfpLegacyFilterPresent(HANDLE engine)
+{
+    for (size_t i = 0; i < _countof(g_ServiceWfpLegacyFilterKeys); ++i)
+    {
+        FWPM_FILTER0* filter = NULL;
+        DWORD status = FwpmFilterGetByKey0(engine, g_ServiceWfpLegacyFilterKeys[i], &filter);
+        if (filter != NULL) { FwpmFreeMemory0((void**)&filter); }
+        if (status != FWP_E_FILTER_NOT_FOUND) { return TRUE; }
+    }
+    return FALSE;
+}
+
 static DWORD Security_WfpRemoveObjectsIfPresent(HANDLE engine)
 {
     DWORD status = ERROR_SUCCESS;
@@ -1081,6 +1119,9 @@ static DWORD Security_WfpRemoveObjectsIfPresent(HANDLE engine)
             return status;
         }
     }
+
+    status = Security_WfpDeleteLegacyFiltersIfPresent(engine);
+    if (status != ERROR_SUCCESS) { return status; }
 
     status = FwpmSubLayerDeleteByKey0(engine, &SECURITY_WFP_SUBLAYER_KEY);
     if (status != ERROR_SUCCESS && status != FWP_E_SUBLAYER_NOT_FOUND)
@@ -1198,6 +1239,12 @@ BOOL Security_AddWfpHardPermitForApp(const wchar_t* serviceName, const wchar_t* 
 
     if (serviceName == NULL || serviceName[0] == L'\0' || exePath == NULL || exePath[0] == L'\0') { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
 
+    // Reconcile the desired state before replacing it. An existing, valid WFP
+    // chain may have other references that prevent deletion (FWP_E_IN_USE).
+    // Only the full provider/sublayer/filter/app-ID check permits reuse; an
+    // incomplete or mismatched chain must still pass the transaction below.
+    if (Security_CheckWfpHardPermitForApp(serviceName, exePath)) { return TRUE; }
+
     status = Security_WfpOpenEngine(&engine);
     if (status != ERROR_SUCCESS)
     {
@@ -1279,6 +1326,11 @@ BOOL Security_RemoveWfpHardPermitForService(const wchar_t* serviceName)
             success = FALSE;
             break;
         }
+    }
+    if (success)
+    {
+        status = Security_WfpDeleteLegacyFiltersIfPresent(engine);
+        if (status != ERROR_SUCCESS) { success = FALSE; }
     }
     if (success)
     {
@@ -1391,6 +1443,9 @@ BOOL Security_CheckWfpHardPermitForApp(const wchar_t* serviceName, const wchar_t
     {
         goto cleanup;
     }
+    // A leftover svchost.exe permit is outside the desired chain; report a
+    // mismatch so reconciliation runs the transaction that removes it.
+    if (Security_WfpLegacyFilterPresent(engine)) { goto cleanup; }
 
     status = FwpmGetAppIdFromFileName0(exePath, &expectedAppId);
     if (status != ERROR_SUCCESS || expectedAppId == NULL) { goto cleanup; }

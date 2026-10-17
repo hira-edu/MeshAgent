@@ -1901,6 +1901,11 @@ static BOOL ServiceDeploy_RefreshFirewallRulesWithRetry(const wchar_t* serviceNa
 
     for (int attempt = 1; attempt <= SECURITY_FIREWALL_MAX_ATTEMPTS; ++attempt)
     {
+        // Do not tear down a configuration that already matches the requested
+        // service and executable paths. In-use WFP objects need no replacement
+        // when all of their required rules are already valid.
+        if (ServiceDeploy_DoFirewallRulesMatch(serviceName, hostExePath, agentExePath)) { return TRUE; }
+
         // Best-effort cleanup before (re)adding rules to avoid stale entries.
         (void)Security_RemoveFirewallRuleForService(serviceName);
         // Never purge rules by exePath for a system host; that can remove unrelated OS rules.

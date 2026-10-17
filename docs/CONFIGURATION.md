@@ -476,6 +476,14 @@ WFP permit failures record the failing operation, filter suffix when applicable,
 and original Windows status in decimal and hexadecimal. Firewall convergence
 warnings include `wfpError`, captured before subsequent checks can change it.
 Transaction cleanup preserves the original failure status.
+Update reconciliation retains firewall rules that already match the requested
+service and executable paths. The WFP add operation also validates and reuses
+an existing matching provider, sublayer, and filter set, so an unnecessary
+replacement cannot fail an update with `FWP_E_IN_USE`. Missing or mismatched
+WFP configuration still requires a successful repair transaction. Repair and
+uninstall also delete the legacy "Host Hard Permit Connect V4/V6" filters that
+an earlier build added for `svchost.exe` in the same sublayer; while either
+remains, the WFP check reports a mismatch so reconciliation removes it.
 
 Each server-authenticated session writes one always-on
 `[CONTROLCHANNEL_CONNECTED] descriptor= idleTimeoutSeconds= previousRetryMs= pid=`

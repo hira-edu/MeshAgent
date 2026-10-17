@@ -300,8 +300,14 @@ OpenSSL libraries; it does not run an installed agent or use a remote endpoint.
 
 `python test/wfp_failure_telemetry_native.py` injects WFP failures at each
 transaction stage and clobbers last-error during cleanup and logging. It checks
-original status retention, stage/filter identification, and transaction cleanup
-without changing firewall rules. It requires Windows SDK and Clang ASan/UBSan.
+original status retention, stage/filter identification, and transaction cleanup.
+It also exercises production firewall reconciliation with healthy rules,
+ordinary-rule drift, and invalid WFP rules that cannot be removed. Valid WFP
+rules must survive reuse without hiding unrelated repair failures. A second
+fixture runs the production removal paths against a reference-counting WFP model
+to check that legacy `svchost.exe` filters are deleted and that an unknown
+filter still aborts the transaction. The probe does not change firewall rules. It uses Clang ASan/UBSan on Windows or POSIX;
+when MinGW is available on POSIX it also compiles against Windows headers.
 
 `python3 test/native_update_state_runtime.py` compiles production update
 functions with process, datastore, and file-I/O mocks. It checks durable force
