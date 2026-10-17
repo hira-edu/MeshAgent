@@ -5,6 +5,24 @@ to full install/update/uninstall exercises on an approved Windows host. Run the
 smallest relevant layer for a change, then widen to broader regression when the
 risk warrants it.
 
+## Coordinated release automation
+
+Run `python -m unittest discover -s test -p 'ci_release*_test.py' -v` for isolated
+promotion/rollback fault tests, input validation, stale sibling-commit rejection,
+and real disposable Git synchronization tests. The tests do not call Docker,
+systemd, SSH, or production endpoints. Linux is needed to exercise real POSIX
+permissions and directory fsync; Windows fixtures stub only POSIX-only APIs.
+
+Validate hook/coordinated-release.yml and the public repository dispatch workflows with
+`actionlint`. The release workflow also aggregates the Windows matrix and runs
+both release bundle gates, including the configured branding signing policy,
+before building its container. Its image smoke gate
+boots and restarts the exact published digest using disposable configuration,
+an isolated local listener, and a read-only image filesystem. This integration
+gate requires Docker and does not use the production database or certificates.
+Production promotion additionally verifies the selected image is running and
+the configured public HTTPS `health.ashx` response is exactly `ok`.
+
 ## Test layers
 
 ### Static Node contracts
@@ -335,23 +353,14 @@ before changing services, then passes those binaries to its HTTP, bridge, KVM,
 and embedding probes. Direct callers can override the console with
 `--source-console <path>`.
 
-When runtime validation is enabled in `build-release.yml`, the workflow runs
+When runtime validation is enabled in hook's `coordinated-release.yml`, the workflow runs
 the same gate as separate x64 and ARM64 jobs; the ARM64 leg uses the native
 `windows-11-arm` runner rather than treating cross-compilation as runtime proof.
-CI checks out the matching MeshCentral fork beside MeshAgent; override it with
-`runtime_meshcentral_repo` or `RUNTIME_MESHCENTRAL_REPO`, and pin its revision
-with the `RUNTIME_MESHCENTRAL_REF` repository variable. A private fork needs a
-read-capable `DEPENDENCY_REPO_TOKEN` secret. For credential-free validation against an already deployed server, set
-`runtime_agent_base_url` to its `/meshagents` endpoint. This mode verifies that
-the public type 4 and type 43 packages contain the exact locally built binary
-and a valid generic server-binding trailer. Authenticated control URL, mesh ID,
-and credentials remain available when group-specific embedded-MSH comparison is
-required. Runtime jobs consume the exact EXE, MSH, and DLL artifacts produced by
-the build matrix, build the matching console, and verify all native machines
-before any install, update, or uninstall mutation. Ordinary stock builds use the
-checked-in branding fallback and need no branding secret. A
-`BRANDING_CONFIG_JSON` secret is only needed when the runtime package must match
-an already deployed private branding identity.
+CI builds the matching console, installs the .NET 10 GUI harness SDK, and checks
+out the exact MeshCentral and runtime commits frozen by the release coordinator
+beside MeshAgent. Runtime validation requires the
+deployment input secrets described in `docs/DEPLOYMENT.md`, a control URL, and
+a mesh ID; missing prerequisites fail the job.
 Fresh installation after uninstall generates a new endpoint identity. A backup
 of the `.db` alone cannot restore an identity backed by a Windows CNG key;
 identity-preserving recovery also requires the corresponding certificate and
