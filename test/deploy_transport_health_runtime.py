@@ -96,7 +96,10 @@ def main():
     assert "if ssh_cmd(f\"systemctl restart {SERVICE_NAME}\", check=False) is None:" in deploy_source
 
     original_runner = deploy.run_remote_process
+    original_mapping = deploy.load_hashagents_mapping
     try:
+        # This probe exercises transport failures, independently of sibling source availability.
+        deploy.load_hashagents_mapping = lambda: {"MeshService64.exe": 4}
         deploy.run_remote_process = lambda *args, **kwargs: (failed_results[0], None)
         with contextlib.redirect_stdout(io.StringIO()):
             assert deploy.refresh_remote_hashagents() is False
@@ -104,6 +107,7 @@ def main():
             assert deploy.cmd_ssh(type("Args", (), {"command": ["false"]})()) is False
     finally:
         deploy.run_remote_process = original_runner
+        deploy.load_hashagents_mapping = original_mapping
 
     assert deploy.read_nonnegative_finite_env_float("MESHCENTRAL_TEST_UNSET_DELAY", 0) == 0
     for invalid in ("-1", "nan", "inf", "-inf", "bad", ""):

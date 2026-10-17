@@ -59,7 +59,7 @@ def resolve_ssh_config_path():
 
 SERVER = os.environ.get("MESHCENTRAL_SERVER", "")
 USER = os.environ.get("MESHCENTRAL_USER", "root")
-SSH_KEY = os.path.expanduser("~/.ssh/id_ed25519")
+SSH_KEY = os.path.expanduser(os.environ.get("MESHCENTRAL_SSH_KEY", "~/.ssh/id_ed25519"))
 SSH_CONFIG_PATH = resolve_ssh_config_path()
 SSH_HOST = os.environ.get("MESHCENTRAL_SSH_HOST", "meshcentral")
 
@@ -679,7 +679,7 @@ REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR = "Remote publish verification unava
 # ─── SSH Helpers ──────────────────────────────────────────────────────────────
 
 SSH_OPTS = [
-    "-o", "StrictHostKeyChecking=no",
+    "-o", "StrictHostKeyChecking=yes",
     "-o", "ConnectTimeout=10",
     "-o", "BatchMode=yes",
     "-o", "ServerAliveInterval=30",
@@ -989,7 +989,31 @@ def remote_size(path):
 def extract_embedded_service_bundle(exe_path):
     """Extract the embedded native service DLL payload from an executable."""
     if os.name != "nt":
-        raise RuntimeError("Embedded service bundle extraction is only supported on Windows")
+        # Linux image assembly must verify the same embedded bytes as the native
+        # Windows gate. pefile parses resources without loading executable code.
+        import pefile
+        with pefile.PE(str(exe_path), fast_load=True) as image:
+            image.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_RESOURCE']])
+            resources = getattr(image, 'DIRECTORY_ENTRY_RESOURCE', None)
+            payloads = []
+            if resources:
+                for kind in resources.entries:
+                    if kind.id != SERVICE_HOST_EMBEDDED_RESOURCE_TYPE or not hasattr(kind, 'directory'):
+                        continue
+                    for entry in kind.directory.entries:
+                        if entry.id != SERVICE_HOST_EMBEDDED_RESOURCE_ID or not hasattr(entry, 'directory'):
+                            continue
+                        for language in entry.directory.entries:
+                            if not hasattr(language, 'data'):
+                                raise ValueError('Invalid embedded service resource tree')
+                            data = language.data.struct
+                            payload = image.get_data(data.OffsetToData, data.Size)
+                            if data.Size == 0 or len(payload) != data.Size:
+                                raise ValueError('Empty or truncated embedded service resource')
+                            payloads.append(payload)
+            if len(payloads) != 1:
+                raise ValueError('Exactly one embedded native service DLL resource is required')
+            return payloads[0]
 
     import ctypes
     from ctypes import wintypes
@@ -3232,7 +3256,7 @@ def cmd_deploy(args):
 
     # Verify service came back
     status = ssh_cmd(f"systemctl is-active {SERVICE_NAME}", check=False)
-    if status and "active" in status:
+    if status and status.strip() == "active":
         if restart_result is None:
             print("    Restart command transport failed, but the service is active after the recovery probe.")
         print(f"    Service status: {status}")
@@ -3349,7 +3373,7 @@ def cmd_rollback(args):
     time.sleep(3)
 
     status = ssh_cmd(f"systemctl is-active {SERVICE_NAME}", check=False)
-    if not (status and "active" in status):
+    if not (status and status.strip() == "active"):
         if restart_result is None:
             print("[WARNING] Rollback restart transport failed and the recovery probe did not confirm recovery.")
         print(f"\n  Service status: {status}")

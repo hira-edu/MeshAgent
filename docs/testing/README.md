@@ -5,6 +5,24 @@ to full install/update/uninstall exercises on an approved Windows host. Run the
 smallest relevant layer for a change, then widen to broader regression when the
 risk warrants it.
 
+## Coordinated release automation
+
+Run `python -m unittest discover -s test -p 'ci_release*_test.py' -v` for isolated
+promotion/rollback fault tests, input validation, stale sibling-commit rejection,
+and real disposable Git synchronization tests. The tests do not call Docker,
+systemd, SSH, or production endpoints. Linux is needed to exercise real POSIX
+permissions and directory fsync; Windows fixtures stub only POSIX-only APIs.
+
+Validate hook/coordinated-release.yml and the public repository dispatch workflows with
+`actionlint`. The release workflow also aggregates the Windows matrix and runs
+both release bundle gates, including the configured branding signing policy,
+before building its container. Its image smoke gate
+boots and restarts the exact published digest using disposable configuration,
+an isolated local listener, and a read-only image filesystem. This integration
+gate requires Docker and does not use the production database or certificates.
+Production promotion additionally verifies the selected image is running and
+the configured public HTTPS `health.ashx` response is exactly `ok`.
+
 ## Test layers
 
 ### Static Node contracts
@@ -335,13 +353,12 @@ before changing services, then passes those binaries to its HTTP, bridge, KVM,
 and embedding probes. Direct callers can override the console with
 `--source-console <path>`.
 
-When runtime validation is enabled in `build-release.yml`, the workflow runs
+When runtime validation is enabled in hook's `coordinated-release.yml`, the workflow runs
 the same gate as separate x64 and ARM64 jobs; the ARM64 leg uses the native
 `windows-11-arm` runner rather than treating cross-compilation as runtime proof.
 CI builds the matching console, installs the .NET 10 GUI harness SDK, and checks
-out the matching MeshCentral fork beside MeshAgent. Override that fork with
-`runtime_meshcentral_repo` or `RUNTIME_MESHCENTRAL_REPO`, and pin its revision with
-the `RUNTIME_MESHCENTRAL_REF` repository variable. Runtime validation requires the
+out the exact MeshCentral and runtime commits frozen by the release coordinator
+beside MeshAgent. Runtime validation requires the
 deployment input secrets described in `docs/DEPLOYMENT.md`, a control URL, and
 a mesh ID; missing prerequisites fail the job.
 Fresh installation after uninstall generates a new endpoint identity. A backup
