@@ -437,6 +437,31 @@ These checks read the sibling `../MeshCentral` checkout and its installed
   remote-pixel pointer API (`SendRemotePointer`, `SendRemoteWheel`,
   `ReleaseAllPointerButtons`, `GetRemoteGeometry`) packet by packet on both
   assets, and drives it from the trackpad engine end to end.
+- `test/meshcentral_trackpad_adapter_runtime.js` runs the trackpad controller and
+  both view adapters in Chromium (real multi-touch through CDP) and WebKit.
+  The fixtures use each pinned view's exact canvas markup and its own touch,
+  mouse and trackpad code, with the real `agent-desktop` module recording
+  packets. The test checks that:
+  - with the flag off, or trackpad mode off, handler calls and packets are
+    identical to a page without the controller;
+  - with trackpad mode on, no page handler or compatibility click runs;
+  - enabling sends one move to the visible centre;
+  - the overlay tracks the remote pointer;
+  - turning trackpad off, Input off, or hiding the page mid-drag releases the
+    button;
+  - a replaced canvas is still owned;
+  - native-zoom pinch and follow-scrolling work;
+  - a rotated view moves along the remote axes;
+  - an Intel AMT desktop (no remote-pixel API) stays with the page;
+  - a dialog, a rights change or a disconnect that arrives without a click
+    releases a held button within the watchdog period;
+  - blur, touchcancel, a new SCREEN or the connection going down mid-drag
+    releases;
+  - enabling before the first frame sends the remote centre;
+  - turning trackpad on stops the page's edge-scroll interval;
+  - a WebRTC module switch releases on the old module;
+  - a pinch keeps its landing point on a scrolled page;
+  - uninstall removes every listener it added.
 - `test/meshcentral_trackpad_licence_contract.js` keeps the Apache Guacamole and
   Chromium attribution in the engine header and in `THIRD_PARTY_NOTICES.txt`.
 

@@ -59,7 +59,18 @@ function checks() {
         fullscreenExitResetsTrackpad: view.includes('if (!fullscreen && trackpadMode) {\n                    trackpadMode = false;'),
         // Adapter detection: these markers identify this view and are absent from the modern one.
         detectionMarkers: view.includes('id=p10desktop') && view.includes('var fullscreenzoom') && !modernView.includes('id=p10desktop') && !modernView.includes('fullscreenzoom'),
-        customJsLoaded: view.includes('{{{customJSTags}}}')
+        customJsLoaded: view.includes('{{{customJSTags}}}'),
+        // Intel AMT desktops share the canvas without the remote-pixel API: the controller leaves them to the page.
+        amtDesktopSharesCanvas: view.includes("CreateAmtRemoteDesktop('Desk')"),
+        edgeScrollStop: declaresFunction(view, 'trackpadStopEdgeScroll'),
+        edgeScrollGating: view.includes('if (!trackpadMode || (trackpadEdgeDX === 0 && trackpadEdgeDY === 0)) { trackpadStopEdgeScroll(); return; }'),
+        // trackpadMode changes only in its declaration, the toggle and the fullscreen-exit reset, and
+        // fullscreen only in its declaration and deskToggleFull: the activation the adapter reads.
+        trackpadModeAssignments: (view.match(/\btrackpadMode\s*=(?!=)/g) || []).length === 3,
+        fullscreenAssignments: (view.match(/\bfullscreen\s*=(?!=)/g) || []).length === 2,
+        noCaptureTouchListeners: !/addEventListener\(\s*['"]touch\w+['"][^)]*(true|capture)/.test(view),
+        // p10desktop scrolls in fullscreen: the adapter's follow target.
+        fullscreenScrolls: view.includes("QS('p10desktop').overflow = 'scroll';")
     };
 }
 

@@ -62,7 +62,23 @@ function checks() {
         disconnectResetsTrackpad: view.includes("if (typeof trackpadMode !== 'undefined') {\n                        trackpadMode = false;"),
         // Adapter detection: these markers identify this view and are absent from the classic one.
         detectionMarkers: view.includes('id=deskarea3x>') && view.includes('_mobileZoomMode') && !mobileView.includes('id=deskarea3x') && !mobileView.includes('_mobileZoomMode'),
-        customJsLoaded: view.includes('{{{customJSTags}}}')
+        customJsLoaded: view.includes('{{{customJSTags}}}'),
+        // Intel AMT desktops share the canvas without the remote-pixel API: the controller leaves them to the page.
+        amtDesktopSharesCanvas: view.includes("CreateAmtRemoteDesktop('Desk')"),
+        // The page's edge-scroll interval outlives a gesture the controller takes over; only
+        // dtouchstart (and trackpadStopEdgeScroll, which the adapter calls) stops it.
+        edgeScrollStop: declaresFunction(view, 'trackpadStopEdgeScroll'),
+        edgeScrollGating: view.includes('if ((!trackpadMode && !dtouchDragActive) || (trackpadEdgeDX === 0 && trackpadEdgeDY === 0)) { trackpadStopEdgeScroll(); return; }'),
+        dtouchstartStopsEdgeScroll: view.includes('dtouchLongPressed = false; dtouchDragActive = false; trackpadStopEdgeScroll();'),
+        // trackpadMode changes only in its declaration, the toggle and the disconnect reset; the last
+        // has no click, which is why the controller also watches while a button is held.
+        trackpadModeAssignments: (view.match(/\btrackpadMode\s*=(?!=)/g) || []).length === 3,
+        // Input can be unchecked without a click (rights refresh): same reason.
+        inputUncheckedWithoutClick: view.includes("Q('DeskControl').checked = false;"),
+        // No other capture-phase touch listener that could run before the controller's.
+        noCaptureTouchListeners: !/addEventListener\(\s*['"]touch\w+['"][^)]*(true|capture)/.test(view),
+        // deskarea3x is the native-zoom scroller the adapter follows and pans.
+        nativeZoomScroller: view.includes("var sc = Q('deskarea3x');") && view.includes('sc.scrollLeft -= dx')
     };
 }
 
