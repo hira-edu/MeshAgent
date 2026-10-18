@@ -32,6 +32,18 @@ The VPS controller rejects a different MeshCentral package version until an
 operator reviews its database compatibility and updates the deployment policy.
 Database migrations are not run as an incidental part of a push.
 
+A MeshCentral version change must also be reviewed against the views the mobile
+trackpad mode is coupled to. In order:
+1. Run `test/meshcentral_trackpad_default3_coupling_contract.js`,
+   `test/meshcentral_trackpad_default_mobile_coupling_contract.js` and
+   `test/meshcentral_desktop_pointer_baseline_runtime.js`; each fails on a
+   version it is not pinned to.
+2. Review the upstream diff of the desktop touch, trackpad, zoom and state code
+   in `default3.handlebars` and `default-mobile.handlebars`.
+3. Re-pin the baseline traces with `--print`, then update the contracts.
+4. Run the trackpad browser tests.
+5. Only then change the pin.
+
 ### GitHub configuration
 
 Create a GitHub App installed only on MeshAgent, MeshCentral, and hook, with

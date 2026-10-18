@@ -70,7 +70,10 @@ function checks() {
         fullscreenAssignments: (view.match(/\bfullscreen\s*=(?!=)/g) || []).length === 2,
         noCaptureTouchListeners: !/addEventListener\(\s*['"]touch\w+['"][^)]*(true|capture)/.test(view),
         // p10desktop scrolls in fullscreen: the adapter's follow target.
-        fullscreenScrolls: view.includes("QS('p10desktop').overflow = 'scroll';")
+        fullscreenScrolls: view.includes("QS('p10desktop').overflow = 'scroll';"),
+        // The guest share page has this page's markers but no trackpad mode, which is why detection
+        // also requires trackpadMode.
+        sharePageHasNoTrackpadMode: (() => { const share = read(path.join(moduleRoot, 'views', 'sharing-mobile.handlebars')); return /id="?p10desktop/.test(share) && share.includes('fullscreenzoom') && !/var trackpadMode/.test(share); })()
     };
 }
 

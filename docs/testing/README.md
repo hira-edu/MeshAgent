@@ -462,6 +462,19 @@ These checks read the sibling `../MeshCentral` checkout and its installed
   - a WebRTC module switch releases on the old module;
   - a pinch keeps its landing point on a scrolled page;
   - uninstall removes every listener it added.
+- `test/meshcentral_trackpad_loader_runtime.js` runs the trackpad loader block of
+  `custom.js` on the fixture pages, served from a routed origin, in Chromium and
+  WebKit. It checks that:
+  - with the flag off nothing is loaded or registered;
+  - `?trackpadengine=on|off|default` sets the per-browser flag for each page kind;
+  - the engine, controller and adapter load in order and install;
+  - a module created later reports its state: a real disconnect deactivates and
+    hides the overlay; a WebRTC soft desktop coming up mid-drag releases on the
+    old module and places the pointer once it knows its screen; another desktop
+    module's state changes do not reach the controller;
+  - the guest share page, which has no trackpad mode, loads nothing;
+  - a failed script load leaves trackpad mode to the page and stops observing
+    new modules.
 - `test/meshcentral_trackpad_licence_contract.js` keeps the Apache Guacamole and
   Chromium attribution in the engine header and in `THIRD_PARTY_NOTICES.txt`.
 

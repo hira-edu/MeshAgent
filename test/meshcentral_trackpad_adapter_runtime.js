@@ -362,7 +362,22 @@ async function reviewScenarios(browser, fx) {
             });
         }
 
-        for (const [what, how] of [['blur', () => 'window.dispatchEvent(new Event("blur"))'], ['touchcancel', null], ['a new SCREEN', () => 'desktop.m.ProcessBinaryCommand(7, 8, new Uint8Array([0, 7, 0, 8, 4, 0, 3, 0]))'], ['the connection going down', () => 'ctl.onStateChanged(0)']]) {
+        await record('chromium', viewName, 'the connection going down mid-drag deactivates and leaves nothing held', async () => {
+            const h = await open();
+            try {
+                await h.click('toggle'); await h.reset();
+                await h.drag(100, 100);
+                // Real order: the module reports state 0 (and stops) before the page's own handler runs.
+                await h.page.evaluate(() => { desktop.m.xxStateChange(0); ctl.onStateChanged(0); });
+                const s = await h.state();
+                assert.deepStrictEqual(s.pressed, []);
+                assert.strictEqual(s.active, false, 'a disconnected module does not count as trackpad mode');
+                assert.strictEqual(await h.page.evaluate(() => ctl.engine.isActive()), false);
+                await h.touch('touchEnd', []);
+            } finally { await h.close(); }
+        });
+
+        for (const [what, how] of [['blur', () => 'window.dispatchEvent(new Event("blur"))'], ['touchcancel', null], ['a new SCREEN', () => 'desktop.m.ProcessBinaryCommand(7, 8, new Uint8Array([0, 7, 0, 8, 4, 0, 3, 0]))']]) {
             await record('chromium', viewName, `${what} mid-drag releases`, async () => {
                 const h = await open();
                 try {
@@ -573,4 +588,5 @@ async function main() {
     if (!results.length || results.some(r => !r.ok)) process.exitCode = 1;
 }
 
-main().catch(error => { console.error(error); process.exitCode = 1; });
+module.exports = { fixtures };
+if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1; });

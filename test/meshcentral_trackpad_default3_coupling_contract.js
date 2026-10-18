@@ -78,7 +78,12 @@ function checks() {
         // No other capture-phase touch listener that could run before the controller's.
         noCaptureTouchListeners: !/addEventListener\(\s*['"]touch\w+['"][^)]*(true|capture)/.test(view),
         // deskarea3x is the native-zoom scroller the adapter follows and pans.
-        nativeZoomScroller: view.includes("var sc = Q('deskarea3x');") && view.includes('sc.scrollLeft -= dx')
+        nativeZoomScroller: view.includes("var sc = Q('deskarea3x');") && view.includes('sc.scrollLeft -= dx'),
+        // The WebRTC soft desktop is a new viewer module on the same canvas that reaches state 3 in
+        // Start(), before its first SCREEN: the controller releases on the old module and waits
+        // for the new one's screen.
+        softDesktopIsNewModule: view.includes("webRtcDesktop.softdesktop = CreateKvmDataChannel(webRtcDesktop.webchannel, CreateAgentRemoteDesktop('Desk', Q('id_mainarea')), desktop.m);") && view.includes('webRtcDesktop.softdesktop.Start();'),
+        softDesktopConnectsOnStart: read(path.join(moduleRoot, 'public', 'scripts', 'agent-redir-rtc-0.1.0.js')).includes("obj.Start = function () {\n        if (obj.debugmode == 1) { console.log('start'); }\n        obj.xxStateChange(3);")
     };
 }
 

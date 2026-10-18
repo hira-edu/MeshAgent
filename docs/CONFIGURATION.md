@@ -466,6 +466,80 @@ The default Node fixture also covers unmatched browser releases, normal typing
 and clicks, pending Ctrl cleanup, releases arriving after reconnect, and
 view-only sessions across screen resets.
 
+## Mobile trackpad mode
+
+On phones and tablets, the MeshCentral desktop pages offer an upstream trackpad
+mode ("Enable Trackpad Mode"). The fork can replace its touch handling with its
+own gesture engine:
+- in the Modern UI page (`default3`) on touch devices;
+- in the classic mobile page (`default-mobile`) in fullscreen.
+
+### Turning it on
+
+- The replacement is off by default. Each page kind has its own per-browser
+  flag, stored in `localStorage` as `meshTrackpadEngine.default3` and
+  `meshTrackpadEngine.defaultMobile`.
+- Open a desktop page with `?trackpadengine=on` to turn it on for that browser
+  and page kind, `?trackpadengine=off` to turn it off, or `?trackpadengine=default`
+  to return to the default.
+- The defaults are `DEFAULT_ON` in the loader block of
+  `MeshCentral/public/scripts/custom.js`.
+- With the flag off, the page loads none of the trackpad scripts and nothing
+  listens to its touches. Pages without a trackpad mode (including the guest
+  share pages) never load them.
+- If a trackpad script fails to load, the page keeps its own trackpad mode.
+
+### What it does when on
+
+When the flag is on and the user enables trackpad mode, a
+one-finger drag moves an accelerated remote pointer, and gestures map as
+follows:
+
+| Gesture | Result |
+|---|---|
+| Tap | Left click |
+| Two taps | Double-click |
+| Tap, then touch and drag | Left-button drag |
+| Long press | Right click |
+| Two-finger tap | Right click |
+| Three-finger tap | Middle click |
+| Two-finger drag | Wheel, one ±120 packet per notch |
+| Pinch (Modern UI native zoom only) | Local zoom |
+
+- The pointer is drawn by a fork-owned overlay, and the view scrolls to keep it
+  in sight.
+- Enabling the mode, or a switch to the WebRTC soft desktop while it is on, sends
+  one pointer move to the centre of the visible desktop once that viewer knows
+  the remote screen size. No click is sent. Both pages turn trackpad mode off
+  when the connection drops.
+- A held button is released when any of these happens:
+  - the mode or the Input toggle turns off;
+  - a dialog opens;
+  - the page is hidden or loses focus;
+  - the screen or the viewer instance changes (the release goes to the instance
+    that pressed);
+  - the connection drops. A disconnected viewer cannot send the release; the
+    agent and server side handle it.
+
+  Changes without a click are noticed within 200 ms while a button is held.
+- Intel AMT desktops and the direct-touch mode keep the page's own behaviour.
+
+### Files and tests
+
+The fork-owned files are:
+- `agent-desktop-trackpad-0.0.1.js` (engine);
+- `-controller-0.0.1.js`;
+- `-default3-0.0.1.js` and `-mobile-0.0.1.js` (adapters).
+
+They are published with `THIRD_PARTY_NOTICES.txt`. `agent-desktop-0.0.2`
+provides the remote-pixel pointer API they use (`SendRemotePointer`,
+`SendRemoteWheel`, `ReleaseAllPointerButtons`, `GetRemoteGeometry`), plus
+`addStateListener` and `window.MeshDesktopModuleObservers`.
+
+The checks are listed under "Viewer pointer input" in
+[testing](testing/README.md). The view coupling contracts pin the upstream page
+code this depends on, and must be reviewed on every MeshCentral upgrade.
+
 ## Connection failure diagnostics
 
 On Windows, the core, native service host, lifecycle installer, runtime policy,

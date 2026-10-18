@@ -36,11 +36,11 @@ function scratchCanvas() {
 }
 
 // 800x600 remote shown at 400x300 CSS px.
-function viewer(asset) {
+function viewer(asset, observers) {
     const source = fs.readFileSync(path.join(scriptsDir, asset), 'utf8');
     const canvas = { width: 800, height: 600, clientWidth: 400, clientHeight: 300, style: {}, offsetLeft: 0, offsetTop: 0 };
     canvas.getContext = () => ({ canvas, setTransform() {}, clearRect() {}, rotate() {}, fillRect() {}, drawImage() {} });
-    const context = vm.createContext({ navigator: { platform: 'Win32', userAgent: 'test' }, window: {}, document: { createElement: scratchCanvas }, desktop: { State: 3 }, urlargs: {}, ShortToStr: x => String.fromCharCode(x >> 8, x & 255), console, Uint8Array, setTimeout, clearTimeout });
+    const context = vm.createContext({ navigator: { platform: 'Win32', userAgent: 'test' }, window: (observers ? { MeshDesktopModuleObservers: observers } : {}), document: { createElement: scratchCanvas }, desktop: { State: 3 }, urlargs: {}, ShortToStr: x => String.fromCharCode(x >> 8, x & 255), console, Uint8Array, setTimeout, clearTimeout });
     vm.runInContext(source, context);
     const v = context.CreateAgentRemoteDesktop(canvas, null);
     const sink = { packets: [] };
@@ -269,6 +269,32 @@ test('wheel notch rounding and the per-call bound', a => {
     assert.strictEqual(h.record(() => h.v.SendRemoteWheel(1, 1, 0.6)).length, 1);
     assert.strictEqual(h.record(() => h.v.SendRemoteWheel(1, 1, 100)).length, 100);
     assert.strictEqual(h.record(() => h.v.SendRemoteWheel(1, 1, -101)).length, 100);
+});
+
+test('state listeners run after the module handles a change, once per listener', a => {
+    const h = viewer(a);
+    const seen = [];
+    const listener = (m, state) => seen.push([m === h.v, state, m.State, Object.keys(m.browserPressedButtons).length]);
+    h.v.addStateListener(listener); h.v.addStateListener(listener);
+    h.v.addStateListener(() => { throw new Error('a failing listener must not stop the others'); });
+    const second = (m, state) => seen.push(['second', state]);
+    h.v.addStateListener(second);
+    h.v.SendRemotePointer(1, 1, 1);
+    h.v.xxStateChange(3);
+    assert.deepStrictEqual(seen, [], 'no change, no call');
+    h.v.xxStateChange(0);
+    assert.deepStrictEqual(seen, [[true, 0, 0, 0], ['second', 0]], 'called once, after Stop cleared the session');
+    h.v.removeStateListener(listener); h.v.removeStateListener(second);
+    h.v.xxStateChange(2);
+    assert.strictEqual(seen.length, 2);
+});
+
+test('module observers see every new viewer module', a => {
+    const created = [];
+    const h = viewer(a, [m => created.push(m), () => { throw new Error('ignored'); }]);
+    assert.strictEqual(created.length, 1);
+    assert.strictEqual(created[0], h.v);
+    assert.strictEqual(typeof created[0].addStateListener, 'function');
 });
 
 test('trackpad engine gestures become the expected packets', a => {

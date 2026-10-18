@@ -32,7 +32,9 @@ const checks = {
     noticesGuacamole: flat(notices).includes('Apache Guacamole Copyright 2020 The Apache Software Foundation'),
     noticesBsdText: bsd.every(line => flat(notices.replace(/^\/\/ ?/gm, '')).includes(line)),
     noticesChromiumFileNotice: flat(notices).includes('Copyright 2013 The Chromium Authors. All rights reserved.'),
-    noticesApacheLicence: notices.includes('Apache License') && notices.includes('Version 2.0, January 2004') && notices.includes('END OF TERMS AND CONDITIONS')
+    noticesApacheLicence: notices.includes('Apache License') && notices.includes('Version 2.0, January 2004') && notices.includes('END OF TERMS AND CONDITIONS'),
+    // The notices are published next to the engine they cover.
+    noticesPublished: (() => { const d = fs.readFileSync(path.join(__dirname, '..', 'deploy.py'), 'utf8'); return d.includes('"local_path": "../MeshCentral/THIRD_PARTY_NOTICES.txt"') && d.includes('"remote_relative_path": "scripts/THIRD_PARTY_NOTICES.txt"') && d.includes('"remote_relative_path": "scripts/agent-desktop-trackpad-0.0.1.js"'); })()
 };
 const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([name]) => name);
 for (const name of failed) console.log(`FAIL ${name}`);

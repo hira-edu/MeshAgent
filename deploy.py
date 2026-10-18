@@ -390,6 +390,31 @@ CORE_ARTIFACTS = {
         "remote_relative_path": "scripts/opus-decoder-0.7.11.LICENSE.txt",
         "publish_targets": ("module-public", "web-public"),
     },
+    "public/scripts/agent-desktop-trackpad-0.0.1.js": {
+        "local_path": "../MeshCentral/public/scripts/agent-desktop-trackpad-0.0.1.js",
+        "remote_relative_path": "scripts/agent-desktop-trackpad-0.0.1.js",
+        "publish_targets": ("module-public", "web-public"),
+    },
+    "public/scripts/agent-desktop-trackpad-controller-0.0.1.js": {
+        "local_path": "../MeshCentral/public/scripts/agent-desktop-trackpad-controller-0.0.1.js",
+        "remote_relative_path": "scripts/agent-desktop-trackpad-controller-0.0.1.js",
+        "publish_targets": ("module-public", "web-public"),
+    },
+    "public/scripts/agent-desktop-trackpad-default3-0.0.1.js": {
+        "local_path": "../MeshCentral/public/scripts/agent-desktop-trackpad-default3-0.0.1.js",
+        "remote_relative_path": "scripts/agent-desktop-trackpad-default3-0.0.1.js",
+        "publish_targets": ("module-public", "web-public"),
+    },
+    "public/scripts/agent-desktop-trackpad-mobile-0.0.1.js": {
+        "local_path": "../MeshCentral/public/scripts/agent-desktop-trackpad-mobile-0.0.1.js",
+        "remote_relative_path": "scripts/agent-desktop-trackpad-mobile-0.0.1.js",
+        "publish_targets": ("module-public", "web-public"),
+    },
+    "public/scripts/THIRD_PARTY_NOTICES.txt": {
+        "local_path": "../MeshCentral/THIRD_PARTY_NOTICES.txt",
+        "remote_relative_path": "scripts/THIRD_PARTY_NOTICES.txt",
+        "publish_targets": ("module-public", "web-public"),
+    },
     "plugins/nativeruntime/README.md": {
         "local_path": "../MeshCentral/plugins/nativeruntime/README.md",
         "remote_relative_path": "nativeruntime/README.md",
