@@ -433,6 +433,10 @@ These checks read the sibling `../MeshCentral` checkout and its installed
   (100,000 sequences by default; `--runs` changes it) requires every press to be
   released, one button to change at a time, integer on-screen coordinates, and
   nothing to happen after a reset.
+- `test/meshcentral_desktop_remote_pointer_runtime.js` checks the viewer's
+  remote-pixel pointer API (`SendRemotePointer`, `SendRemoteWheel`,
+  `ReleaseAllPointerButtons`, `GetRemoteGeometry`) packet by packet on both
+  assets, and drives it from the trackpad engine end to end.
 - `test/meshcentral_trackpad_licence_contract.js` keeps the Apache Guacamole and
   Chromium attribution in the engine header and in `THIRD_PARTY_NOTICES.txt`.
 

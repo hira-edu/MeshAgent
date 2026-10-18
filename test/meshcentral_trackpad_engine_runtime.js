@@ -115,6 +115,17 @@ test('one-finger drag moves the cursor with Guacamole acceleration', () => {
     assert.strictEqual(h.events.length, 2, 'a drag is not a click');
 });
 
+test('each axis moves by its own scale when the canvas is stretched', () => {
+    const h = harness();
+    h.setGeometry(() => ({ width: 800, height: 600, remotePerCss: 2, remotePerCssX: 2, remotePerCssY: 1 }));
+    h.start([[1, 100, 100]]); h.advance(100); h.move([[1, 110, 110]]);
+    // gain 1 + 20/100 = 1.2: x 10 * 1.2 * 2 = 24, y 10 * 1.2 * 1 = 12.
+    assert.deepStrictEqual(h.events, [['p', 424, 312, 0]]);
+    h.setGeometry(() => ({ width: 800, height: 600, remotePerCss: 2, remotePerCssY: 0 }));
+    h.advance(100); h.move([[1, 120, 120]]);
+    assert.strictEqual(h.events.length, 2, 'an unusable axis scale falls back to remotePerCss');
+});
+
 test('cursor is clamped to the remote screen', () => {
     const h = harness();
     h.engine.setCursor(798, 598); h.events.length = 0;
