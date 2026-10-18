@@ -63,6 +63,9 @@ function checks() {
         // Intel AMT desktops share the canvas without the remote-pixel API: the controller leaves them to the page.
         amtDesktopSharesCanvas: view.includes("CreateAmtRemoteDesktop('Desk')"),
         edgeScrollStop: declaresFunction(view, 'trackpadStopEdgeScroll'),
+        // The top menu is dialog mode 999, closed by a document click the controller suppresses;
+        // the adapter closes it the same way.
+        topMenuClosedByClick: view.includes("document.onclick = function (e) { if ((xxdialogMode == 999) && (e.target.id != 'topMenuIcon')) { QV('topMenu', false); xxdialogMode = 0; } }"),
         edgeScrollGating: view.includes('if (!trackpadMode || (trackpadEdgeDX === 0 && trackpadEdgeDY === 0)) { trackpadStopEdgeScroll(); return; }'),
         // trackpadMode changes only in its declaration, the toggle and the fullscreen-exit reset, and
         // fullscreen only in its declaration and deskToggleFull: the activation the adapter reads.

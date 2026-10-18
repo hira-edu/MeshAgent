@@ -79,6 +79,13 @@ function checks() {
         noCaptureTouchListeners: !/addEventListener\(\s*['"]touch\w+['"][^)]*(true|capture)/.test(view),
         // deskarea3x is the native-zoom scroller the adapter follows and pans.
         nativeZoomScroller: view.includes("var sc = Q('deskarea3x');") && view.includes('sc.scrollLeft -= dx'),
+        // A pinch in fit mode calls the page's own switch into native zoom, then overrides the
+        // size it sets with the fit size. The switch sets the mode first and the variables directly.
+        mobileSetZoomSwitch: view.includes("function _mobileSetZoom(mode) {\n            _mobileZoomMode = mode;") &&
+            view.includes("document.documentElement.style.setProperty('--native-desk-w', w + 'px');\n                document.documentElement.style.setProperty('--native-desk-h', h + 'px');\n                document.body.classList.add('native-zoom');"),
+        // The mobile stylesheet centres the fit canvas in #DeskParent, and native zoom makes
+        // #DeskParent a block at the scroller's origin: the pinch anchor is taken before the switch.
+        mobileCanvasCentred: (() => { const css = read(path.join(moduleRoot, 'public', 'styles', 'style-bootstrap.css')); return css.includes('body.is-mobile #DeskParent {\n    display: flex !important;\n    align-items: center !important;\n    justify-content: center !important;') && css.includes('body.is-mobile.native-zoom #DeskParent {\n    position: relative !important;\n    display: block !important;') && css.includes('body.is-mobile.native-zoom #Desk {\n    width: 100% !important;\n    height: 100% !important;'); })(),
         // The WebRTC soft desktop is a new viewer module on the same canvas that reaches state 3 in
         // Start(), before its first SCREEN: the controller releases on the old module and waits
         // for the new one's screen.

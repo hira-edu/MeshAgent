@@ -25,10 +25,20 @@ function slice(source, start, end, name) {
 const DEFAULT3_CANVAS = '<canvas id=Desk width=640 height=480 oncontextmenu="return false"\n                                onmousedown=dmousedown(event) onmouseup=dmouseup(event) onmousemove=dmousemove(event)\n                                onmousewheel=dmousewheel(event)\n                                ontouchstart=dtouchstart(event) ontouchmove=dtouchmove(event) ontouchend=dtouchend(event)></canvas>';
 const DEFAULT3_BLANK_CANVAS = '<canvas id=Desk oncontextmenu="return false" onmousedown=dmousedown(event) onmouseup=dmouseup(event) onmousemove=dmousemove(event) ontouchstart=dtouchstart(event) ontouchmove=dtouchmove(event) ontouchend=dtouchend(event)></canvas>';
 const MOBILE_CANVAS = '<canvas id=Desk width=640 height=200 style="width:100%;-ms-touch-action:none;margin-left:0px" oncontextmenu="return false" onmousedown=dmousedown(event) onmouseup=dmouseup(event) onmousemove=dmousemove(event) onmousewheel=dmousewheel(event) ontouchstart=dtouchstart(event) ontouchmove=dtouchmove(event) ontouchend=dtouchend(event)></canvas>';
+// The guest share page's canvas has no touch handlers: the browser's compatibility mouse events drive it.
+const SHARING_CANVAS = '<canvas id=Desk width=640 height=200 style="width:100%;-ms-touch-action:none;margin-left:0px" oncontextmenu="return false" onmousedown=dmousedown(event) onmouseup=dmouseup(event) onmousemove=dmousemove(event) onmousewheel=dmousewheel(event)></canvas>';
+
+// The desktop guest share page (also iPadOS's default): no touch handlers, and a blank canvas
+// replaces this one when it connects.
+const DESKTOP_SHARE_CANVAS = '<canvas id=Desk width=640 height=480 oncontextmenu="return false" onmousedown=dmousedown(event) onmouseup=dmouseup(event) onmousemove=dmousemove(event) onmousewheel=dmousewheel(event)></canvas>';
+const DESKTOP_SHARE_BLANK_CANVAS = '<canvas id=Desk oncontextmenu="return false" onmousedown=dmousedown(event) onmouseup=dmouseup(event) onmousemove=dmousemove(event)></canvas>';
+const DESKTOP_SHARE_INPUT = '<label><span id="DeskControlSpan" title="Toggle mouse and keyboard input"><input id="DeskControl" type="checkbox" onkeypress="return false" onkeydown="return false" onclick="toggleKvmControl()" />Input</span></label>&nbsp;';
 
 function fixtures() {
-    const d3 = view('default3.handlebars'), dm = view('default-mobile.handlebars');
-    assert(d3.includes(DEFAULT3_CANVAS) && d3.includes(DEFAULT3_BLANK_CANVAS) && dm.includes(MOBILE_CANVAS), 'fixture canvas markup must match the pinned views');
+    const d3 = view('default3.handlebars'), dm = view('default-mobile.handlebars'), sm = view('sharing-mobile.handlebars'), sd = view('sharing.handlebars');
+    assert(d3.includes(DEFAULT3_CANVAS) && d3.includes(DEFAULT3_BLANK_CANVAS) && dm.includes(MOBILE_CANVAS) && sm.includes(SHARING_CANVAS), 'fixture canvas markup must match the pinned views');
+    assert(sd.includes(DESKTOP_SHARE_CANVAS) && sd.includes(DESKTOP_SHARE_BLANK_CANVAS) && sd.includes(DESKTOP_SHARE_INPUT), 'desktop share fixture markup must match the pinned view');
+    const line = (source, start) => slice(source, start, '\n', start.trim());
     return {
         default3: {
             adapter: 'default3', script: 'agent-desktop-trackpad-default3-0.0.1.js',
@@ -45,6 +55,7 @@ window.calls = []; window.packets = [];
 function Q(id) { return document.getElementById(id); } function QV() {} function QS(id) { return (Q(id) || { style: {} }).style; } function QH(id, h) { var e = Q(id); if (e) e.innerHTML = h; }
 var xxdialogMode = 0, _mobileZoomMode = 'fit', _mobileKbdEnabled = false, webRtcDesktop = null, desktop = null, sessionActivity = 0;
 function setSessionActivity() { calls.push('setSessionActivity'); } function deskCloseMobileActions() { calls.push('deskCloseMobileActions'); }
+${slice(d3, '        function _mobileSetZoom(mode) {', '        // Watch body class for fulldesk being added/removed', 'default3 zoom mode switch')}
 </script><script>${slice(d3, '        var dblClickDetectArgs', '        // Mobile touch input for remote desktop.', 'default3 mouse handlers')}
 ${slice(d3, '        // Mobile touch input for remote desktop.', '        function stopProcess(id, name) {', 'default3 touch handlers')}</script></body></html>`,
             overrides: slice(d3, "if (document.body.classList.contains('is-mobile')) {\n                        desktop.m.GetPositionOfControl", '                    desktop.Start(desktopNode._id);', 'default3 is-mobile overrides')
@@ -64,6 +75,47 @@ function Q(id) { return document.getElementById(id); } function QV() {} function
 var xxdialogMode = 0, desktop = null, fullscreen = true, fullscreenzoom = 1, features2 = 0, currentNode = { agent: { id: 3 } };
 function GetNodeRights() { return 0xFFFFFFFF; } function setSessionActivity() { calls.push('setSessionActivity'); }
 </script><script>${slice(dm, '        function dmousedown(e) {', '        //\n        // TERMINAL', 'default-mobile handlers')}</script></body></html>`,
+            overrides: ''
+        },
+        sharing: {
+            // #toggle is a test shim that presses whichever trackpad button the adapter shows.
+            adapter: 'sharingMobile', script: 'agent-desktop-trackpad-sharing-mobile-0.0.1.js', guest: true,
+            page: `<!doctype html><html><head><meta name=viewport content="width=device-width,initial-scale=1"><style>body{margin:0} .deskButton{position:absolute;right:10px;width:40px;height:40px;z-index:1000}</style></head><body>
+<div id=p10 style="position:absolute;left:0;top:0;width:400px;height:355px;overflow:hidden">
+<img id="deskkeybutton2b" class="deskButton" style="top:210px;display:none" />
+<div id=p10desktop style="overflow:hidden;position:absolute;top:55px;bottom:0px;width:100%"><div id=deskarea3><div id=DeskParent style="height:100%">${SHARING_CANVAS}</div></div></div></div>
+<button id="toggle" style="position:absolute;left:520px;top:80px;width:80px;height:40px" onclick="var b = ['meshTrackpadOn', 'meshTrackpadOff'].map(Q).filter(function (e) { return e && e.style.display !== 'none'; })[0]; if (b) b.click();">trackpad</button>
+<button id="exitfull" style="position:absolute;left:520px;top:140px;width:80px;height:40px" onclick="fullscreen = false;">exit</button>
+<script>
+window.calls = []; window.packets = [];
+function Q(id) { return document.getElementById(id); } function QV() {} function QS(id) { return (Q(id) || { style: {} }).style; }
+var xxdialogMode = 0, desktop = null, fullscreen = true, fullscreenzoom = 1, viewOnly = 0, currentDevicePanel = 1, features2 = 0;
+function setSessionActivity() { calls.push('setSessionActivity'); } function haltEvent(e) { if (e.preventDefault) e.preventDefault(); if (e.stopPropagation) e.stopPropagation(); return false; }
+</script><script>${slice(sm, '        function dmousedown(e) {', '        //\n        // TERMINAL', 'sharing-mobile handlers')}</script></body></html>`,
+            overrides: ''
+        },
+        desktopShare: {
+            // #toggle is a test shim that clicks the adapter's Trackpad checkbox when it is shown.
+            // The layout rules are style.css's for #deskarea3x, #DeskParent and #Desk.
+            adapter: 'sharing', script: 'agent-desktop-trackpad-sharing-0.0.1.js', guest: true, blankCanvas: DESKTOP_SHARE_BLANK_CANVAS,
+            page: `<!doctype html><html><head><meta name=viewport content="width=device-width,initial-scale=1"><style>body{margin:0}
+#deskarea3x{position:absolute;left:0;top:0;width:400px;height:300px;overflow:hidden;background:#000;text-align:center}
+#DeskParent{margin:0;overflow:hidden;height:100%;width:100%;position:absolute;right:0;top:0}
+#Desk{overflow:hidden;width:100%;touch-action:none;position:absolute;top:0;bottom:0;left:0;right:0;margin:auto}
+#deskarea4{position:absolute;left:420px;top:200px}</style></head><body>
+<div id=deskarea3x><div id=DeskParent>${DESKTOP_SHARE_CANVAS}</div></div>
+<div id=deskarea4><div>${DESKTOP_SHARE_INPUT}</div></div>
+<button id="toggle" style="position:absolute;left:520px;top:80px;width:80px;height:40px" onclick="var l = Q('meshTrackpadLabel'); if (l && l.style.display !== 'none') Q('meshTrackpadToggle').click();">trackpad</button>
+<script>
+window.calls = []; window.packets = [];
+function Q(id) { return document.getElementById(id); } function QV() {} function QS(id) { return (Q(id) || { style: {} }).style; } function QH(id, h) { var e = Q(id); if (e) e.innerHTML = h; }
+var viewOnly = 0;
+var xxdialogMode = 0, desktop = null, webRtcDesktop = null;
+function setSessionActivity() { calls.push('setSessionActivity'); } function haltEvent(e) { if (e.preventDefault) e.preventDefault(); if (e.stopPropagation) e.stopPropagation(); return false; }
+${line(sd, '        function isInputAllowed() {')}
+${line(sd, '        function toggleKvmControl() {')}
+Q('DeskControl').checked = true;
+</script><script>${slice(sd, '        // Double click detection. This is important for macOS.', '        function drotate(x) {', 'sharing handlers')}</script></body></html>`,
             overrides: ''
         }
     };
@@ -134,7 +186,7 @@ async function openPage(browser, fixture, options) {
             let overlayRemote = null;
             if (g && o && o.style.display === 'block') { const r = g.cssToRemote(parseFloat(o.style.left) - rect.left, parseFloat(o.style.top) - rect.top); overlayRemote = [Math.round(r.x), Math.round(r.y)]; }
             const cursor = document.getElementById('trackpadCursor');
-            return { calls: calls.slice(), packets: packets.slice(), overlayRemote, upstreamCursor: getComputedStyle(cursor).display, pressed: Object.keys(desktop.m.browserPressedButtons), active: !!(window.ctl && window.ctl.isActive()), edgeTimer: (typeof trackpadEdgeTimer === 'undefined') ? null : trackpadEdgeTimer };
+            return { calls: calls.slice(), packets: packets.slice(), overlayRemote, upstreamCursor: cursor ? getComputedStyle(cursor).display : null, pressed: Object.keys(desktop.m.browserPressedButtons), active: !!(window.ctl && window.ctl.isActive()), edgeTimer: (typeof trackpadEdgeTimer === 'undefined') ? null : trackpadEdgeTimer };
         }),
         reset: () => page.evaluate(() => { packets.length = 0; calls.length = 0; }),
         close: () => context.close()
@@ -200,7 +252,7 @@ async function chromiumScenarios(browser, fx) {
                 const centre = decode(s.packets[0]);
                 assert.deepStrictEqual([centre.button, centre.x, centre.y], [0, 400, 300]);
                 assert.deepStrictEqual(s.overlayRemote, [400, 300], 'overlay shows the remote pointer');
-                assert.strictEqual(s.upstreamCursor, 'none', 'the page\'s own trackpad cursor is hidden');
+                if (!fixture.guest) assert.strictEqual(s.upstreamCursor, 'none', 'the page\'s own trackpad cursor is hidden');
                 await h.reset();
                 await h.tap(50, 50); await h.wait(400);
                 s = await h.state();
@@ -233,7 +285,7 @@ async function chromiumScenarios(browser, fx) {
                 await h.touch('touchStart', [[1, 100, 100]]); await h.touch('touchMove', [[1, 150, 100]]);
                 let s = await h.state();
                 assert.deepStrictEqual(s.pressed, ['1'], 'dragging with the left button');
-                await h.click(viewName === 'mobile' ? 'exitfull' : 'toggle');
+                await h.click((viewName === 'default3' || viewName === 'desktopShare') ? 'toggle' : 'exitfull');
                 await h.wait(30);
                 s = await h.state();
                 assert.strictEqual(s.active, false);
@@ -347,7 +399,10 @@ async function reviewScenarios(browser, fx) {
             } finally { await h.close(); }
         });
 
-        for (const [gate, set] of [['a dialog', 'xxdialogMode = 2'], ['trackpad mode reset (disconnect)', 'trackpadMode = false']].concat(viewName === 'default3' ? [['Input unchecked by a rights refresh', "Q('DeskControl').checked = false"]] : [])) {
+        // The guest page has no trackpad mode of its own: leaving fullscreen (as a disconnect does) turns the adapter's off.
+        // The desktop guest page's mode goes off only with the connection, which cannot carry a release.
+        const modeReset = viewName === 'desktopShare' ? null : fixture.guest ? ['fullscreen left (disconnect)', 'fullscreen = false'] : ['trackpad mode reset (disconnect)', 'trackpadMode = false'];
+        for (const [gate, set] of [['a dialog', 'xxdialogMode = 2'], modeReset].filter(Boolean).concat((viewName === 'default3' || viewName === 'desktopShare') ? [['Input unchecked by a rights refresh', "Q('DeskControl').checked = false"]] : [])) {
             await record('chromium', viewName, `${gate} mid-drag, finger still, releases within the watchdog period`, async () => {
                 const h = await open();
                 try {
@@ -432,9 +487,12 @@ async function reviewScenarios(browser, fx) {
                 await h.reset();
                 await h.tap(100, 100); await h.wait(400);
                 let s = await h.state();
-                assert(touchCalls(s.calls).includes('dtouchstart'), 'the page handles touches again');
+                assert(touchCalls(s.calls).includes(fixture.guest ? 'dmousedown' : 'dtouchstart'), 'the page handles touches again');
                 assert.strictEqual(await h.page.evaluate(() => ctl.overlay()), null);
-                await h.page.evaluate(() => ctl.install()); await h.reset();
+                await h.page.evaluate(() => ctl.install());
+                // Uninstalling removes the guest page's trackpad button, and with it the mode.
+                if (fixture.guest) await h.click('toggle');
+                await h.reset();
                 await h.tap(100, 100); await h.wait(400);
                 s = await h.state();
                 assert.deepStrictEqual(touchCalls(s.calls), []);
@@ -533,6 +591,333 @@ async function reviewScenarios(browser, fx) {
     }
 }
 
+// Following the pointer in each zoomed or fullscreen layout, the arrow's size, and the guest page's
+// own trackpad toggle.
+async function zoomAndGuestScenarios(browser, fx) {
+    const open = fixture => openPage(browser, fixture, { engine: 'chromium', controller: true, flag: true });
+    // Several quick one-finger drags to the right: each moves the remote pointer further right.
+    const pushRight = async (h, times, x0, y) => { for (let i = 0; i < times; i++) { await h.touch('touchStart', [[1, x0, y]]); await h.touch('touchMove', [[1, x0 + 60, y]]); await h.touch('touchMove', [[1, x0 + 120, y]]); await h.touch('touchEnd', []); } };
+    const overlayClient = h => h.page.evaluate(() => { const o = ctl.overlay(); return o.style.display === 'block' ? [parseFloat(o.style.left), parseFloat(o.style.top)] : null; });
+    const arrowHeight = h => h.page.evaluate(() => parseFloat(ctl.overlay().firstChild.getAttribute('height')));
+
+    await record('chromium', 'default3', 'a pinch in fit mode switches to native zoom from the fit size, then the view follows the pointer', async () => {
+        const h = await open(fx.default3);
+        try {
+            await h.click('toggle'); await h.reset();
+            await h.touch('touchStart', [[1, 150, 150], [2, 250, 150]]);
+            for (const d of [20, 50, 100]) await h.touch('touchMove', [[1, 150 - d, 150], [2, 250 + d, 150]]);
+            await h.touch('touchEnd', []);
+            const z = await h.page.evaluate(() => ({ mode: _mobileZoomMode, cls: document.body.classList.contains('native-zoom'), w: parseFloat(document.documentElement.style.getPropertyValue('--native-desk-w')) }));
+            assert.strictEqual(z.mode, 'native'); assert.strictEqual(z.cls, true);
+            // Fit size is 400 px wide; a 3x spread from there is about 1200 px, not 3x the 800 px screen.
+            assert(z.w > 900 && z.w < 1500, `zoomed from the fit size (${z.w}px)`);
+            assert.deepStrictEqual((await h.state()).packets, [], 'a pinch sends nothing');
+            await pushRight(h, 6, 50, 150);
+            assert(await h.page.evaluate(() => Q('deskarea3x').scrollLeft) > 0, 'the container followed the pointer');
+            const s = await h.state(), last = decode(s.packets[s.packets.length - 1]);
+            assert(s.overlayRemote && Math.abs(s.overlayRemote[0] - last.x) <= 1, `overlay ${s.overlayRemote} shows the pointer at ${last.x}`);
+            assert.deepStrictEqual(h.errors, []);
+        } finally { await h.close(); }
+    });
+
+    // The real mobile stylesheet centres the canvas in #DeskParent, and native zoom puts it back at
+    // the scroller's origin (style-bootstrap.css, pinned through the view's own markup).
+    const mobileCss = () => h => h.page.addStyleTag({ content: 'body.is-mobile #DeskParent{display:flex!important;align-items:center!important;justify-content:center!important} body.is-mobile.native-zoom #DeskParent{display:block!important} body.is-mobile.native-zoom #Desk{width:100%!important;height:100%!important}' });
+    const remoteUnder = (h, x, y) => h.page.evaluate(([x, y]) => { const r = Q('Desk').getBoundingClientRect(); const p = desktop.m.GetRemoteGeometry().cssToRemote(x - r.left, y - r.top); return [Math.round(p.x), Math.round(p.y)]; }, [x, y]);
+    const nativeSize = h => h.page.evaluate(() => ['--native-desk-w', '--native-desk-h'].map(v => parseFloat(document.documentElement.style.getPropertyValue(v))));
+    const pinch = async (h, cx, cy, from, to) => { await h.touch('touchStart', [[1, cx - from, cy], [2, cx + from, cy]]); for (const d of [from + (to - from) / 3, from + 2 * (to - from) / 3, to]) await h.touch('touchMove', [[1, cx - d, cy], [2, cx + d, cy]]); await h.touch('touchEnd', []); };
+
+    await record('chromium', 'default3', 'a fit-mode pinch on a letterboxed canvas keeps the picture point under the fingers', async () => {
+        const h = await open(fx.default3);
+        try {
+            await mobileCss()(h);
+            // A 400x400 area: the 4:3 fit canvas is 400x300, centred 50 px down.
+            await h.page.evaluate(() => { QS('deskarea3x').height = '400px'; QS('Desk').height = '300px'; });
+            await h.click('toggle'); await h.reset();
+            const before = await remoteUnder(h, 200, 150);
+            await pinch(h, 200, 150, 50, 150);
+            const after = await remoteUnder(h, 200, 150), size = await nativeSize(h);
+            assert(Math.abs(after[0] - before[0]) <= 3 && Math.abs(after[1] - before[1]) <= 3, `the point under the fingers stays put: ${before} -> ${after}`);
+            assert(size[0] > 1000 && Math.abs(size[1] / size[0] - 0.75) < 0.01, `zoomed from the fit size with the screen's shape: ${size}`);
+        } finally { await h.close(); }
+    });
+
+    await record('chromium', 'default3', 'a fit-mode pinch on a stretched canvas keeps the remote screen\'s shape', async () => {
+        const h = await open(fx.default3);
+        try {
+            // Landscape fullscreen stretches the canvas to its area: here a 4:3 screen on a 400x200 one.
+            await h.page.evaluate(() => { QS('deskarea3x').height = '200px'; });
+            await h.click('toggle');
+            await pinch(h, 200, 100, 40, 80);
+            const size = await nativeSize(h);
+            assert(Math.abs(size[1] / size[0] - 0.75) < 0.01, `native size follows the screen's 4:3 shape, not the stretch: ${size}`);
+        } finally { await h.close(); }
+    });
+
+    await record('chromium', 'default3', 'zooming out after a fit-mode pinch stops at the fit size, and only for that screen size', async () => {
+        const h = await open(fx.default3);
+        try {
+            // A 2000x1500 screen fits at 400 px wide, below upstream's quarter-size floor of 500.
+            await h.page.evaluate(() => { desktop.m.ProcessBinaryCommand(7, 8, new Uint8Array([0, 7, 0, 8, 0x07, 0xd0, 0x05, 0xdc])); desktop.m.Canvas.canvas.width = 2000; desktop.m.Canvas.canvas.height = 1500; });
+            await h.click('toggle');
+            await pinch(h, 200, 150, 50, 100);
+            await pinch(h, 200, 150, 150, 10);
+            assert.deepStrictEqual(await nativeSize(h), [400, 300], 'back to the fit size, not clamped up to 500');
+            // Another screen size: the floor taken for the old one no longer applies.
+            await h.page.evaluate(() => { desktop.m.ProcessBinaryCommand(7, 8, new Uint8Array([0, 7, 0, 8, 0x07, 0xd0, 0x07, 0xd0])); desktop.m.Canvas.canvas.width = 2000; desktop.m.Canvas.canvas.height = 2000; });
+            await h.click('toggle'); await h.click('toggle');
+            await pinch(h, 200, 150, 150, 10);
+            assert.deepStrictEqual(await nativeSize(h), [500, 500], 'upstream\'s quarter-size floor for the new screen');
+        } finally { await h.close(); }
+    });
+
+    await record('chromium', 'default3', 'with the browser pinch-zoomed, the zoomed view pans to follow the pointer', async () => {
+        const h = await open(fx.default3);
+        try {
+            await h.click('toggle'); await h.reset();
+            await h.cdp.send('Emulation.setPageScaleFactor', { pageScaleFactor: 2.5 });
+            await h.wait(100);
+            const before = await h.page.evaluate(() => [visualViewport.scale, visualViewport.offsetLeft, visualViewport.offsetTop, document.scrollingElement.scrollHeight > innerHeight]);
+            assert(before[0] > 2 && before[1] === 0 && before[2] === 0 && before[3], `zoomed at the top left of a page that can scroll: ${before}`);
+            await pushRight(h, 4, 40, 60);
+            for (let i = 0; i < 4; i++) { await h.touch('touchStart', [[1, 60, 20]]); await h.touch('touchMove', [[1, 60, 70]]); await h.touch('touchMove', [[1, 60, 120]]); await h.touch('touchEnd', []); }
+            const vv = await h.page.evaluate(() => [visualViewport.offsetLeft, visualViewport.offsetLeft + visualViewport.width, visualViewport.offsetTop, visualViewport.offsetTop + visualViewport.height, scrollX, scrollY, Q('deskarea3x').scrollLeft, Q('deskarea3x').scrollTop]);
+            const p = await overlayClient(h);
+            assert(vv[0] > 0 && vv[2] > 0, `the zoomed view panned right and down: ${vv}`);
+            assert(p && p[0] >= vv[0] && p[0] <= vv[1] && p[1] >= vv[2] && p[1] <= vv[3], `the pointer ${p} is in the zoomed view ${vv}`);
+            assert.deepStrictEqual(vv.slice(4), [0, 0, 0, 0], 'neither the scrollable page nor the fit-mode container scrolled');
+        } finally { await h.close(); }
+    });
+
+    await record('chromium', 'default3', 'the arrow is sized like the remote pointer at the current zoom, within bounds', async () => {
+        const h = await open(fx.default3);
+        try {
+            await h.click('toggle');
+            assert.strictEqual(await arrowHeight(h), 16, 'fit mode (2 remote px per CSS px): the minimum');
+            const native = async w => { await h.page.evaluate(w => { _mobileZoomMode = 'native'; document.body.classList.add('native-zoom'); document.documentElement.style.setProperty('--native-desk-w', w + 'px'); document.documentElement.style.setProperty('--native-desk-h', (w * 3 / 4) + 'px'); ctl.evaluate(); }, w); return arrowHeight(h); };
+            assert.strictEqual(await native(800), 20, '1:1: a Windows arrow\'s height');
+            assert.strictEqual(await native(1600), 24, '2x: the maximum');
+            await native(800);
+            await h.cdp.send('Emulation.setPageScaleFactor', { pageScaleFactor: 2 });
+            await h.wait(100); await h.page.evaluate(() => ctl.evaluate());
+            assert.strictEqual(await arrowHeight(h), 12, 'browser zoom 2x at 1:1: 24 px on screen, the maximum');
+        } finally { await h.close(); }
+    });
+
+    for (const viewName of ['mobile', 'sharing']) {
+        await record('chromium', viewName, 'fullscreen at 1x scrolls the fullscreen view to follow the pointer', async () => {
+            const h = await open(fx[viewName]);
+            try {
+                // What deskToggleFull sets for fullscreen at zoom 1 on an 800x600 screen.
+                await h.page.evaluate(() => { QS('p10desktop').overflow = 'scroll'; QS('deskarea3').width = '800px'; QS('deskarea3').height = '600px'; });
+                await h.click('toggle'); await h.reset();
+                await pushRight(h, 6, 50, 120);
+                assert(await h.page.evaluate(() => Q('p10desktop').scrollLeft) > 0, 'p10desktop followed the pointer');
+                const s = await h.state(), last = decode(s.packets[s.packets.length - 1]);
+                assert(s.overlayRemote && Math.abs(s.overlayRemote[0] - last.x) <= 1, `overlay ${s.overlayRemote} shows the pointer at ${last.x}`);
+            } finally { await h.close(); }
+        });
+    }
+
+    await record('chromium', 'sharing', 'the guest trackpad button shows only in fullscreen with input, and leaving fullscreen turns the mode off', async () => {
+        const h = await open(fx.sharing);
+        const shown = () => h.page.evaluate(() => ['meshTrackpadOn', 'meshTrackpadOff'].map(id => Q(id) && Q(id).style.display));
+        try {
+            assert.deepStrictEqual(await shown(), ['block', 'none'], 'offered in fullscreen');
+            assert.strictEqual(await h.page.evaluate(() => Q('meshTrackpadOn').previousElementSibling.id), 'deskkeybutton2b', 'next to the page\'s fullscreen buttons');
+            await h.click('meshTrackpadOn');
+            let s = await h.state();
+            assert.strictEqual(s.active, true);
+            assert.deepStrictEqual(await shown(), ['none', 'block']);
+            await h.reset(); await h.tap(100, 100); await h.wait(400);
+            s = await h.state();
+            assert.deepStrictEqual(buttons(s.packets), [2, 4], 'a tap clicks at the remote pointer');
+            assert.deepStrictEqual(touchCalls(s.calls), [], 'no compatibility mouse event reached the page');
+            await h.click('meshTrackpadOff');
+            assert.strictEqual((await h.state()).active, false, 'the button turns it off');
+            await h.click('meshTrackpadOn');
+            await h.click('exitfull');
+            assert.strictEqual((await h.state()).active, false, 'leaving fullscreen turns it off');
+            assert.deepStrictEqual(await shown(), ['none', 'none']);
+            await h.page.evaluate(() => { fullscreen = true; ctl.evaluate(); });
+            assert.deepStrictEqual(await shown(), ['block', 'none'], 'offered again, but off');
+            assert.strictEqual((await h.state()).active, false);
+            await h.page.evaluate(() => ctl.uninstall());
+            assert.deepStrictEqual(await shown(), [null, null], 'uninstall removes the buttons');
+            assert.deepStrictEqual(h.errors, []);
+        } finally { await h.close(); }
+    });
+
+    for (const viewName of ['mobile', 'sharing']) {
+        await record('chromium', viewName, 'with the top menu open, a tap only closes it; the next tap clicks', async () => {
+            const h = await open(fx[viewName]);
+            try {
+                await h.click('toggle'); await h.reset();
+                await h.page.evaluate(() => { xxdialogMode = 999; window.QV = function (id, v) { calls.push('QV ' + id + ' ' + v); }; });
+                await h.tap(100, 100); await h.wait(400);
+                let s = await h.state();
+                assert.strictEqual(await h.page.evaluate(() => xxdialogMode), 0, 'the menu is closed');
+                assert(s.calls.includes('QV topMenu false'), 'through the page\'s own QV');
+                assert.deepStrictEqual(s.packets, [], 'the closing tap sends nothing');
+                await h.tap(100, 100); await h.wait(400);
+                assert.deepStrictEqual(buttons((await h.state()).packets), [2, 4], 'the next tap clicks');
+            } finally { await h.close(); }
+        });
+    }
+
+    await record('chromium', 'sharing', 'a view-only share link, or the terminal panel, offers no trackpad mode', async () => {
+        for (const set of ['viewOnly = 1', 'desktop.m.stopInput = true', 'currentDevicePanel = 5']) {
+            const h = await open(fx.sharing);
+            try {
+                await h.page.evaluate(set); await h.page.evaluate(() => ctl.evaluate());
+                assert.deepStrictEqual(await h.page.evaluate(() => ['meshTrackpadOn', 'meshTrackpadOff'].map(id => Q(id).style.display)), ['none', 'none'], set);
+                await h.click('toggle');
+                assert.strictEqual((await h.state()).active, false, set);
+            } finally { await h.close(); }
+        }
+    });
+
+    const shownBox = h => h.page.evaluate(() => { const l = Q('meshTrackpadLabel'); return l ? [l.style.display !== 'none', Q('meshTrackpadToggle').checked] : null; });
+
+    await record('chromium', 'desktopShare', 'the Trackpad checkbox sits beside Input, turns the mode on and off, and owns taps', async () => {
+        const base = await openPage(browser, fx.desktopShare, { engine: 'chromium', controller: false });
+        const footer = p => p.evaluate(() => Q('DeskControlSpan').parentNode.parentNode.innerHTML);
+        const pageFooter = await footer(base.page);
+        await base.close();
+        const h = await open(fx.desktopShare);
+        try {
+            assert.deepStrictEqual(await shownBox(h), [true, false], 'offered on a touch device');
+            const order = await h.page.evaluate(() => Array.from(Q('DeskControlSpan').parentNode.parentNode.childNodes).map(n => n.nodeType === 3 ? JSON.stringify(n.nodeValue) : n.tagName + (n.id ? '#' + n.id : '') + (n.nodeName === 'SPAN' ? JSON.stringify(n.textContent) : '')));
+            assert.deepStrictEqual(order, ['LABEL', 'SPAN"\u00a0"', 'LABEL#meshTrackpadLabel', '"\u00a0"'], `Input, a space, Trackpad, then the page's own space: ${order}`);
+            await h.click('meshTrackpadToggle');
+            let s = await h.state();
+            assert.strictEqual(s.active, true);
+            assert.strictEqual(s.packets.length, 1, 'enabling sends one move to the centre');
+            assert.deepStrictEqual(await shownBox(h), [true, true]);
+            await h.reset(); await h.tap(100, 100); await h.wait(400);
+            s = await h.state();
+            assert.deepStrictEqual(buttons(s.packets), [2, 4], 'a tap clicks at the remote pointer');
+            assert.deepStrictEqual(touchCalls(s.calls), [], 'no compatibility mouse event reached the page');
+            await h.click('meshTrackpadToggle');
+            assert.strictEqual((await h.state()).active, false, 'unchecking turns it off');
+            await h.reset(); await h.tap(100, 100); await h.wait(400);
+            assert(touchCalls((await h.state()).calls).includes('dmousedown'), 'the page handles taps again');
+            await h.click('meshTrackpadToggle');
+            await h.page.evaluate(() => ctl.uninstall());
+            assert.strictEqual(await shownBox(h), null, 'uninstall removes the checkbox');
+            assert.strictEqual(await footer(h.page), pageFooter, 'and its spacing: the footer is the page\'s own again');
+            assert.deepStrictEqual(h.errors, []);
+        } finally { await h.close(); }
+    });
+
+    await record('chromium', 'desktopShare', 'no checkbox without touch, on a view-only link, with input stopped, or disconnected; disconnecting turns the mode off', async () => {
+        for (const set of ['delete Window.prototype.ontouchstart; delete window.ontouchstart; Object.defineProperty(navigator, "maxTouchPoints", { value: 0 })', 'viewOnly = 1', 'desktop.m.stopInput = true', 'desktop.m.State = 0']) {
+            const h = await open(fx.desktopShare);
+            try {
+                await h.click('toggle');
+                assert.strictEqual((await h.state()).active, true, set);
+                await h.page.evaluate(set); await h.page.evaluate(() => ctl.evaluate());
+                assert.deepStrictEqual(await shownBox(h), [false, false], set);
+                assert.strictEqual((await h.state()).active, false, set);
+                assert.deepStrictEqual((await h.state()).pressed, [], set);
+            } finally { await h.close(); }
+        }
+    });
+
+    await record('chromium', 'desktopShare', 'enabling with Input unchecked sends nothing; checking Input lets taps through', async () => {
+        const h = await open(fx.desktopShare);
+        try {
+            await h.page.evaluate(() => { Q('DeskControl').checked = false; });
+            await h.click('meshTrackpadToggle');
+            assert.strictEqual((await h.state()).active, true);
+            await h.tap(100, 100); await h.wait(400);
+            await h.touch('touchStart', [[1, 100, 100]]); await h.touch('touchMove', [[1, 160, 100]]); await h.touch('touchEnd', []);
+            let s = await h.state();
+            assert.deepStrictEqual(s.packets, [], 'not even the centring move');
+            assert.strictEqual(s.overlayRemote, null, 'no arrow while input is blocked');
+            await h.page.evaluate(() => { Q('DeskControl').checked = true; });
+            await h.tap(100, 100); await h.wait(400);
+            s = await h.state();
+            assert.deepStrictEqual(buttons(s.packets), [2, 4]);
+        } finally { await h.close(); }
+    });
+
+    await record('chromium', 'desktopShare', 'another panel of the page hides the arrow; coming back shows it', async () => {
+        const h = await open(fx.desktopShare);
+        try {
+            await h.click('toggle');
+            assert.notStrictEqual((await h.state()).overlayRemote, null);
+            // go(12) hides the desktop panel, so the canvas has no box.
+            await h.page.evaluate(() => { QS('deskarea3x').display = 'none'; ctl.evaluate(); });
+            assert.strictEqual(await h.page.evaluate(() => ctl.overlay().style.display), 'none', 'no arrow over the terminal or files panel');
+            await h.page.evaluate(() => { QS('deskarea3x').display = ''; ctl.evaluate(); });
+            assert.deepStrictEqual((await h.state()).overlayRemote, [400, 300]);
+        } finally { await h.close(); }
+    });
+
+    await record('chromium', 'desktopShare', 'Space on the focused checkbox does not toggle it; detection needs the page\'s own input rule and no trackpad mode', async () => {
+        const h = await open(fx.desktopShare);
+        try {
+            await h.page.focus('#meshTrackpadToggle'); await h.page.keyboard.press(' ');
+            assert.deepStrictEqual(await shownBox(h), [true, false], 'still off');
+            assert.strictEqual((await h.state()).active, false);
+            const detect = () => h.page.evaluate(() => MeshTrackpadAdapters.sharing.detect());
+            assert.strictEqual(await detect(), true);
+            assert.strictEqual(await h.page.evaluate(() => { window.trackpadMode = false; const d = MeshTrackpadAdapters.sharing.detect(); delete window.trackpadMode; return d; }), false, 'a page with its own trackpad mode');
+            assert.strictEqual(await h.page.evaluate(() => { window._mobileZoomMode = 'fit'; const d = MeshTrackpadAdapters.sharing.detect(); delete window._mobileZoomMode; return d; }), false, 'the Modern UI');
+            assert.strictEqual(await h.page.evaluate(() => { const f = window.isInputAllowed; window.isInputAllowed = undefined; const d = MeshTrackpadAdapters.sharing.detect(); window.isInputAllowed = f; return d; }), false, 'no input rule to follow');
+        } finally { await h.close(); }
+    });
+
+    await record('chromium', 'desktopShare', 'the canvas the page puts in before connecting is still owned', async () => {
+        const h = await open(fx.desktopShare);
+        try {
+            await h.click('toggle');
+            await h.page.evaluate(html => { QH('DeskParent', html); desktop.m.CanvasId = Q('Desk'); desktop.m.Canvas = Q('Desk').getContext('2d'); desktop.m.Canvas.canvas.width = 800; desktop.m.Canvas.canvas.height = 600; }, fx.desktopShare.blankCanvas);
+            await h.reset(); await h.tap(100, 100); await h.wait(400);
+            const s = await h.state();
+            assert.deepStrictEqual(touchCalls(s.calls), []);
+            assert.deepStrictEqual(buttons(s.packets), [2, 4]);
+        } finally { await h.close(); }
+    });
+
+    await record('chromium', 'desktopShare', 'a WebRTC soft desktop switch mid-drag releases on the old module; the new one gets later taps', async () => {
+        const h = await open(fx.desktopShare);
+        try {
+            await h.click('toggle'); await h.reset();
+            await h.drag(100, 100);
+            await h.page.evaluate(() => {
+                const hex = p => Array.from(p, c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
+                window.packets2 = [];
+                const m2 = CreateAgentRemoteDesktop('Desk');
+                m2.parent = { State: 2, send: p => { if (((p.charCodeAt(0) << 8) | p.charCodeAt(1)) === 2) packets2.push(hex(p)); }, xxStateChange: function (s) { this.State = s; m2.xxStateChange(s); } };
+                m2.Start(); m2.ProcessBinaryCommand(7, 8, new Uint8Array([0, 7, 0, 8, 3, 32, 2, 88]));
+                m2.Canvas.canvas.width = 800; m2.Canvas.canvas.height = 600;
+                webRtcDesktop = { softdesktop: { m: m2 } };
+            });
+            await h.touch('touchMove', [[1, 180, 100]]);
+            const s = await h.state();
+            assert.deepStrictEqual(s.pressed, []); assert.strictEqual(buttons(s.packets).slice(-1)[0], 4, 'released on the old module');
+            await h.touch('touchEnd', []);
+            await h.tap(100, 100); await h.wait(400);
+            assert.deepStrictEqual(buttons(await h.page.evaluate(() => packets2.slice())), [2, 4]);
+        } finally { await h.close(); }
+    });
+
+    await record('chromium', 'desktopShare', 'the 1:1 view mode scrolls the canvas\'s parent to follow the pointer', async () => {
+        const h = await open(fx.desktopShare);
+        try {
+            // What the page's deskAdjust sets for "Toggle View Mode" (deskAspectRatio 1).
+            await h.page.evaluate(() => { QS('Desk')['margin-top'] = '0px'; QS('Desk').height = '600px'; QS('Desk').width = '800px'; QS('DeskParent').overflow = 'scroll'; });
+            await h.click('toggle'); await h.reset();
+            await pushRight(h, 6, 50, 150);
+            assert(await h.page.evaluate(() => Q('DeskParent').scrollLeft) > 0, 'DeskParent followed the pointer');
+            const s = await h.state(), last = decode(s.packets[s.packets.length - 1]);
+            assert(s.overlayRemote && Math.abs(s.overlayRemote[0] - last.x) <= 1, `overlay ${s.overlayRemote} shows the pointer at ${last.x}`);
+        } finally { await h.close(); }
+    });
+}
+
 async function webkitScenarios(browser, fx) {
     for (const [viewName, fixture] of Object.entries(fx)) {
         await record('webkit', viewName, 'trackpad on: the engine owns touches (dispatched events)', async () => {
@@ -566,7 +951,8 @@ async function webkitScenarios(browser, fx) {
                 await base.click('toggle'); await off.click('toggle'); await base.reset(); await off.reset();
                 const a = await scripted(base), b = await scripted(off);
                 assert.deepStrictEqual(b.calls, a.calls); assert.deepStrictEqual(b.packets, a.packets);
-                assert(touchCalls(a.calls).length > 0, 'the page handled the touches itself');
+                // Dispatched touch events raise no compatibility mouse events, and the guest page has no touch handlers.
+                if (!fixture.guest) assert(touchCalls(a.calls).length > 0, 'the page handled the touches itself');
             } finally { await base.close(); await off.close(); }
         });
     }
@@ -579,7 +965,7 @@ async function main() {
     const fx = fixtures();
     for (const engine of ['chromium', 'webkit']) {
         const browser = await playwright[engine].launch({ headless: true });
-        try { if (engine === 'chromium') { await chromiumScenarios(browser, fx); await reviewScenarios(browser, fx); } else await webkitScenarios(browser, fx); }
+        try { if (engine === 'chromium') { await chromiumScenarios(browser, fx); await reviewScenarios(browser, fx); await zoomAndGuestScenarios(browser, fx); } else await webkitScenarios(browser, fx); }
         finally { await browser.close(); }
     }
     fs.mkdirSync(evidence, { recursive: true });

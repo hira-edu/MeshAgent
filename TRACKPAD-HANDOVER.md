@@ -47,14 +47,17 @@ desktop viewer.
     unchanged.
 - **Controller and adapters**: one shared controller
   (`agent-desktop-trackpad-controller-0.0.1.js`), plus one adapter for Modern
-  UI (`-default3-0.0.1.js`) and one for the classic mobile UI
-  (`-mobile-0.0.1.js`).
+  UI (`-default3-0.0.1.js`), one for the classic mobile UI
+  (`-mobile-0.0.1.js`) and one for the guest share page for phones
+  (`-sharing-mobile-0.0.1.js`), which adds the trackpad button that page lacks,
+  and one for the desktop guest share page iPadOS gets (`-sharing-0.0.1.js`),
+  which adds a Trackpad checkbox beside Input.
   - A capture-phase touch listener on `#DeskParent` owns the touch, so the
     page's own handlers and compatibility clicks never run.
   - Buttons are released on: mode off, Input off, dialogs, a hidden page,
     blur, a screen change, a module switch and disconnect.
 - **Loader** in `custom.js`, placed before the audio block. Each page has its
-  own flag, and both default to off.
+  own flag, and all four default to off.
 - **P1a** (`meshdesktopmultiplex.js`):
   - When a viewer leaves, the multiplexer sends a button-up for each button
     that viewer held and no other viewer holds, at the viewer's last position.
@@ -150,7 +153,10 @@ branch first.
      - iPad with and without a trackpad;
      - an Android phone and tablet;
      - a Windows touchscreen laptop, which must stay on the direct path.
-   - Cover both UIs on each device.
+   - Cover both UIs and the guest share page on each device.
+   - Check that the view pans after the pointer with the browser itself
+     pinch-zoomed on iOS Safari; the browser tests cover only Chromium.
+   - Check the arrow size against the remote pointer at fit, 1:1 and zoomed in.
    - Agents:
      - Windows 10/11 with a single monitor, multiple monitors, mixed DPI, and
        a monitor at negative coordinates;
@@ -191,7 +197,8 @@ branch first.
    - right-button drag;
    - modifier-plus-gesture combinations;
    - pen handling;
-   - pinch in fit mode;
+   - pinch zoom on the classic and guest mobile pages (their zoom is a 1x / 0.5x
+     button);
    - remembering trackpad mode between sessions.
 
 ## Known limitations
@@ -205,9 +212,14 @@ branch first.
 - Every click's button-up arrives late by `clickReleaseDelayMs`.
 - The overlay is always an arrow. Agent-drawn and overlay cursors can both show.
 - The classic mobile UI only offers trackpad mode in fullscreen, as upstream
-  does, and has no pinch there.
+  does, and has no pinch there. The guest share page for phones follows it.
+- A pinch that switched Modern UI fit mode to native zoom stays in native zoom;
+  "Scale to Fit" in the menu returns to fit mode. Upstream resets native zoom
+  to 1:1 on any window resize or rotation (including the on-screen keyboard),
+  on entering fullscreen and on a remote resolution change.
 - iPadOS gets the classic desktop UI by default, which has no touch support.
-  iPad users need Modern UI.
+  iPad users need Modern UI. iPad guests get the desktop share page, which now
+  offers the Trackpad checkbox.
 
 ## Running the tests
 
@@ -226,10 +238,12 @@ npx playwright install chromium webkit
 |---|---|---|
 | `meshcentral_trackpad_engine_runtime.js` | Gesture table and the randomized property test | 40 + 100,000 runs |
 | `meshcentral_desktop_remote_pointer_runtime.js` | Viewer API packets, on both the full and min assets | 50 |
-| `meshcentral_trackpad_adapter_runtime.js` | Both adapters in Chromium and WebKit | 50 |
-| `meshcentral_trackpad_loader_runtime.js` | The `custom.js` loader and flags | 18 |
-| `meshcentral_trackpad_default3_coupling_contract.js` | Upstream coupling, Modern UI | 38 checks |
-| `meshcentral_trackpad_default_mobile_coupling_contract.js` | Upstream coupling, classic mobile | 36 checks |
+| `meshcentral_trackpad_adapter_runtime.js` | All four adapters in Chromium and WebKit, including follow and arrow size | 112 |
+| `meshcentral_trackpad_loader_runtime.js` | The `custom.js` loader and flags | 20 |
+| `meshcentral_trackpad_default3_coupling_contract.js` | Upstream coupling, Modern UI | 40 checks |
+| `meshcentral_trackpad_default_mobile_coupling_contract.js` | Upstream coupling, classic mobile | 37 checks |
+| `meshcentral_trackpad_sharing_mobile_coupling_contract.js` | Upstream coupling, guest share for phones | 34 checks |
+| `meshcentral_trackpad_sharing_coupling_contract.js` | Upstream coupling, guest share for desktop browsers and iPad | 31 checks |
 | `meshcentral_desktop_pointer_baseline_runtime.js` | Packet traces of the unchanged mouse paths | 47 scenarios |
 | `meshcentral_multiplex_button_release_runtime.js` | P1a. Run it with no arguments: the first argument is read as a source path. | 12 |
 | `meshcentral_trackpad_licence_contract.js`, `meshcentral_viewer_min_build_contract.js`, `meshcentral_viewer_touch_harness_runtime.js`, `deploy_publish_paths_contract.js` | Licences, min-file rebuild, touch event order, deploy manifest | — |
