@@ -15,7 +15,7 @@ const scripts = path.join(meshcentral, 'public/scripts');
 const ORIGIN = 'https://mesh.test';
 
 function loaderSource() {
-    const custom = fs.readFileSync(path.join(scripts, 'custom.js'), 'utf8');
+    const custom = fs.readFileSync(path.join(scripts, 'custom.js'), 'utf8').replace(/\r\n/g, '\n');
     const start = custom.indexOf('/*\n * Trackpad ("mouse pointer") mode engine loader.');
     const end = custom.indexOf('/*\n * Desktop audio speaker control');
     assert(start >= 0 && end > start, 'trackpad loader block must precede the audio block in custom.js');

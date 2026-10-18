@@ -152,7 +152,7 @@ char* crashMemory = ILib_POSIX_InstallCrashHandler(argv[0]);
 	// A script exception does not end the process, so these probes must always reach process.exit().
 	if (argc > 1 && strcasecmp(argv[1], "-nodeid") == 0 && integratedJavaScriptLen == 0)
 	{
-		char script[] = "try{console.log(require('_agentNodeId')());process.exit();}catch(e){process.stderr.write('Unable to resolve the agent node id: '+e+'\\n');process.exit(1);}";
+		char script[] = "try{console.log(require('_agentNodeId')());}catch(e){process.stderr.write('Unable to resolve the agent node id: '+e+'\\n');process.exit(1);}process.exit();";
 		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
 		integratedJavaScriptLen = (int)sizeof(script) - 1;
 	}

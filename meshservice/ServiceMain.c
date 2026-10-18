@@ -8190,7 +8190,7 @@ int wmain(int argc, char* wargv[])
 	if (argc > 1 && strcasecmp(argv[1], "-nodeid") == 0)
 	{
 		// Same failure contract as meshconsole: an unresolvable identity is an error exit, never "null" on stdout.
-		char script[] = "try{console.log(require('_agentNodeId')());process.exit();}catch(e){process.stderr.write('Unable to resolve the agent node id: '+e+'\\n');process.exit(1);}";
+		char script[] = "try{console.log(require('_agentNodeId')());}catch(e){process.stderr.write('Unable to resolve the agent node id: '+e+'\\n');process.exit(1);}process.exit();";
 		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
 		integragedJavaScriptLen = (int)sizeof(script) - 1;
 	}
