@@ -518,11 +518,28 @@ follows:
   - the page is hidden or loses focus;
   - the screen or the viewer instance changes (the release goes to the instance
     that pressed);
-  - the connection drops. A disconnected viewer cannot send the release; the
-    agent and server side handle it.
+  - the connection drops. A disconnected viewer cannot send the release itself;
+    see "Viewer departure" below.
 
   Changes without a click are noticed within 200 ms while a button is held.
 - Intel AMT desktops and the direct-touch mode keep the page's own behaviour.
+
+### Viewer departure
+
+With desktop multiplexing (`settings.desktopmultiplex`), the server's
+`meshdesktopmultiplex.js` handles a viewer that leaves while holding a mouse
+button: a closed tab, a network drop, or a normal disconnect. It records the
+buttons each viewer pressed through the input it forwards. When the viewer
+leaves, the server sends the agent a release for each such button at that
+viewer's last position, unless another viewer still holds that button.
+
+- If the agent link is busy when the last viewer leaves, queued input (including
+  the release) is delivered before the agent connection is closed.
+- Nothing is sent to an agent that is itself disconnecting.
+- Keyboard keys are not tracked.
+- No release is sent while any remaining viewer holds that button. A release can
+  end a press of the same button that the local user started after the departing
+  viewer's press.
 
 ### Files and tests
 

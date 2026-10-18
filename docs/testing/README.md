@@ -475,6 +475,12 @@ These checks read the sibling `../MeshCentral` checkout and its installed
   - the guest share page, which has no trackpad mode, loads nothing;
   - a failed script load leaves trackpad mode to the page and stops observing
     new modules.
+- `test/meshcentral_multiplex_button_release_runtime.js` drives the real desktop
+  multiplexer. It checks that a departing viewer's held buttons are released at
+  its last position, unless another viewer holds them, and that view-only,
+  double-click and wheel packets are not counted as presses. It also checks that
+  the release still reaches a busy agent before it is closed, and that nothing
+  is sent to an agent that is going away.
 - `test/meshcentral_trackpad_licence_contract.js` keeps the Apache Guacamole and
   Chromium attribution in the engine header and in `THIRD_PARTY_NOTICES.txt`.
 
