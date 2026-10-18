@@ -425,6 +425,16 @@ These checks read the sibling `../MeshCentral` checkout and its installed
 - `test/meshcentral_viewer_min_build_contract.js` requires the served
   `agent-desktop-0.0.2-min.js` to equal the output of
   `../MeshCentral/scripts/build-viewer-min.js`.
+- `test/meshcentral_trackpad_engine_runtime.js` drives the DOM-free trackpad
+  gesture engine (`public/scripts/agent-desktop-trackpad-0.0.1.js`) with a fake
+  clock. It has one table test per gesture and disambiguation rule, timing and
+  slop edges, finger-count transitions, malformed touch lists, unusable geometry,
+  re-entrant callbacks, and cancellation in every state. Its randomized run
+  (100,000 sequences by default; `--runs` changes it) requires every press to be
+  released, one button to change at a time, integer on-screen coordinates, and
+  nothing to happen after a reset.
+- `test/meshcentral_trackpad_licence_contract.js` keeps the Apache Guacamole and
+  Chromium attribution in the engine header and in `THIRD_PARTY_NOTICES.txt`.
 
 The baseline and both contracts are pinned to one MeshCentral version and fail
 when another version is installed. To upgrade:
