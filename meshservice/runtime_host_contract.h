@@ -153,10 +153,13 @@ BOOL MeshRuntimeHost_LaunchSelfTestHostW(const wchar_t* arguments, DWORD timeout
 BOOL ServiceHost_BuildImagePath(const wchar_t* dllPath, wchar_t* command, size_t commandCch);
 BOOL ServiceHost_ParseImagePath(const wchar_t* command, wchar_t* dllPath, size_t dllPathCch);
 BOOL ServiceHost_BuildGroupName(const wchar_t* serviceName, wchar_t* groupName, size_t groupNameCch);
+BOOL ServiceHost_BuildLegacyGroupName(const wchar_t* serviceName, wchar_t* groupName, size_t groupNameCch);
 BOOL ServiceHost_BuildServiceImagePath(const wchar_t* serviceName, wchar_t* command, size_t commandCch);
 BOOL ServiceHost_IsServiceImagePath(const wchar_t* serviceName, const wchar_t* command);
+BOOL ServiceHost_IsLegacyServiceImagePath(const wchar_t* serviceName, const wchar_t* command);
 BOOL ServiceHost_ReadServiceDllPath(const wchar_t* serviceName, wchar_t* dllPath, size_t dllPathCch, BOOL allowLegacyEntry);
 BOOL ServiceHost_ValidateServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath);
+BOOL ServiceHost_ValidateServiceBindingForStop(const wchar_t* serviceName, const wchar_t* dllPath);
 VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv);
 void CALLBACK MeshServiceHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);

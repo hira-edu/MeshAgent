@@ -171,7 +171,7 @@ int main(void){
     r=decode(v2,length+18);assert(r&&!r->binding->incumbentDbPath[0]);ServiceJournal_Free(r);assert(!v1_layout(v2,length+18));free(v2);
     for(DWORD n=0;n<length;++n){r=decode(data,n);assert(!r);} /* Every truncation boundary. */
     for(DWORD n=0;n<length;n+=7){data[n]^=0x40;r=decode(data,length);assert(!r);data[n]^=0x40;}
-    BYTE* changed=malloc(length+4);memcpy(changed,data,length);*(DWORD*)(changed+4)=3;rehash(changed,length);assert(!decode(changed,length));
+    BYTE* changed=malloc(length+4);memcpy(changed,data,length);*(DWORD*)(changed+4)=4;rehash(changed,length);assert(!decode(changed,length));
     memcpy(changed,data,length);*(DWORD*)(changed+8)=6;rehash(changed,length);assert(!decode(changed,length));
     memcpy(changed,data,length);*(DWORD*)(changed+12)=32;rehash(changed,length);assert(!decode(changed,length));
     memcpy(changed,data,length);changed[20]=0x00;changed[21]=0xd8;rehash(changed,length);assert(!decode(changed,length));
@@ -194,6 +194,13 @@ int main(void){
     assert(ServiceJournal_Save(L"journal",L"Agent",4,1,s,descriptors,attrs));assert(ServiceJournal_Load(L"journal",L"Agent",&r)&&r&&r->phase==4);ServiceJournal_Free(r);
     assert(ServiceJournal_Save(L"journal",L"Agent",5,1,s,descriptors,attrs));assert(ServiceJournal_Load(L"journal",L"Agent",&r)&&r&&r->phase==5);ServiceJournal_Free(r);
     assert(ServiceJournal_Save(L"journal",L"Agent",1,0,NULL,NULL,NULL));assert(ServiceJournal_Load(L"journal",L"Agent",&r)&&r&&!r->binding);ServiceJournal_Free(r);
+    /* Branded membership round trips separately; old checkpoints retain bit 16
+     * for the historical group and decode without branded membership. */
+    s->brandedGroupMember=TRUE;
+    assert(ServiceJournal_Save(L"journal",L"Agent",1,0,s,NULL,NULL));
+    assert(*(DWORD*)(files[2]+4)==3);
+    assert(ServiceJournal_Load(L"journal",L"Agent",&r)&&r&&r->binding->brandedGroupMember&&r->binding->serviceGroupMember);
+    ServiceJournal_Free(r);s->brandedGroupMember=FALSE;
     /* Path ownership and capture-compatible historical account/type survive reboot. */
     memcpy(s->incumbentDbPath,L"C:\\Old\\identity.db",sizeof(L"C:\\Old\\identity.db"));
     memcpy(s->incumbentExePath,L"C:\\Old\\agent.exe",sizeof(L"C:\\Old\\agent.exe"));

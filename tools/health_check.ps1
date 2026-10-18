@@ -56,7 +56,7 @@ function Resolve-ServiceRuntimeDllPath {
     param([string]$PathName, [string]$Name)
 
     if ([string]::IsNullOrWhiteSpace($PathName) -or [string]::IsNullOrWhiteSpace($Name) -or $PathName.Length -gt 1024) { return $null }
-    $binding = [regex]::Match($PathName, '^"([^"\r\n]+)" -k (MeshAgent-[0-9A-Fa-f]{16})$')
+    $binding = [regex]::Match($PathName, '^"([^"\r\n]+)" -k ([A-Za-z0-9_-]{1,40}-[0-9A-Fa-f]{16})$')
     if (-not $binding.Success -or $binding.Length -ne $PathName.Length) { return $null }
     $expectedHost = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'svchost.exe'
     if (-not [string]::Equals($binding.Groups[1].Value, $expectedHost, [StringComparison]::OrdinalIgnoreCase)) { return $null }

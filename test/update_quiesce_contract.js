@@ -11,7 +11,7 @@ const checks = {
     helperSweepsAgentProcess: source.includes('ServiceDeploy_TerminateProcessesByPath(paths->exePath);'),
     helperDoesNotKillSharedServiceHostByPath: !source.includes('ServiceDeploy_TerminateProcessesByPath(hostExePath);'),
     sharedHostsExcludedFromModuleSweep: source.includes('if (pid == 0 || pid == currentPid || !_wcsicmp(processEntry.szExeFile, L"svchost.exe")) { continue; }'),
-        forcedSharedServiceStopRequiresExclusiveBinding: source.includes('ServiceHost_ValidateServiceBinding(serviceName, serviceDll)') &&
+        forcedSharedServiceStopRequiresExclusiveBinding: source.includes('ServiceHost_ValidateServiceBindingForStop(serviceName, serviceDll)') &&
         source.includes('if (!stopped && forceTerminate && processIsExclusivelyOurs && ssp.dwProcessId != 0)'),
     executableSweepRequiresExactImage: source.includes('if (_wcsicmp(imagePath, exePath) == 0 && entry.th32ProcessID != currentPid)'),
     helperOpensExclusiveHandle: source.includes('CreateFileW(targetPath, DELETE | GENERIC_WRITE, 0, NULL, OPEN_EXISTING'),

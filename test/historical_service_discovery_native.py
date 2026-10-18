@@ -55,6 +55,9 @@ static BOOL ServiceHost_BuildImagePath(const wchar_t* dll,wchar_t* output,size_t
 static BOOL ServiceHost_IsServiceImagePath(const wchar_t* name,const wchar_t* command) {
     (void)name;return !_wcsicmp(command,L"\"C:\\Windows\\System32\\svchost.exe\" -k scoped-Agent");
 }
+static BOOL ServiceHost_IsLegacyServiceImagePath(const wchar_t* name,const wchar_t* command) {
+    (void)name;return !_wcsicmp(command,L"\"C:\\Windows\\System32\\svchost.exe\" -k MeshAgent-Legacy");
+}
 static UINT fixtureSystem(wchar_t* output,UINT cap) {
     StringCchCopyW(output,cap,L"C:\\Windows\\System32");return (UINT)wcslen(output);
 }

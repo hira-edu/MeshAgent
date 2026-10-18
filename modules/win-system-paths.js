@@ -155,7 +155,7 @@ function installedServiceRuntimeDll(serviceName)
     var key = 'SYSTEM\\CurrentControlSet\\Services\\' + serviceName;
     var command = registry.QueryKey(registry.HKEY.LocalMachine, key, 'ImagePath');
     if (typeof command != 'string' || command.length > 1024) { throw new Error('Invalid service runtime command.'); }
-    var binding = /^"([^"\r\n]+)" -k (MeshAgent-[0-9A-Fa-f]{16})$/.exec(command);
+    var binding = /^"([^"\r\n]+)" -k ([A-Za-z0-9_-]{1,40}-[0-9A-Fa-f]{16})$/.exec(command);
     if (binding == null) { return serviceRuntimeDllFromCommand(command); }
     if (binding[0].length != command.length ||
         binding[1].toLowerCase() != system32Path('svchost.exe').toLowerCase() ||

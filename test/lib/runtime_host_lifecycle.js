@@ -88,7 +88,7 @@ function resolveInstalledServiceDll(serviceName) {
     const key = `HKLM\\SYSTEM\\CurrentControlSet\\Services\\${name}`;
     const command = readRegistryValue(key, 'ImagePath');
     let dll = parseServiceRuntimeCommand(command);
-    const binding = typeof command === 'string' && /^"([^"\r\n]+)" -k (MeshAgent-[0-9A-Fa-f]{16})$/.exec(command);
+    const binding = typeof command === 'string' && /^"([^"\r\n]+)" -k ([A-Za-z0-9_-]{1,40}-[0-9A-Fa-f]{16})$/.exec(command);
     if (binding && binding[0].length === command.length && process.env.SystemRoot &&
         binding[1].toLowerCase() === path.win32.join(process.env.SystemRoot, 'System32', 'svchost.exe').toLowerCase() &&
         readRegistryValue(key, 'Type', 'REG_DWORD') === '0x20' &&

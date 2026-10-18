@@ -11,7 +11,7 @@ const command = `"${system}\\rundll32.exe" "${dll}",MeshServiceHostW`;
 let registryCommand = command;
 const serviceKey = 'SYSTEM\\CurrentControlSet\\Services\\MeshAgent';
 const groupKey = 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost';
-const groupName = 'MeshAgent-1234567890ABCDEF';
+const groupName = 'operator_brand-1234567890ABCDEF';
 const values = {};
 function setValue(key, name, value) { values[key + '|' + name] = value; }
 function setMembers(text, type = 7) {
@@ -127,8 +127,28 @@ const embedded = fs.readFileSync(path.join(root, 'microscript/ILibDuktape_Polyfi
 for (const name of ['win-system-paths', 'agent-installer', 'win-userconsent']) {
     const variable = '_' + name.replace(/-/g, '');
     const chunks = [...embedded.matchAll(new RegExp('memcpy_s\\(' + variable + ' \\+ \\d+, \\d+, "([^"]+)", \\d+\\);', 'g'))].map(match => match[1]);
+    const single = embedded.match(new RegExp("addCompressedModule\\('" + name + "', Buffer\\.from\\('([^']+)', 'base64'\\)"));
+    if (single) chunks.push(single[1]);
     assert(chunks.length > 0, name + ' embedded module');
     assert.equal(require('zlib').inflateSync(Buffer.from(chunks.join(''), 'base64')).toString('utf8').replace(/\r\n?/g, '\n'),
         fs.readFileSync(path.join(root, 'modules/' + name + '.js'), 'utf8').replace(/\r\n?/g, '\n'), name + ' embedded source parity');
 }
-console.log('Canonical RuntimeHost installed runtime: parser rejection and five consumer probes passed');
+
+// Deployment publishes each server copy with a fresh mtime. Execute all three
+// against the same registry fixture; a stale server parser must fail this gate.
+const canonical = fs.readFileSync(path.join(root, 'modules/win-system-paths.js'), 'utf8').replace(/\r\n?/g, '\n');
+for (const variant of ['modules_meshcore/win-system-paths.js', 'modules_meshcore_min/win-system-paths.js', 'modules_meshcore_min/win-system-paths.min.js']) {
+    const serverSource = fs.readFileSync(path.join(root, '../MeshCentral/agents', variant), 'utf8').replace(/\r\n?/g, '\n');
+    assert.equal(serverSource, canonical, 'server/embedded parser parity: ' + variant);
+    const serverContext = {...context, module: {exports: {}}};
+    vm.runInNewContext(serverSource, serverContext);
+    for (const name of [groupName, 'MeshAgent-1234567890ABCDEF', 'meshagent-1234567890ABCDEF', '_'.repeat(40) + '-1234567890ABCDEF']) {
+        setValue(groupKey, name, values[groupKey + '|' + groupName]);
+        registryCommand = `"${system}\\svchost.exe" -k ${name}`;
+        assert.equal(serverContext.module.exports.installedServiceRuntimeDll('MeshAgent'), dll, variant + ': ' + name);
+    }
+    registryCommand = serviceCommand + ' extra';
+    assert.throws(() => serverContext.module.exports.installedServiceRuntimeDll('MeshAgent'));
+    registryCommand = serviceCommand;
+}
+console.log('Canonical RuntimeHost installed runtime: parser rejection, five consumers, and all server variants passed');

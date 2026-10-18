@@ -79,6 +79,7 @@ static void log_event(const wchar_t* format, ...) { (void)format; }
 #define ServiceDeploy_RunLifecycleHostOperationLocked operation
 #define ServiceDeploy_LogInstallEvent log_event
 #define ServiceHost_BuildGroupName buildGroup
+#define ServiceHost_BuildLegacyGroupName buildGroup
 #define ServiceBinding_Group group
 #define MeshInstaller_CombinePath combine
 #define MoveFileExW move

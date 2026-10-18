@@ -129,7 +129,7 @@ static BOOL close_process(HANDLE h) { assert(h==(HANDLE)(uintptr_t)3); ++process
 #define SetLastError(e) (lastError=(e))
 #define Sleep(ms) (ticks+=(ms))
 #define ServiceDeploy_ResolveServiceDllPath(n,p,c) ((p)[0]=L'x',TRUE)
-#define ServiceHost_ValidateServiceBinding(n,p) ((void)(p),exclusive)
+#define ServiceHost_ValidateServiceBindingForStop(n,p) ((void)(p),exclusive)
 #define ServiceDeploy_ProcessHostsOnlyService(n,p) ((void)(p),exclusive)
 #define OpenProcess open_process
 #define TerminateProcess terminate_process

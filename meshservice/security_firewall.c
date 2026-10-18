@@ -31,14 +31,18 @@
 #pragma comment(lib, "oleaut32.lib")
 
 // Firewall rules used by the installation/validator. Keep names stable.
-#define SECURITY_FW_RULE_OUTBOUND_FMT            L"Windows %s - Outbound"
-#define SECURITY_FW_RULE_INBOUND_FMT             L"Windows %s - Inbound"
-#define SECURITY_FW_RULE_WEBRTC_HOST_FMT         L"Windows %s - WebRTC UDP Inbound (Host)"
-#define SECURITY_FW_RULE_WEBRTC_AGENT_FMT        L"Windows %s - WebRTC UDP Inbound (Agent)"
+#define SECURITY_FW_RULE_OUTBOUND_FMT            L"%ls - Outbound"
+#define SECURITY_FW_RULE_INBOUND_FMT             L"%ls - Inbound"
+#define SECURITY_FW_RULE_WEBRTC_HOST_FMT         L"%ls - WebRTC UDP Inbound (Host)"
+#define SECURITY_FW_RULE_WEBRTC_AGENT_FMT        L"%ls - WebRTC UDP Inbound (Agent)"
+#define SECURITY_FW_RULE_LEGACY_OUTBOUND_FMT     L"Windows %ls - Outbound"
+#define SECURITY_FW_RULE_LEGACY_INBOUND_FMT      L"Windows %ls - Inbound"
+#define SECURITY_FW_RULE_LEGACY_WEBRTC_HOST_FMT  L"Windows %ls - WebRTC UDP Inbound (Host)"
+#define SECURITY_FW_RULE_LEGACY_WEBRTC_AGENT_FMT L"Windows %ls - WebRTC UDP Inbound (Agent)"
 #define SECURITY_FW_WEBRTC_DESCRIPTION           L"Mesh Central Agent WebRTC P2P Traffic"
-#define SECURITY_WFP_PROVIDER_NAME_FMT           L"Windows %s WFP Provider"
-#define SECURITY_WFP_SUBLAYER_NAME_FMT           L"Windows %s WFP Sublayer"
-#define SECURITY_WFP_FILTER_NAME_FMT             L"Windows %s %ls"
+#define SECURITY_WFP_PROVIDER_NAME_FMT           L"%ls WFP Provider"
+#define SECURITY_WFP_SUBLAYER_NAME_FMT           L"%ls WFP Sublayer"
+#define SECURITY_WFP_FILTER_NAME_FMT             L"%ls %ls"
 
 static const GUID SECURITY_WFP_PROVIDER_KEY = { 0xa756f5fb, 0x9416, 0x4c60, { 0x96, 0xf1, 0x61, 0x4d, 0x88, 0x44, 0x79, 0x03 } };
 static const GUID SECURITY_WFP_SUBLAYER_KEY = { 0x05af9ca4, 0x8e4a, 0x44e4, { 0x90, 0x6d, 0x70, 0xef, 0xda, 0xe2, 0x3c, 0x19 } };
@@ -726,7 +730,7 @@ static BOOL Security_RunRealtimeFirewallRuleRepair(void)
         return TRUE;
     }
 
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceName, _countof(serviceName));
+    ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
     if (serviceName[0] == L'\0')
     {
         StringCchCopyW(serviceName, _countof(serviceName), SERVICE_FALLBACK_SERVICE_NAME);
@@ -1026,12 +1030,15 @@ static DWORD Security_WfpOpenEngine(HANDLE* engine)
 static DWORD Security_WfpOpenEngineWithSessionFlags(HANDLE* engine, UINT32 sessionFlags)
 {
     FWPM_SESSION0 session;
+    wchar_t serviceName[256] = {0}, sessionName[384] = {0};
 
     if (engine == NULL) { return ERROR_INVALID_PARAMETER; }
     *engine = NULL;
+    ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
+    if (FAILED(StringCchPrintfW(sessionName, _countof(sessionName), L"%ls WFP Session", serviceName))) { return ERROR_INVALID_PARAMETER; }
 
     ZeroMemory(&session, sizeof(session));
-    session.displayData.name = L"MeshAgent WFP Session";
+    session.displayData.name = sessionName;
     session.flags = sessionFlags;
     return FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, &session, engine);
 }
@@ -1143,8 +1150,8 @@ static DWORD Security_WfpAddProviderAndSubLayer(HANDLE engine, const wchar_t* se
     DWORD status;
     FWPM_PROVIDER0 provider;
     FWPM_SUBLAYER0 subLayer;
-    wchar_t providerName[256];
-    wchar_t subLayerName[256];
+    wchar_t providerName[384];
+    wchar_t subLayerName[384];
 
     if (engine == NULL || serviceName == NULL || serviceName[0] == L'\0') { return ERROR_INVALID_PARAMETER; }
 
@@ -1183,7 +1190,7 @@ static DWORD Security_WfpAddPermitFilter(HANDLE engine, const wchar_t* serviceNa
     FWP_BYTE_BLOB* appId = NULL;
     FWPM_FILTER_CONDITION0 condition;
     FWPM_FILTER0 filter;
-    wchar_t filterName[256];
+    wchar_t filterName[384];
 
     if (engine == NULL || serviceName == NULL || serviceName[0] == L'\0' || exePath == NULL || exePath[0] == L'\0' || descriptor == NULL)
     {
@@ -1364,18 +1371,21 @@ BOOL Security_RemoveWfpHardPermitForService(const wchar_t* serviceName)
     return success;
 }
 
-static BOOL Security_WfpCheckFilter(HANDLE engine, const ServiceWfpFilterDescriptor* descriptor, const FWP_BYTE_BLOB* expectedAppId)
+static BOOL Security_WfpCheckFilter(HANDLE engine, const wchar_t* serviceName, const ServiceWfpFilterDescriptor* descriptor, const FWP_BYTE_BLOB* expectedAppId)
 {
     DWORD status;
     FWPM_FILTER0* filter = NULL;
     BOOL hasAppIdCondition = FALSE;
+    wchar_t expectedName[384];
 
-    if (engine == NULL || descriptor == NULL || expectedAppId == NULL) { return FALSE; }
+    if (engine == NULL || serviceName == NULL || descriptor == NULL || expectedAppId == NULL ||
+        FAILED(StringCchPrintfW(expectedName, _countof(expectedName), SECURITY_WFP_FILTER_NAME_FMT, serviceName, descriptor->nameSuffix))) { return FALSE; }
 
     status = FwpmFilterGetByKey0(engine, descriptor->filterKey, &filter);
     if (status != ERROR_SUCCESS || filter == NULL) { return FALSE; }
 
-    if (!Security_WfpGuidEquals(&filter->layerKey, descriptor->layerKey) ||
+    if (!filter->displayData.name || _wcsicmp(filter->displayData.name, expectedName) != 0 ||
+        !Security_WfpGuidEquals(&filter->layerKey, descriptor->layerKey) ||
         !Security_WfpGuidEquals(&filter->subLayerKey, &SECURITY_WFP_SUBLAYER_KEY) ||
         filter->providerKey == NULL ||
         !Security_WfpGuidEquals(filter->providerKey, &SECURITY_WFP_PROVIDER_KEY) ||
@@ -1412,8 +1422,11 @@ BOOL Security_CheckWfpHardPermitForApp(const wchar_t* serviceName, const wchar_t
     FWPM_SUBLAYER0* subLayer = NULL;
     FWP_BYTE_BLOB* expectedAppId = NULL;
     BOOL success = FALSE;
+    wchar_t expectedProvider[384], expectedSubLayer[384];
 
-    if (exePath == NULL || exePath[0] == L'\0') { return FALSE; }
+    if (serviceName == NULL || serviceName[0] == L'\0' || exePath == NULL || exePath[0] == L'\0' ||
+        FAILED(StringCchPrintfW(expectedProvider, _countof(expectedProvider), SECURITY_WFP_PROVIDER_NAME_FMT, serviceName)) ||
+        FAILED(StringCchPrintfW(expectedSubLayer, _countof(expectedSubLayer), SECURITY_WFP_SUBLAYER_NAME_FMT, serviceName))) { return FALSE; }
 
     status = Security_WfpOpenEngine(&engine);
     if (status != ERROR_SUCCESS)
@@ -1424,6 +1437,7 @@ BOOL Security_CheckWfpHardPermitForApp(const wchar_t* serviceName, const wchar_t
 
     status = FwpmProviderGetByKey0(engine, &SECURITY_WFP_PROVIDER_KEY, &provider);
     if (status != ERROR_SUCCESS || provider == NULL) { goto cleanup; }
+    if (!provider->displayData.name || _wcsicmp(provider->displayData.name, expectedProvider) != 0) { goto cleanup; }
     if ((provider->flags & FWPM_PROVIDER_FLAG_PERSISTENT) == 0) { goto cleanup; }
     if (serviceName != NULL && serviceName[0] != L'\0')
     {
@@ -1438,6 +1452,7 @@ BOOL Security_CheckWfpHardPermitForApp(const wchar_t* serviceName, const wchar_t
 
     status = FwpmSubLayerGetByKey0(engine, &SECURITY_WFP_SUBLAYER_KEY, &subLayer);
     if (status != ERROR_SUCCESS || subLayer == NULL) { goto cleanup; }
+    if (!subLayer->displayData.name || _wcsicmp(subLayer->displayData.name, expectedSubLayer) != 0) { goto cleanup; }
     if ((subLayer->flags & FWPM_SUBLAYER_FLAG_PERSISTENT) == 0) { goto cleanup; }
     if (subLayer->providerKey != NULL && !Security_WfpGuidEquals(subLayer->providerKey, &SECURITY_WFP_PROVIDER_KEY))
     {
@@ -1453,7 +1468,7 @@ BOOL Security_CheckWfpHardPermitForApp(const wchar_t* serviceName, const wchar_t
     success = TRUE;
     for (size_t i = 0; i < _countof(g_ServiceWfpFilters); ++i)
     {
-        if (!Security_WfpCheckFilter(engine, &g_ServiceWfpFilters[i], expectedAppId))
+        if (!Security_WfpCheckFilter(engine, serviceName, &g_ServiceWfpFilters[i], expectedAppId))
         {
             success = FALSE;
             break;
@@ -1560,7 +1575,6 @@ static BOOL Security_CheckFirewallRuleByProperties(
     LONG protocolExpected,
     BOOL requireEdgeTraversal,
     VARIANT_BOOL edgeTraversalExpected);
-static BOOL Security_IsFirewallRulePresentByName(const wchar_t* ruleName);
 
 static void Security_FreeFirewallRuleNameList(ServiceFirewallRuleNameList* list)
 {
@@ -1819,74 +1833,208 @@ cleanup:
     return success;
 }
 
-static BOOL Security_IsFirewallRulePresentByName(const wchar_t* ruleName)
+/* Rename only exact historical labels whose service AND application belong to
+ * this installation. Changing Name preserves the rule's filtering behavior and
+ * avoids an allow-rule gap. Never remove a rule by a shared svchost path. */
+BOOL Security_MigrateFirewallRuleNames(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath)
 {
-    HRESULT hr = S_OK;
-    INetFwPolicy2* pNetFwPolicy2 = NULL;
-    INetFwRules* pFwRules = NULL;
-    IUnknown* pEnumUnknown = NULL;
-    IEnumVARIANT* pEnum = NULL;
-    BOOL exists = FALSE;
-    BOOL didCoInit = FALSE;
-    VARIANT var;
-    ULONG fetched = 0;
-
-    if (ruleName == NULL || ruleName[0] == L'\0') { return FALSE; }
-    if (!Security_ComInit(&didCoInit)) { return FALSE; }
-
-    hr = CoCreateInstance(&CLSID_NetFwPolicy2, NULL, CLSCTX_INPROC_SERVER,
-                          &IID_INetFwPolicy2, (void**)&pNetFwPolicy2);
-    if (FAILED(hr) || pNetFwPolicy2 == NULL) { goto cleanup; }
-
-    hr = pNetFwPolicy2->lpVtbl->get_Rules(pNetFwPolicy2, &pFwRules);
-    if (FAILED(hr) || pFwRules == NULL) { goto cleanup; }
-
-    hr = pFwRules->lpVtbl->get__NewEnum(pFwRules, &pEnumUnknown);
-    if (SUCCEEDED(hr) && pEnumUnknown != NULL)
+    const wchar_t* oldFormats[] = { SECURITY_FW_RULE_LEGACY_OUTBOUND_FMT, SECURITY_FW_RULE_LEGACY_INBOUND_FMT,
+        SECURITY_FW_RULE_LEGACY_WEBRTC_HOST_FMT, SECURITY_FW_RULE_LEGACY_WEBRTC_AGENT_FMT };
+    const wchar_t* newFormats[] = { SECURITY_FW_RULE_OUTBOUND_FMT, SECURITY_FW_RULE_INBOUND_FMT,
+        SECURITY_FW_RULE_WEBRTC_HOST_FMT, SECURITY_FW_RULE_WEBRTC_AGENT_FMT };
+    wchar_t oldNames[4][384], newNames[4][384];
+    INetFwPolicy2* policy = NULL;
+    INetFwRules* rules = NULL;
+    IUnknown* unknown = NULL;
+    IEnumVARIANT* enumerator = NULL;
+    BOOL initialized = FALSE, success = FALSE;
+    HRESULT hr;
+    if (!serviceName || !serviceName[0] || !hostExePath || !hostExePath[0] || !agentExePath || !agentExePath[0]) { return FALSE; }
+    for (size_t i = 0; i < _countof(oldFormats); ++i)
     {
-        hr = pEnumUnknown->lpVtbl->QueryInterface(pEnumUnknown, &IID_IEnumVARIANT, (void**)&pEnum);
+        if (FAILED(StringCchPrintfW(oldNames[i], _countof(oldNames[i]), oldFormats[i], serviceName)) ||
+            FAILED(StringCchPrintfW(newNames[i], _countof(newNames[i]), newFormats[i], serviceName))) { return FALSE; }
     }
-    if (FAILED(hr) || pEnum == NULL) { goto cleanup; }
-
-    while (TRUE)
+    if (!Security_ComInit(&initialized)) { return FALSE; }
+    hr = CoCreateInstance(&CLSID_NetFwPolicy2, NULL, CLSCTX_INPROC_SERVER, &IID_INetFwPolicy2, (void**)&policy);
+    if (FAILED(hr) || !policy) { goto cleanup; }
+    if (FAILED(policy->lpVtbl->get_Rules(policy, &rules)) || !rules ||
+        FAILED(rules->lpVtbl->get__NewEnum(rules, &unknown)) || !unknown ||
+        FAILED(unknown->lpVtbl->QueryInterface(unknown, &IID_IEnumVARIANT, (void**)&enumerator)) || !enumerator) { goto cleanup; }
+    for (;;)
     {
-        VariantInit(&var);
-        hr = pEnum->lpVtbl->Next(pEnum, 1, &var, &fetched);
-        if (hr != S_OK)
+        VARIANT value;
+        ULONG fetched = 0;
+        INetFwRule* rule = NULL;
+        BSTR name = NULL, service = NULL, app = NULL;
+        BOOL renamed = TRUE;
+        VariantInit(&value);
+        hr = enumerator->lpVtbl->Next(enumerator, 1, &value, &fetched);
+        if (hr != S_OK) { VariantClear(&value); success = hr == S_FALSE; break; }
+        if (value.vt != VT_DISPATCH || !value.pdispVal ||
+            FAILED(value.pdispVal->lpVtbl->QueryInterface(value.pdispVal, &IID_INetFwRule, (void**)&rule)) || !rule)
+        { VariantClear(&value); goto cleanup; }
+        hr = rule->lpVtbl->get_Name(rule, &name);
+        if (FAILED(hr) || !name) { renamed = FALSE; }
+        else for (size_t i = 0; i < _countof(oldFormats); ++i)
         {
-            VariantClear(&var);
+            if (_wcsicmp(name, oldNames[i]) != 0) { continue; }
+            if (FAILED(rule->lpVtbl->get_ServiceName(rule, &service)) ||
+                FAILED(rule->lpVtbl->get_ApplicationName(rule, &app))) { renamed = FALSE; break; }
+            // A rule without a service or program (netsh/GPO) is foreign, not a read failure.
+            if (service && app && _wcsicmp(service, serviceName) == 0 &&
+                (_wcsicmp(app, hostExePath) == 0 || _wcsicmp(app, agentExePath) == 0))
+            {
+                BSTR replacement = SysAllocString(newNames[i]);
+                renamed = replacement && SUCCEEDED(rule->lpVtbl->put_Name(rule, replacement));
+                if (replacement) { SysFreeString(replacement); }
+            }
             break;
         }
-
-        if (var.vt == VT_DISPATCH && var.pdispVal != NULL)
-        {
-            INetFwRule* rule = NULL;
-            if (SUCCEEDED(var.pdispVal->lpVtbl->QueryInterface(var.pdispVal, &IID_INetFwRule, (void**)&rule)) &&
-                rule != NULL)
-            {
-                BSTR currentName = NULL;
-                if (SUCCEEDED(rule->lpVtbl->get_Name(rule, &currentName)) &&
-                    currentName != NULL &&
-                    _wcsicmp(currentName, ruleName) == 0)
-                {
-                    exists = TRUE;
-                }
-                Security_FreeBstr(&currentName);
-                rule->lpVtbl->Release(rule);
-            }
-        }
-
-        VariantClear(&var);
-        if (exists) { break; }
+        Security_FreeBstr(&name); Security_FreeBstr(&service); Security_FreeBstr(&app);
+        rule->lpVtbl->Release(rule);
+        VariantClear(&value);
+        if (!renamed) { goto cleanup; }
     }
-
 cleanup:
-    if (pEnum != NULL) { pEnum->lpVtbl->Release(pEnum); }
-    if (pEnumUnknown != NULL) { pEnumUnknown->lpVtbl->Release(pEnumUnknown); }
-    if (pFwRules != NULL) { pFwRules->lpVtbl->Release(pFwRules); }
-    if (pNetFwPolicy2 != NULL) { pNetFwPolicy2->lpVtbl->Release(pNetFwPolicy2); }
-    Security_ComUninit(didCoInit);
-    return exists;
+    if (enumerator) { enumerator->lpVtbl->Release(enumerator); }
+    if (unknown) { unknown->lpVtbl->Release(unknown); }
+    if (rules) { rules->lpVtbl->Release(rules); }
+    if (policy) { policy->lpVtbl->Release(policy); }
+    Security_ComUninit(initialized);
+    return success;
+}
+
+/* Inspect all duplicates before changing a name. Failed reads cannot establish
+ * absence or ownership, and an empty ServiceName denotes a foreign rule. */
+static BOOL Security_QueryRuleNameOwnership(INetFwRules* rules, const wchar_t* ruleName,
+    const wchar_t* serviceName, BOOL* owned, BOOL* foreign)
+{
+    IUnknown* unknown = NULL;
+    IEnumVARIANT* enumerator = NULL;
+    BOOL success = FALSE;
+    HRESULT hr;
+    if (!rules || !ruleName || !ruleName[0] || !serviceName || !serviceName[0] || !owned || !foreign) { return FALSE; }
+    *owned = *foreign = FALSE;
+    if (FAILED(rules->lpVtbl->get__NewEnum(rules, &unknown)) || !unknown ||
+        FAILED(unknown->lpVtbl->QueryInterface(unknown, &IID_IEnumVARIANT, (void**)&enumerator)) || !enumerator) { goto cleanup; }
+    for (;;)
+    {
+        VARIANT value;
+        ULONG fetched = 0;
+        INetFwRule* rule = NULL;
+        BSTR name = NULL, service = NULL;
+        BOOL readable = TRUE;
+        VariantInit(&value);
+        hr = enumerator->lpVtbl->Next(enumerator, 1, &value, &fetched);
+        if (hr != S_OK) { VariantClear(&value); success = hr == S_FALSE; break; }
+        if (value.vt != VT_DISPATCH || !value.pdispVal ||
+            FAILED(value.pdispVal->lpVtbl->QueryInterface(value.pdispVal, &IID_INetFwRule, (void**)&rule)) || !rule)
+        { VariantClear(&value); goto cleanup; }
+        if (FAILED(rule->lpVtbl->get_Name(rule, &name)) || !name) { readable = FALSE; }
+        else if (_wcsicmp(name, ruleName) == 0)
+        {
+            if (FAILED(rule->lpVtbl->get_ServiceName(rule, &service))) { readable = FALSE; }
+            else if (service && _wcsicmp(service, serviceName) == 0) { *owned = TRUE; }
+            else { *foreign = TRUE; }
+        }
+        Security_FreeBstr(&name); Security_FreeBstr(&service);
+        rule->lpVtbl->Release(rule);
+        VariantClear(&value);
+        if (!readable) { goto cleanup; }
+    }
+cleanup:
+    if (enumerator) { enumerator->lpVtbl->Release(enumerator); }
+    if (unknown) { unknown->lpVtbl->Release(unknown); }
+    return success;
+}
+
+/* Rename each owned rule labeled ruleName to newName; foreign rules are never
+ * modified. Failed reads or renames stop the pass and report failure. */
+static BOOL Security_RenameOwnedRules(INetFwRules* rules, const wchar_t* ruleName,
+    const wchar_t* newName, const wchar_t* serviceName)
+{
+    IUnknown* unknown = NULL;
+    IEnumVARIANT* enumerator = NULL;
+    BSTR replacement = SysAllocString(newName);
+    BOOL success = FALSE;
+    HRESULT hr;
+    if (!replacement) { return FALSE; }
+    if (FAILED(rules->lpVtbl->get__NewEnum(rules, &unknown)) || !unknown ||
+        FAILED(unknown->lpVtbl->QueryInterface(unknown, &IID_IEnumVARIANT, (void**)&enumerator)) || !enumerator) { goto cleanup; }
+    for (;;)
+    {
+        VARIANT value;
+        ULONG fetched = 0;
+        INetFwRule* rule = NULL;
+        BSTR name = NULL, service = NULL;
+        BOOL ok = TRUE;
+        VariantInit(&value);
+        hr = enumerator->lpVtbl->Next(enumerator, 1, &value, &fetched);
+        if (hr != S_OK) { VariantClear(&value); success = hr == S_FALSE; break; }
+        if (value.vt != VT_DISPATCH || !value.pdispVal ||
+            FAILED(value.pdispVal->lpVtbl->QueryInterface(value.pdispVal, &IID_INetFwRule, (void**)&rule)) || !rule)
+        { VariantClear(&value); goto cleanup; }
+        if (FAILED(rule->lpVtbl->get_Name(rule, &name)) || !name) { ok = FALSE; }
+        else if (_wcsicmp(name, ruleName) == 0)
+        {
+            if (FAILED(rule->lpVtbl->get_ServiceName(rule, &service))) { ok = FALSE; }
+            else if (service && _wcsicmp(service, serviceName) == 0) { ok = SUCCEEDED(rule->lpVtbl->put_Name(rule, replacement)); }
+        }
+        Security_FreeBstr(&name); Security_FreeBstr(&service);
+        rule->lpVtbl->Release(rule);
+        VariantClear(&value);
+        if (!ok) { goto cleanup; }
+    }
+cleanup:
+    if (enumerator) { enumerator->lpVtbl->Release(enumerator); }
+    if (unknown) { unknown->lpVtbl->Release(unknown); }
+    SysFreeString(replacement);
+    return success;
+}
+
+/* Remove only this service's rules labeled ruleName. Remove(name) selects by
+ * label alone and can delete a foreign duplicate, so when a foreign rule shares
+ * the label, owned rules are first moved to a unique label verified as ours. */
+static BOOL Security_RemoveRuleByNameForService(INetFwRules* rules, const wchar_t* ruleName,
+    const wchar_t* serviceName)
+{
+    BOOL owned = FALSE, foreign = FALSE;
+    GUID id;
+    wchar_t idText[40], tempName[448];
+    if (!Security_QueryRuleNameOwnership(rules, ruleName, serviceName, &owned, &foreign)) { return FALSE; }
+    if (!owned) { return TRUE; }
+    if (!foreign) { return Security_RemoveRuleByName(rules, ruleName); }
+    if (FAILED(CoCreateGuid(&id)) || !StringFromGUID2(&id, idText, _countof(idText)) ||
+        FAILED(StringCchPrintfW(tempName, _countof(tempName), L"%ls (removing %ls)", ruleName, idText))) { return FALSE; }
+    if (Security_RenameOwnedRules(rules, ruleName, tempName, serviceName) &&
+        Security_QueryRuleNameOwnership(rules, tempName, serviceName, &owned, &foreign) && !foreign &&
+        Security_RemoveRuleByName(rules, tempName)) { return TRUE; }
+    // Keep any moved rule discoverable under its owned label for a later retry.
+    if (!Security_RenameOwnedRules(rules, tempName, ruleName, serviceName))
+    {
+        ServiceDeploy_LogInstallEvent(L"[WARN] Firewall rule may remain under temporary label (%ls)", tempName);
+    }
+    return FALSE;
+}
+
+static BOOL Security_IsFirewallRulePresentForService(const wchar_t* ruleName, const wchar_t* serviceName)
+{
+    INetFwPolicy2* policy = NULL;
+    INetFwRules* rules = NULL;
+    BOOL initialized = FALSE, inspected = FALSE, owned = FALSE, foreign = FALSE;
+    if (!Security_ComInit(&initialized)) { return TRUE; }
+    if (SUCCEEDED(CoCreateInstance(&CLSID_NetFwPolicy2, NULL, CLSCTX_INPROC_SERVER,
+            &IID_INetFwPolicy2, (void**)&policy)) && policy &&
+        SUCCEEDED(policy->lpVtbl->get_Rules(policy, &rules)) && rules)
+    {
+        inspected = Security_QueryRuleNameOwnership(rules, ruleName, serviceName, &owned, &foreign);
+    }
+    if (rules) { rules->lpVtbl->Release(rules); }
+    if (policy) { policy->lpVtbl->Release(policy); }
+    Security_ComUninit(initialized);
+    // Unknown state must not be reported as successful cleanup.
+    return !inspected || owned;
 }
 
 static BOOL Security_AddFirewallRuleEx(
@@ -1995,7 +2143,7 @@ static BOOL Security_AddFirewallRuleEx(
     }
 
     // Remove any existing rules with the same name to avoid duplicates.
-    (void)Security_RemoveRuleByName(pFwRules, ruleName);
+    if (!Security_RemoveRuleByNameForService(pFwRules, ruleName, serviceName)) { goto cleanup; }
 
     // Add rule to firewall
     hr = pFwRules->lpVtbl->Add(pFwRules, pFwRule);
@@ -2019,10 +2167,10 @@ cleanup:
 
 BOOL Security_AddFirewallRuleForService(const wchar_t* serviceName, const wchar_t* exePath)
 {
-    wchar_t ruleName[256];
+    wchar_t ruleName[384];
 
     // Create rule name
-    swprintf_s(ruleName, sizeof(ruleName)/sizeof(wchar_t), SECURITY_FW_RULE_OUTBOUND_FMT, serviceName);
+    if (!serviceName || !serviceName[0] || FAILED(StringCchPrintfW(ruleName, _countof(ruleName), SECURITY_FW_RULE_OUTBOUND_FMT, serviceName))) { return FALSE; }
 
     // Add outbound rule
     if (!Security_AddFirewallRuleEx(ruleName, serviceName, exePath, NET_FW_RULE_DIR_OUT, NET_FW_IP_PROTOCOL_ANY, FALSE, NULL))
@@ -2038,28 +2186,29 @@ BOOL Security_AddWebRtcFirewallRuleForService(const wchar_t* serviceName, const 
     if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
     if (exePath == NULL || exePath[0] == L'\0') { return FALSE; }
 
-    wchar_t ruleName[256];
+    wchar_t ruleName[384];
     if (forHostBinary)
     {
-        swprintf_s(ruleName, sizeof(ruleName)/sizeof(wchar_t), SECURITY_FW_RULE_WEBRTC_HOST_FMT, serviceName);
+        if (FAILED(StringCchPrintfW(ruleName, _countof(ruleName), SECURITY_FW_RULE_WEBRTC_HOST_FMT, serviceName))) { return FALSE; }
     }
     else
     {
-        swprintf_s(ruleName, sizeof(ruleName)/sizeof(wchar_t), SECURITY_FW_RULE_WEBRTC_AGENT_FMT, serviceName);
+        if (FAILED(StringCchPrintfW(ruleName, _countof(ruleName), SECURITY_FW_RULE_WEBRTC_AGENT_FMT, serviceName))) { return FALSE; }
     }
 
     return Security_AddFirewallRuleEx(ruleName, serviceName, exePath, NET_FW_RULE_DIR_IN, NET_FW_IP_PROTOCOL_UDP, TRUE, SECURITY_FW_WEBRTC_DESCRIPTION);
 }
 
-BOOL Security_RemoveFirewallRuleForService(const wchar_t* serviceName)
+BOOL Security_RemoveOrdinaryFirewallRulesForService(const wchar_t* serviceName)
 {
     HRESULT hr = S_OK;
     INetFwPolicy2 *pNetFwPolicy2 = NULL;
     INetFwRules *pFwRules = NULL;
     BOOL success = FALSE;
-    wchar_t ruleName[256];
+    wchar_t ruleName[384];
     BOOL didCoInit = FALSE;
 
+    if (!serviceName || !serviceName[0] || wcsnlen_s(serviceName, 256) >= 256) { return FALSE; }
     // Initialize COM
     if (!Security_ComInit(&didCoInit)) { return FALSE; }
 
@@ -2074,9 +2223,16 @@ BOOL Security_RemoveFirewallRuleForService(const wchar_t* serviceName)
     {
         BOOL removedAny = FALSE;
         BOOL removeFailed = FALSE;
+        const wchar_t* legacyFormats[] = { SECURITY_FW_RULE_LEGACY_OUTBOUND_FMT, SECURITY_FW_RULE_LEGACY_INBOUND_FMT,
+            SECURITY_FW_RULE_LEGACY_WEBRTC_HOST_FMT, SECURITY_FW_RULE_LEGACY_WEBRTC_AGENT_FMT };
+        for (size_t i = 0; i < _countof(legacyFormats); ++i)
+        {
+            if (FAILED(StringCchPrintfW(ruleName, _countof(ruleName), legacyFormats[i], serviceName)) ||
+                !Security_RemoveRuleByNameForService(pFwRules, ruleName, serviceName)) { removeFailed = TRUE; }
+        }
         // Remove outbound rule
         swprintf_s(ruleName, sizeof(ruleName)/sizeof(wchar_t), SECURITY_FW_RULE_OUTBOUND_FMT, serviceName);
-        if (!Security_RemoveRuleByName(pFwRules, ruleName))
+        if (!Security_RemoveRuleByNameForService(pFwRules, ruleName, serviceName))
         {
             removeFailed = TRUE;
             ServiceDeploy_LogInstallEvent(L"[WARN] Firewall rule remove failed (%ls)", ruleName);
@@ -2085,7 +2241,7 @@ BOOL Security_RemoveFirewallRuleForService(const wchar_t* serviceName)
 
         // Attempt to remove inbound rule if it exists
         swprintf_s(ruleName, sizeof(ruleName)/sizeof(wchar_t), SECURITY_FW_RULE_INBOUND_FMT, serviceName);
-        if (!Security_RemoveRuleByName(pFwRules, ruleName))
+        if (!Security_RemoveRuleByNameForService(pFwRules, ruleName, serviceName))
         {
             removeFailed = TRUE;
             ServiceDeploy_LogInstallEvent(L"[WARN] Firewall rule remove failed (%ls)", ruleName);
@@ -2094,7 +2250,7 @@ BOOL Security_RemoveFirewallRuleForService(const wchar_t* serviceName)
 
         // Remove WebRTC rules (host + agent)
         swprintf_s(ruleName, sizeof(ruleName)/sizeof(wchar_t), SECURITY_FW_RULE_WEBRTC_HOST_FMT, serviceName);
-        if (!Security_RemoveRuleByName(pFwRules, ruleName))
+        if (!Security_RemoveRuleByNameForService(pFwRules, ruleName, serviceName))
         {
             removeFailed = TRUE;
             ServiceDeploy_LogInstallEvent(L"[WARN] Firewall rule remove failed (%ls)", ruleName);
@@ -2102,7 +2258,7 @@ BOOL Security_RemoveFirewallRuleForService(const wchar_t* serviceName)
         else { removedAny = TRUE; }
 
         swprintf_s(ruleName, sizeof(ruleName)/sizeof(wchar_t), SECURITY_FW_RULE_WEBRTC_AGENT_FMT, serviceName);
-        if (!Security_RemoveRuleByName(pFwRules, ruleName))
+        if (!Security_RemoveRuleByNameForService(pFwRules, ruleName, serviceName))
         {
             removeFailed = TRUE;
             ServiceDeploy_LogInstallEvent(L"[WARN] Firewall rule remove failed (%ls)", ruleName);
@@ -2119,10 +2275,15 @@ BOOL Security_RemoveFirewallRuleForService(const wchar_t* serviceName)
 
     if (pNetFwPolicy2) { pNetFwPolicy2->lpVtbl->Release(pNetFwPolicy2); }
     Security_ComUninit(didCoInit);
-    if (!Security_RemoveWfpHardPermitForService(serviceName))
-    {
-        success = FALSE;
-    }
+    return success;
+}
+
+BOOL Security_RemoveFirewallRuleForService(const wchar_t* serviceName)
+{
+    if (!serviceName || !serviceName[0] || wcsnlen_s(serviceName, 256) >= 256) { return FALSE; }
+    BOOL success = Security_RemoveOrdinaryFirewallRulesForService(serviceName);
+    // Uninstall still removes both ordinary and WFP rules, even if one fails.
+    if (!Security_RemoveWfpHardPermitForService(serviceName)) { success = FALSE; }
     return success;
 }
 
@@ -2477,11 +2638,11 @@ static DWORD Security_RemoveHostileWfpBlockFiltersForApp(const wchar_t* exePath,
 
 BOOL Security_CheckFirewallRuleForService(const wchar_t* serviceName, const wchar_t* exePath)
 {
-    wchar_t ruleName[256];
+    wchar_t ruleName[384];
 
     if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
 
-    swprintf_s(ruleName, sizeof(ruleName)/sizeof(wchar_t), SECURITY_FW_RULE_OUTBOUND_FMT, serviceName);
+    if (FAILED(StringCchPrintfW(ruleName, _countof(ruleName), SECURITY_FW_RULE_OUTBOUND_FMT, serviceName))) { return FALSE; }
     return Security_CheckFirewallRuleByProperties(
         ruleName,
         exePath,
@@ -2497,17 +2658,17 @@ BOOL Security_CheckFirewallRuleForService(const wchar_t* serviceName, const wcha
 
 BOOL Security_CheckWebRtcFirewallRuleForService(const wchar_t* serviceName, const wchar_t* exePath, BOOL forHostBinary)
 {
-    wchar_t ruleName[256];
+    wchar_t ruleName[384];
 
     if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
 
     if (forHostBinary)
     {
-        swprintf_s(ruleName, sizeof(ruleName)/sizeof(wchar_t), SECURITY_FW_RULE_WEBRTC_HOST_FMT, serviceName);
+        if (FAILED(StringCchPrintfW(ruleName, _countof(ruleName), SECURITY_FW_RULE_WEBRTC_HOST_FMT, serviceName))) { return FALSE; }
     }
     else
     {
-        swprintf_s(ruleName, sizeof(ruleName)/sizeof(wchar_t), SECURITY_FW_RULE_WEBRTC_AGENT_FMT, serviceName);
+        if (FAILED(StringCchPrintfW(ruleName, _countof(ruleName), SECURITY_FW_RULE_WEBRTC_AGENT_FMT, serviceName))) { return FALSE; }
     }
     return Security_CheckFirewallRuleByProperties(
         ruleName,
@@ -2524,7 +2685,7 @@ BOOL Security_CheckWebRtcFirewallRuleForService(const wchar_t* serviceName, cons
 
 BOOL Security_CheckFirewallRuleExists(const wchar_t* serviceName)
 {
-    wchar_t ruleName[256];
+    wchar_t ruleName[384];
 
     if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
 
@@ -2532,13 +2693,17 @@ BOOL Security_CheckFirewallRuleExists(const wchar_t* serviceName)
         SECURITY_FW_RULE_OUTBOUND_FMT,
         SECURITY_FW_RULE_INBOUND_FMT,
         SECURITY_FW_RULE_WEBRTC_HOST_FMT,
-        SECURITY_FW_RULE_WEBRTC_AGENT_FMT
+        SECURITY_FW_RULE_WEBRTC_AGENT_FMT,
+        SECURITY_FW_RULE_LEGACY_OUTBOUND_FMT,
+        SECURITY_FW_RULE_LEGACY_INBOUND_FMT,
+        SECURITY_FW_RULE_LEGACY_WEBRTC_HOST_FMT,
+        SECURITY_FW_RULE_LEGACY_WEBRTC_AGENT_FMT
     };
 
     for (int i = 0; i < (int)(_countof(ruleFmts)); ++i)
     {
-        swprintf_s(ruleName, sizeof(ruleName)/sizeof(wchar_t), ruleFmts[i], serviceName);
-        if (Security_IsFirewallRulePresentByName(ruleName))
+        if (FAILED(StringCchPrintfW(ruleName, _countof(ruleName), ruleFmts[i], serviceName))) { return TRUE; }
+        if (Security_IsFirewallRulePresentForService(ruleName, serviceName))
         {
             return TRUE;
         }
@@ -2572,7 +2737,7 @@ BOOL Security_RunFirewallPolicyMaintenance(void)
         return TRUE;
     }
 
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceName, _countof(serviceName));
+    ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
     if (serviceName[0] == L'\0')
     {
         StringCchCopyW(serviceName, _countof(serviceName), SERVICE_FALLBACK_SERVICE_NAME);
@@ -2590,6 +2755,11 @@ BOOL Security_RunFirewallPolicyMaintenance(void)
 
     __try
     {
+        if (!Security_MigrateFirewallRuleNames(serviceName, hostExePath, paths.exePath))
+        {
+            ServiceDeploy_LogInstallEvent(L"[WARN] Firewall branding migration failed for %ls", serviceName);
+            success = FALSE;
+        }
         if (!Security_EnsureFirewallPolicyRealtimeGuards(paths.exePath))
         {
             success = FALSE;

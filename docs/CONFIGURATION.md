@@ -52,6 +52,33 @@ Only enable administrative behavior that is approved for the target
 environment. Configuration cannot override consent, audit, or fail-closed
 requirements.
 
+Windows service networking labels use the resolved SCM service identity
+(`branding.serviceName`, or the incumbent service key retained during migration).
+The svchost group is a lowercase, command-safe prefix of that identity (up to 40
+characters) followed by a 16-digit hash of the complete case-insensitive name.
+Firewall labels are `<serviceName> - Outbound` and
+`<serviceName> - WebRTC UDP Inbound (Host/Agent)`. WFP uses
+`<serviceName> WFP Provider`, `<serviceName> WFP Sublayer`, and
+`<serviceName> Hard Permit ...`. `branding.displayName` remains the Services UI
+label; changing it does not change network-policy identity.
+
+Updates recognize the previous `MeshAgent-<hash>` group, checkpoint membership
+before switching, and remove only the agent's old membership. Historical
+`Windows <serviceName> ...` firewall labels are renamed in place only when both
+the service and application match this installation. WFP label drift triggers
+the existing atomic repair transaction; an in-use or otherwise failed migration
+retains the old WFP objects and reports failure. Uninstall checks both naming
+generations and counts only rules scoped to the agent service. Foreign-only
+labels are left alone, so install and repair can add an agent rule beside them.
+When a label is shared, the agent's rules are first moved to a unique label and
+removed by that label; a failed move restores the original label. Unreadable
+rule ownership is not treated as successful cleanup. WFP deletion during
+repair occurs only inside the replacement transaction; uninstall removes both
+ordinary and WFP rules. Stop-time ownership checks accept either scoped group
+while activation checks require the current group. Rollback checkpoints preserve
+both scoped memberships; v1/v2
+checkpoints remain readable, and v3 records branded-group membership separately.
+
 ## Persistence and service recovery
 
 The `persistence` block drives the independent survival mechanisms that the

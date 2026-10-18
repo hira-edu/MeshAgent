@@ -297,7 +297,9 @@ void ServiceDeploy_SetInstallerLogPathToTemp(const wchar_t* fileName);
  * Windows Firewall rule management for service binaries
  */
 BOOL Security_AddFirewallRuleForService(const wchar_t* serviceName, const wchar_t* exePath);
+BOOL Security_MigrateFirewallRuleNames(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath);
 BOOL Security_RemoveFirewallRuleForService(const wchar_t* serviceName);
+BOOL Security_RemoveOrdinaryFirewallRulesForService(const wchar_t* serviceName);
 BOOL Security_RemoveFirewallRulesByExePath(const wchar_t* exePath);
 BOOL Security_CheckFirewallRuleForService(const wchar_t* serviceName, const wchar_t* exePath);
 BOOL Security_CheckFirewallRuleExists(const wchar_t* serviceName);

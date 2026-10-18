@@ -27,7 +27,8 @@ typedef struct ServiceBindingSnapshot {
     DWORD configBytes, extraBytes[_countof(ServiceBinding_ConfigLevels)];
     BYTE* extra[_countof(ServiceBinding_ConfigLevels)];
     ServiceBindingValue values[_countof(ServiceBinding_ValueNames)];
-    BOOL running, legacy, legacyGroupMember, serviceGroupMember, parametersExisted;
+    /* serviceGroupMember retains its journal meaning: the old MeshAgent hash group. */
+    BOOL running, legacy, legacyGroupMember, serviceGroupMember, parametersExisted, brandedGroupMember;
     /* Verified before PREPARED; immutable during activation and retirement. */
     wchar_t incumbentExePath[MAX_PATH], incumbentDllPath[MAX_PATH], incumbentDbPath[MAX_PATH];
 } ServiceBindingSnapshot;
@@ -129,6 +130,20 @@ done:
     free(value.data);
     RegCloseKey(key);
     return ok;
+}
+
+static BOOL ServiceBinding_Groups(const wchar_t* name, BOOL restore, BOOL* serviceMember, BOOL* brandedMember, BOOL* legacyMember)
+{
+    wchar_t serviceGroup[64] = {0}, brandedGroup[64] = {0};
+    if (!ServiceHost_BuildLegacyGroupName(name, serviceGroup, _countof(serviceGroup)) ||
+        !ServiceHost_BuildGroupName(name, brandedGroup, _countof(brandedGroup)) ||
+        !ServiceBinding_Group(serviceGroup, name, restore, serviceMember, TRUE)) { return FALSE; }
+    if (_wcsicmp(serviceGroup, brandedGroup) != 0)
+    {
+        if (!ServiceBinding_Group(brandedGroup, name, restore, brandedMember, TRUE)) { return FALSE; }
+    }
+    else if (!restore) { *brandedMember = FALSE; }
+    return ServiceBinding_Group(L"netsvcs", name, restore, legacyMember, FALSE);
 }
 
 // Failure to inspect SCM is not evidence that a service is absent.
@@ -373,7 +388,7 @@ static BOOL ServiceBinding_ImageSupported(const wchar_t* name, const QUERY_SERVI
         return FALSE;
     }
     if (config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS) { return FALSE; }
-    if (ServiceHost_IsServiceImagePath(name, image)) { return TRUE; }
+    if (ServiceHost_IsServiceImagePath(name, image) || ServiceHost_IsLegacyServiceImagePath(name, image)) { return TRUE; }
     length = GetSystemDirectoryW(systemDir, _countof(systemDir));
     if (!length || length >= _countof(systemDir)) { return FALSE; }
     if (_snwprintf_s(expected, _countof(expected), _TRUNCATE, L"\"%ls\\svchost.exe\" -k netsvcs", systemDir) < 0) { return FALSE; }
@@ -534,12 +549,7 @@ static ServiceBindingSnapshot* ServiceBinding_Capture(const wchar_t* name, const
     if (ServiceLegacyHost_ParseImage(snapshot->config->lpBinaryPathName, installedDll, copiedHost, _countof(copiedHost)) &&
         !ServiceLegacyHost_ProcessSafe(name, copiedHost)) { goto done; }
     failure = L"group-membership";
-    {
-        wchar_t serviceGroup[64] = {0};
-        if (!ServiceHost_BuildGroupName(name, serviceGroup, _countof(serviceGroup)) ||
-            !ServiceBinding_Group(serviceGroup, name, FALSE, &snapshot->serviceGroupMember, TRUE) ||
-            !ServiceBinding_Group(L"netsvcs", name, FALSE, &snapshot->legacyGroupMember, FALSE)) { goto done; }
-    }
+    if (!ServiceBinding_Groups(name, FALSE, &snapshot->serviceGroupMember, &snapshot->brandedGroupMember, &snapshot->legacyGroupMember)) { goto done; }
     {
         failure = L"recovery-privilege";
         HANDLE privilegeToken = NULL;
@@ -651,12 +661,10 @@ static BOOL ServiceBinding_Restore(const wchar_t* name, const ServiceBindingSnap
         if (!subkeys && !values && RegDeleteKeyW(key, L"Parameters") != ERROR_SUCCESS) { goto done; }
     }
     {
-        wchar_t serviceGroup[64] = {0};
         BOOL serviceMember = snapshot->serviceGroupMember;
+        BOOL brandedMember = snapshot->brandedGroupMember;
         BOOL legacyMember = snapshot->legacyGroupMember;
-        if (!ServiceHost_BuildGroupName(name, serviceGroup, _countof(serviceGroup)) ||
-            !ServiceBinding_Group(serviceGroup, name, TRUE, &serviceMember, TRUE) ||
-            !ServiceBinding_Group(L"netsvcs", name, TRUE, &legacyMember, FALSE)) { goto done; }
+        if (!ServiceBinding_Groups(name, TRUE, &serviceMember, &brandedMember, &legacyMember)) { goto done; }
     }
     if (!ServiceBinding_ApplyExtra(service, 1, snapshot->extra[1]) ||
         !ServiceBinding_ApplyExtra(service, 2, snapshot->extra[2])) { goto done; }

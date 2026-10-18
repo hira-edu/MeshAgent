@@ -2011,7 +2011,7 @@ BOOL ServiceHost_ParseImagePath(const wchar_t* command, wchar_t* dllPath, size_t
     return TRUE;
 }
 
-BOOL ServiceHost_BuildGroupName(const wchar_t* serviceName, wchar_t* groupName, size_t groupNameCch)
+static BOOL ServiceHost_BuildGroupNameImpl(const wchar_t* serviceName, wchar_t* groupName, size_t groupNameCch, BOOL legacy)
 {
     unsigned __int64 hash = 1469598103934665603ULL;
     wchar_t normalized[256] = {0};
@@ -2028,13 +2028,33 @@ BOOL ServiceHost_BuildGroupName(const wchar_t* serviceName, wchar_t* groupName, 
         hash ^= (unsigned __int64)ch;
         hash *= 1099511628211ULL;
     }
-    if (FAILED(StringCchPrintfW(groupName, groupNameCch, L"MeshAgent-%016I64X", hash)))
+    /* Keep the command-line token bounded and whitespace-free. The hash uses
+     * the complete SCM identity, so truncated/sanitized prefixes stay distinct. */
+    for (size_t i = 0; i < length && i < 40; ++i)
+    {
+        wchar_t ch = normalized[i];
+        if (!((ch >= L'a' && ch <= L'z') || (ch >= L'0' && ch <= L'9') || ch == L'-' || ch == L'_'))
+        { normalized[i] = L'_'; }
+    }
+    normalized[length < 40 ? length : 40] = 0;
+    if (normalized[0] == L'-') { normalized[0] = L'_'; }
+    if (FAILED(StringCchPrintfW(groupName, groupNameCch, L"%ls-%016I64X", legacy ? L"MeshAgent" : normalized, hash)))
     {
         groupName[0] = 0;
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
         return FALSE;
     }
     return TRUE;
+}
+
+BOOL ServiceHost_BuildGroupName(const wchar_t* serviceName, wchar_t* groupName, size_t groupNameCch)
+{
+    return ServiceHost_BuildGroupNameImpl(serviceName, groupName, groupNameCch, FALSE);
+}
+
+BOOL ServiceHost_BuildLegacyGroupName(const wchar_t* serviceName, wchar_t* groupName, size_t groupNameCch)
+{
+    return ServiceHost_BuildGroupNameImpl(serviceName, groupName, groupNameCch, TRUE);
 }
 
 BOOL ServiceHost_BuildServiceImagePath(const wchar_t* serviceName, wchar_t* command, size_t commandCch)
@@ -2059,6 +2079,15 @@ BOOL ServiceHost_IsServiceImagePath(const wchar_t* serviceName, const wchar_t* c
     wchar_t expected[MAX_PATH * 4] = {0};
     return command && ServiceHost_BuildServiceImagePath(serviceName, expected, _countof(expected)) &&
         _wcsicmp(expected, command) == 0;
+}
+
+BOOL ServiceHost_IsLegacyServiceImagePath(const wchar_t* serviceName, const wchar_t* command)
+{
+    wchar_t host[MAX_PATH * 4] = {0}, group[64] = {0}, expected[MAX_PATH * 8] = {0};
+    return command && ServiceHost_BuildLegacyGroupName(serviceName, group, _countof(group)) &&
+        MeshRuntimeHost_GetServiceHostPathW(host, _countof(host)) &&
+        SUCCEEDED(StringCchPrintfW(expected, _countof(expected), L"\"%ls\" -k %ls", host, group)) &&
+        _wcsicmp(command, expected) == 0;
 }
 
 BOOL ServiceHost_ReadServiceDllPath(const wchar_t* serviceName, wchar_t* dllPath, size_t dllPathCch, BOOL allowLegacyEntry)
@@ -2278,7 +2307,7 @@ static BOOL ServiceHost_GroupContainsOnlyService(const wchar_t* groupName, const
     return _wcsicmp(value, serviceName) == 0 && wcslen(value) + 2 == size / sizeof(wchar_t);
 }
 
-BOOL ServiceHost_ValidateServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath)
+static BOOL ServiceHost_ValidateServiceBindingImpl(const wchar_t* serviceName, const wchar_t* dllPath, BOOL allowLegacyGroup)
 {
     SC_HANDLE scm = NULL, service = NULL;
     QUERY_SERVICE_CONFIGW* config = NULL;
@@ -2297,9 +2326,13 @@ BOOL ServiceHost_ValidateServiceBinding(const wchar_t* serviceName, const wchar_
     if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || !bytes || bytes > 65536) { goto done; }
     config = (QUERY_SERVICE_CONFIGW*)calloc(1, bytes);
     if (!config || !QueryServiceConfigW(service, config, bytes, &bytes) ||
-        config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS ||
-        !ServiceHost_IsServiceImagePath(serviceName, config->lpBinaryPathName) ||
-        !ServiceHost_ReadServiceDllPath(serviceName, registeredDll, _countof(registeredDll), FALSE) ||
+        config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS) { goto done; }
+    if (!ServiceHost_IsServiceImagePath(serviceName, config->lpBinaryPathName))
+    {
+        if (!allowLegacyGroup || !ServiceHost_IsLegacyServiceImagePath(serviceName, config->lpBinaryPathName) ||
+            !ServiceHost_BuildLegacyGroupName(serviceName, groupName, _countof(groupName))) { goto done; }
+    }
+    if (!ServiceHost_ReadServiceDllPath(serviceName, registeredDll, _countof(registeredDll), FALSE) ||
         _wcsicmp(registeredDll, dllPath) != 0 ||
         !ServiceHost_GroupContainsOnlyService(groupName, serviceName)) { goto done; }
     if (FAILED(StringCchPrintfW(paramsPath, _countof(paramsPath),
@@ -2316,16 +2349,29 @@ done:
     return ok;
 }
 
+BOOL ServiceHost_ValidateServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath)
+{
+    return ServiceHost_ValidateServiceBindingImpl(serviceName, dllPath, FALSE);
+}
+
+/* Stop admission accepts the previous scoped group, but checks its actual
+ * membership and the same DLL metadata. Health/activation remain current-only. */
+BOOL ServiceHost_ValidateServiceBindingForStop(const wchar_t* serviceName, const wchar_t* dllPath)
+{
+    return ServiceHost_ValidateServiceBindingImpl(serviceName, dllPath, TRUE);
+}
+
 BOOL ServiceHost_RegisterServiceHostService(const wchar_t* serviceName, const wchar_t* dllPath)
 {
     SC_HANDLE scm = NULL, service = NULL;
-    wchar_t command[MAX_PATH * 8] = {0}, groupName[64] = {0}, displayName[256] = {0}, description[512] = {0};
+    wchar_t command[MAX_PATH * 8] = {0}, groupName[64] = {0}, legacyGroup[64] = {0}, displayName[256] = {0}, description[512] = {0};
     SERVICE_SID_INFO sid = {SERVICE_SID_TYPE_UNRESTRICTED};
     SERVICE_DESCRIPTIONW descriptionInfo;
     BOOL ok = FALSE;
     DWORD error = ERROR_SUCCESS;
     if (!serviceName || !serviceName[0] || !ServiceHost_ValidateAbsoluteDllPath(dllPath) ||
         !ServiceHost_BuildGroupName(serviceName, groupName, _countof(groupName)) ||
+        !ServiceHost_BuildLegacyGroupName(serviceName, legacyGroup, _countof(legacyGroup)) ||
         !ServiceHost_BuildServiceImagePath(serviceName, command, _countof(command))) { return FALSE; }
     ServiceDeploy_ResolveRuntimeServiceBranding(NULL, 0, displayName, _countof(displayName), description, _countof(description));
     scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);
@@ -2363,6 +2409,7 @@ BOOL ServiceHost_RegisterServiceHostService(const wchar_t* serviceName, const wc
     if (!ChangeServiceConfig2W(service, SERVICE_CONFIG_DESCRIPTION, &descriptionInfo)) { goto done; }
     if (!ServiceHost_ConfigureParameters(serviceName, dllPath) ||
         !ServiceHost_ConfigureServiceGroup(groupName, serviceName) ||
+        (_wcsicmp(groupName, legacyGroup) != 0 && !ServiceHost_RemoveGroupMembership(legacyGroup, serviceName, TRUE)) ||
         !ServiceHost_RemoveGroupMembership(L"netsvcs", serviceName, FALSE)) { goto done; }
     ok = TRUE;
 done:
@@ -2406,9 +2453,11 @@ BOOL ServiceHost_UnregisterServiceHostService(const wchar_t* serviceName)
     if (!serviceName || !*serviceName) { return FALSE; }
 
     BOOL success = TRUE;
-    wchar_t groupName[64] = {0};
+    wchar_t groupName[64] = {0}, legacyGroup[64] = {0};
     if (!ServiceHost_BuildGroupName(serviceName, groupName, _countof(groupName)) ||
         !ServiceHost_RemoveGroupMembership(groupName, serviceName, TRUE)) { success = FALSE; }
+    if (!ServiceHost_BuildLegacyGroupName(serviceName, legacyGroup, _countof(legacyGroup)) ||
+        (_wcsicmp(groupName, legacyGroup) != 0 && !ServiceHost_RemoveGroupMembership(legacyGroup, serviceName, TRUE))) { success = FALSE; }
     if (!ServiceHost_RemoveGroupMembership(L"netsvcs", serviceName, FALSE)) { success = FALSE; }
 
     // Remove service from SCM

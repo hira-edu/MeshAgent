@@ -1901,13 +1901,20 @@ static BOOL ServiceDeploy_RefreshFirewallRulesWithRetry(const wchar_t* serviceNa
 
     for (int attempt = 1; attempt <= SECURITY_FIREWALL_MAX_ATTEMPTS; ++attempt)
     {
+        // Historical labels still enforce policy. A failed rename must not skip
+        // the check/repair below, which converges on the current labels.
+        if (!Security_MigrateFirewallRuleNames(serviceName, hostExePath, agentExePath))
+        {
+            ServiceDeploy_LogInstallEvent(L"[WARN] Firewall branding migration failed for %ls", serviceName);
+        }
         // Do not tear down a configuration that already matches the requested
         // service and executable paths. In-use WFP objects need no replacement
         // when all of their required rules are already valid.
         if (ServiceDeploy_DoFirewallRulesMatch(serviceName, hostExePath, agentExePath)) { return TRUE; }
 
-        // Best-effort cleanup before (re)adding rules to avoid stale entries.
-        (void)Security_RemoveFirewallRuleForService(serviceName);
+        // Only ordinary rules are cleaned up here. WFP replacement owns its
+        // removal transaction, so a failed add retains the previous policy.
+        (void)Security_RemoveOrdinaryFirewallRulesForService(serviceName);
         // Never purge rules by exePath for a system host; that can remove unrelated OS rules.
         if (systemServiceHostPath[0] == L'\0' || _wcsicmp(hostExePath, systemServiceHostPath) != 0)
         {
@@ -5733,12 +5740,14 @@ static BOOL ServiceDeploy_SourcePackageMatchesInstalled(const ServiceLifecycleDi
 
 static BOOL ServiceDeploy_ServiceGroupsAbsent(const wchar_t* serviceName)
 {
-    wchar_t groupName[64] = {0};
-    BOOL scopedMember = FALSE, legacyMember = FALSE;
+    wchar_t groupName[64] = {0}, legacyGroup[64] = {0};
+    BOOL scopedMember = FALSE, oldScopedMember = FALSE, legacyMember = FALSE;
     return ServiceHost_BuildGroupName(serviceName, groupName, _countof(groupName)) &&
+        ServiceHost_BuildLegacyGroupName(serviceName, legacyGroup, _countof(legacyGroup)) &&
         ServiceBinding_Group(groupName, serviceName, FALSE, &scopedMember, TRUE) &&
+        ServiceBinding_Group(legacyGroup, serviceName, FALSE, &oldScopedMember, TRUE) &&
         ServiceBinding_Group(L"netsvcs", serviceName, FALSE, &legacyMember, FALSE) &&
-        !scopedMember && !legacyMember;
+        !scopedMember && !oldScopedMember && !legacyMember;
 }
 
 static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discovery)
@@ -7563,45 +7572,9 @@ BOOL ServiceDeploy_RunUninstallValidation(void)
         ServiceDeploy_LogInstallEvent(L"[VALIDATION] Service registry key still present: HKLM\\%ls", serviceKeyPath);
     }
 
-    // Scoped service group and legacy netsvcs membership absence
-    summary.serviceHostGroupAbsent = TRUE;
-    HKEY hServiceHost = NULL;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost",
-                      0, KEY_QUERY_VALUE, &hServiceHost) == ERROR_SUCCESS)
-    {
-        wchar_t serviceGroup[64] = {0};
-        if (ServiceHost_BuildGroupName(serviceKeyName, serviceGroup, _countof(serviceGroup)))
-        {
-            DWORD type = 0, cb = 0;
-            if (RegQueryValueExW(hServiceHost, serviceGroup, NULL, &type, NULL, &cb) == ERROR_SUCCESS)
-            {
-                summary.serviceHostGroupAbsent = FALSE;
-            }
-        }
-        if (summary.serviceHostGroupAbsent)
-        {
-            DWORD type = 0, cb = 0;
-            if (RegQueryValueExW(hServiceHost, L"netsvcs", NULL, &type, NULL, &cb) == ERROR_SUCCESS &&
-                type == REG_MULTI_SZ && cb >= 2 * sizeof(wchar_t) && cb <= 65536)
-            {
-                wchar_t* buf = (wchar_t*)calloc(1, cb + 2 * sizeof(wchar_t));
-                if (buf && RegQueryValueExW(hServiceHost, L"netsvcs", NULL, &type, (LPBYTE)buf, &cb) == ERROR_SUCCESS)
-                {
-                    for (wchar_t* p = buf; *p; p += (wcslen(p) + 1))
-                    {
-                        if (_wcsicmp(p, serviceKeyName) == 0)
-                        {
-                            summary.serviceHostGroupAbsent = FALSE;
-                            break;
-                        }
-                    }
-                }
-                free(buf);
-            }
-        }
-        RegCloseKey(hServiceHost);
-    }
+    // Check membership in both scoped generations and netsvcs. A legacy group
+    // that still contains unrelated services is not residue owned by us.
+    summary.serviceHostGroupAbsent = ServiceDeploy_ServiceGroupsAbsent(serviceKeyName);
     if (!summary.serviceHostGroupAbsent)
     {
         summary.success = FALSE;
@@ -9050,7 +9023,7 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
     BOOL processIsExclusivelyOurs = statusKnown && (ssp.dwServiceType == SERVICE_WIN32_OWN_PROCESS ||
         (ssp.dwServiceType == SERVICE_WIN32_SHARE_PROCESS &&
          ServiceDeploy_ResolveServiceDllPath(serviceName, serviceDll, _countof(serviceDll)) &&
-         ServiceHost_ValidateServiceBinding(serviceName, serviceDll) &&
+         ServiceHost_ValidateServiceBindingForStop(serviceName, serviceDll) &&
          ServiceDeploy_ProcessHostsOnlyService(serviceName, ssp.dwProcessId)));
     if (!stopped && forceTerminate && processIsExclusivelyOurs && ssp.dwProcessId != 0)
     {

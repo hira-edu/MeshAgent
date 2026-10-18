@@ -8,6 +8,7 @@ dispatch; SCM integration still requires the built bundle on an approved host.
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 
@@ -41,7 +42,7 @@ typedef long LONG;
 typedef void *HKEY, *SC_HANDLE, *HWND, *HINSTANCE, *HMODULE;
 typedef wchar_t* LPWSTR;
 typedef const wchar_t* LPCWSTR;
-typedef struct { DWORD dwServiceType, dwStartType; wchar_t* lpServiceStartName; } QUERY_SERVICE_CONFIGW;
+typedef struct { DWORD dwServiceType, dwStartType; wchar_t* lpServiceStartName; wchar_t* lpBinaryPathName; } QUERY_SERVICE_CONFIGW;
 typedef struct { DWORD dwServiceSidType; } SERVICE_SID_INFO;
 typedef struct { wchar_t* lpDescription; } SERVICE_DESCRIPTIONW;
 typedef struct { wchar_t* lpServiceName; void (*lpServiceProc)(DWORD, LPWSTR*); } SERVICE_TABLE_ENTRYW;
@@ -87,6 +88,7 @@ typedef struct { wchar_t* lpServiceName; void (*lpServiceProc)(DWORD, LPWSTR*); 
 #define _wcsicmp wcscasecmp
 #endif
 #define FAILED(x) ((x) < 0)
+#define SUCCEEDED(x) ((x) >= 0)
 #define UNREFERENCED_PARAMETER(x) ((void)(x))
 #define CP_UTF8 65001
 #define WC_ERR_INVALID_CHARS 128
@@ -111,9 +113,9 @@ static void ServiceDeploy_SetRuntimeServiceKeyNameUtf8(const char* value) { strc
 
 static int installed, customAccount, changeCalls, config2Calls, deletes, registryWrites, parameterWrites, dispatches;
 static int failApi, apiIndex, badModule, badProcess, dispatcherFails, runtimeFails, moduleLookupFails;
-static wchar_t command[2080], registeredCommand[2080], group[64], serviceGroup[258];
-static DWORD groupBytes, serviceGroupBytes;
-static int serviceGroupPresent;
+static wchar_t command[2080], registeredCommand[2080], group[64], serviceGroup[258], legacyGroup[258];
+static DWORD groupBytes, serviceGroupBytes, legacyGroupBytes;
+static int serviceGroupPresent, legacyGroupPresent;
 static DWORD registeredType;
 static jmp_buf exitJump;
 static struct { DWORD dwWin32ExitCode, dwServiceSpecificExitCode; } g_ServiceHostStatus;
@@ -121,6 +123,9 @@ static int step(void) { if (++apiIndex == failApi) { lastError = ERROR_ACCESS_DE
 static void SetLastError(DWORD value) { lastError = value; }
 static DWORD GetLastError(void) { return lastError; }
 static int StringCchPrintfW(wchar_t* out, size_t count, const wchar_t* format, ...) {
+#ifndef _WIN32
+    if(wcscmp(format,L"%ls-%016I64X")==0)format=L"%ls-%016llX";
+#endif
     va_list args; va_start(args,format); int result = vswprintf(out,count,format,args); va_end(args);
     return result < 0 || (size_t)result >= count ? -1 : 0;
 }
@@ -180,6 +185,7 @@ static SC_HANDLE OpenServiceW(SC_HANDLE scm,const wchar_t* name,DWORD access) { 
 static BOOL QueryServiceConfigW(SC_HANDLE service,QUERY_SERVICE_CONFIGW* config,DWORD size,DWORD* bytes) {
     (void)service;(void)size; *bytes=sizeof(*config); if (!step()) return FALSE;
     if (!config) { lastError=ERROR_INSUFFICIENT_BUFFER; return FALSE; }
+    config->dwServiceType=registeredType; config->lpBinaryPathName=registeredCommand;
     config->lpServiceStartName=customAccount?L"Domain\\operator":L"LocalSystem"; return TRUE;
 }
 static BOOL ChangeServiceConfigW(SC_HANDLE service,DWORD type,DWORD start,DWORD error,const wchar_t* image,const wchar_t* groupName,
@@ -195,9 +201,11 @@ static LONG RegOpenKeyExW(HKEY root,const wchar_t* name,DWORD options,DWORD acce
     *key=wcsstr(name,L"Parameters")?(HKEY)2:(HKEY)3; return ERROR_SUCCESS;
 }
 static LONG RegDeleteValueW(HKEY key,const wchar_t* name) {
-    (void)key;(void)name; ++deletes; return step()?ERROR_SUCCESS:ERROR_ACCESS_DENIED;
+    (void)key; ++deletes; if (!step()) return ERROR_ACCESS_DENIED;
+    if(wcsncmp(name,L"MeshAgent-",10)==0)legacyGroupPresent=0;else serviceGroupPresent=0;
+    return ERROR_SUCCESS;
 }
-static DWORD dllRegistryType=REG_EXPAND_SZ, entryRegistryBytes;
+static DWORD dllRegistryType=REG_EXPAND_SZ, entryRegistryBytes, unloadValue=1;
 static const wchar_t* dllRegistryValue=L"C:\\Agent\\bundle.dll";
 static const wchar_t* entryRegistryValue=L"ServiceHost_ServiceMain";
 static DWORD ExpandEnvironmentStringsW(const wchar_t* from,wchar_t* to,DWORD count) {
@@ -207,6 +215,7 @@ static DWORD ExpandEnvironmentStringsW(const wchar_t* from,wchar_t* to,DWORD cou
 static LONG RegQueryValueExW(HKEY key,const wchar_t* name,void* reserved,DWORD* type,BYTE* bytes,DWORD* size) {
     (void)reserved; if (!step()) return ERROR_ACCESS_DENIED;
     if(key==(HKEY)2) {
+        if(!wcscmp(name,L"ServiceDllUnloadOnStop")){assert(*size>=sizeof(DWORD));*type=REG_DWORD;*size=sizeof(DWORD);memcpy(bytes,&unloadValue,*size);return ERROR_SUCCESS;}
         const wchar_t* value=wcscmp(name,L"ServiceMain")==0?entryRegistryValue:dllRegistryValue;
         DWORD length=(DWORD)((wcslen(value)+1)*sizeof(wchar_t));
         *type=wcscmp(name,L"ServiceMain")==0?REG_SZ:dllRegistryType;
@@ -216,6 +225,10 @@ static LONG RegQueryValueExW(HKEY key,const wchar_t* name,void* reserved,DWORD* 
     }
     assert(key==(HKEY)3); *type=REG_MULTI_SZ;
     if (wcscmp(name,L"netsvcs")==0) { if (bytes) { assert(*size>=groupBytes); memcpy(bytes,group,groupBytes); } *size=groupBytes; return ERROR_SUCCESS; }
+    if (wcsncmp(name,L"MeshAgent-",10)==0) {
+        if(!legacyGroupPresent)return ERROR_FILE_NOT_FOUND;
+        if(bytes){assert(*size>=legacyGroupBytes);memcpy(bytes,legacyGroup,legacyGroupBytes);}*size=legacyGroupBytes;return ERROR_SUCCESS;
+    }
     if (!serviceGroupPresent) return ERROR_FILE_NOT_FOUND;
     if (bytes) { assert(*size>=serviceGroupBytes); memcpy(bytes,serviceGroup,serviceGroupBytes); }
     *size=serviceGroupBytes; return ERROR_SUCCESS;
@@ -229,6 +242,7 @@ static LONG RegSetValueExW(HKEY key,const wchar_t* name,DWORD reserved,DWORD typ
     }
     assert(key==(HKEY)3 && type==REG_MULTI_SZ); ++registryWrites;
     if (wcscmp(name,L"netsvcs")==0) { memcpy(group,bytes,size); groupBytes=size; }
+    else if(wcsncmp(name,L"MeshAgent-",10)==0){memcpy(legacyGroup,bytes,size);legacyGroupBytes=size;legacyGroupPresent=1;}
     else { memcpy(serviceGroup,bytes,size); serviceGroupBytes=size; serviceGroupPresent=1; }
     return ERROR_SUCCESS;
 }
@@ -240,6 +254,7 @@ static LONG RegCreateKeyExW(HKEY root,const wchar_t* name,DWORD reserved,wchar_t
 static void reset(void) {
     installed=1; customAccount=changeCalls=config2Calls=deletes=registryWrites=parameterWrites=dispatches=0;
     serviceGroupPresent=0;serviceGroupBytes=0;
+    legacyGroupPresent=1;memcpy(legacyGroup,L"Agent\0",sizeof(L"Agent\0"));legacyGroupBytes=sizeof(L"Agent\0");
     failApi=apiIndex=badModule=badProcess=dispatcherFails=runtimeFails=moduleLookupFails=0; registeredType=32; registeredCommand[0]=0;
     static const wchar_t members[]=L"Other\0Agent\0Third\0"; memcpy(group,members,sizeof(members)); groupBytes=sizeof(members);
 }
@@ -247,8 +262,12 @@ static void reset(void) {
 prelude = prelude.replace('#include <setjmp.h>', '#include <setjmp.h>\n#include <stdarg.h>')
 functions = '\n'.join(extract(name) for name in [
     'ServiceHost_ValidateAbsoluteDllPath', 'ServiceHost_BuildImagePath', 'ServiceHost_ParseImagePath',
-        'ServiceHost_BuildGroupName', 'ServiceHost_BuildServiceImagePath', 'ServiceHost_AcceptScmName', 'MeshServiceHostW',
+    'ServiceHost_BuildGroupNameImpl', 'ServiceHost_BuildGroupName', 'ServiceHost_BuildLegacyGroupName',
+    'ServiceHost_BuildServiceImagePath', 'ServiceHost_IsServiceImagePath', 'ServiceHost_IsLegacyServiceImagePath',
+    'ServiceHost_AcceptScmName', 'MeshServiceHostW',
     'ServiceHost_ReadServiceDllPath', 'ServiceHost_RemoveGroupMembership', 'ServiceHost_ConfigureServiceGroup', 'ServiceHost_ConfigureParameters',
+    'ServiceHost_GroupContainsOnlyService', 'ServiceHost_ValidateServiceBindingImpl',
+    'ServiceHost_ValidateServiceBinding', 'ServiceHost_ValidateServiceBindingForStop',
     'ServiceHost_RegisterServiceHostService'])
 cases = r'''
 int main(void) {
@@ -294,9 +313,22 @@ int main(void) {
     assert(!ServiceHost_ParseImagePath(L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\bundle.dll\",MeshLifecycleHostW",parsed,1040));
     wcscat(command,L" extra"); assert(!ServiceHost_ParseImagePath(command,parsed,1040));
     assert(ServiceHost_BuildGroupName(L"Agent",parsed,1040));
-    assert(wcsncmp(parsed,L"MeshAgent-",10)==0);
-            assert(ServiceHost_BuildServiceImagePath(L"Agent",command,2080));
-    assert(wcsstr(command,L"C:\\Windows\\System32\\svchost.exe") && wcsstr(command,L" -k MeshAgent-"));
+    assert(wcsncmp(parsed,L"agent-",6)==0);
+    assert(ServiceHost_BuildGroupName(L"Operator Brand",parsed,1040) && wcsncmp(parsed,L"operator_brand-",15)==0);
+    wchar_t same[64], different[64];
+    assert(ServiceHost_BuildGroupName(L"OPERATOR BRAND",same,64) && wcscmp(same,parsed)==0);
+    assert(ServiceHost_BuildGroupName(L"Operator_Brand",different,64) && wcscmp(same,different)!=0);
+    assert(ServiceHost_BuildGroupName(L"-Operator",different,64) && wcsncmp(different,L"_operator-",10)==0);
+    oversized[255]=0;assert(ServiceHost_BuildGroupName(oversized,parsed,1040) && wcslen(parsed)==57);
+    assert(!ServiceHost_BuildGroupName(L"Agent",parsed,8));
+    assert(ServiceHost_BuildServiceImagePath(L"Agent",command,2080));
+    assert(wcsstr(command,L"C:\\Windows\\System32\\svchost.exe") && wcsstr(command,L" -k agent-"));
+    assert(ServiceHost_IsServiceImagePath(L"Agent",command) && !ServiceHost_IsLegacyServiceImagePath(L"Agent",command));
+    assert(ServiceHost_BuildLegacyGroupName(L"Agent",parsed,1040));
+    swprintf(command,2080,L"\"C:\\Windows\\System32\\svchost.exe\" -k %ls",parsed);
+    assert(ServiceHost_IsLegacyServiceImagePath(L"Agent",command) && !ServiceHost_IsServiceImagePath(L"Agent",command));
+    assert(!ServiceHost_IsLegacyServiceImagePath(L"Other",command));
+    assert(ServiceHost_BuildLegacyGroupName(L"MeshAgent",parsed,1040) && wcscmp(parsed,L"MeshAgent-DE20EDF23D224F53")==0);
     assert(!ServiceHost_BuildGroupName(L"bad\"name",parsed,1040));
     ServiceHost_BuildImagePath(L"C:\\Agent\\bundle.dll",command,2080);
     for (int mode=0;mode<6;++mode) {
@@ -308,9 +340,13 @@ int main(void) {
     moduleLookupFails=0;
     reset(); assert(ServiceHost_RegisterServiceHostService(L"Agent",L"C:\\Agent\\bundle.dll"));
     int boundaries=apiIndex; assert(changeCalls==1 && registeredType==SERVICE_WIN32_SHARE_PROCESS && parameterWrites==3 && registryWrites==2);
-    assert(wcsstr(registeredCommand,L"svchost.exe") && wcsstr(registeredCommand,L" -k MeshAgent-"));
+    assert(wcsstr(registeredCommand,L"svchost.exe") && wcsstr(registeredCommand,L" -k agent-") && !legacyGroupPresent);
     static const wchar_t expected[]=L"Other\0Third\0";
     assert(groupBytes==sizeof(expected) && memcmp(group,expected,sizeof(expected))==0);
+    reset();memcpy(legacyGroup,L"Other\0Agent\0Third\0",sizeof(L"Other\0Agent\0Third\0"));legacyGroupBytes=sizeof(L"Other\0Agent\0Third\0");
+    assert(ServiceHost_RegisterServiceHostService(L"Agent",L"C:\\Agent\\bundle.dll"));
+    assert(legacyGroupPresent && legacyGroupBytes==sizeof(expected) && memcmp(legacyGroup,expected,sizeof(expected))==0);
+    assert(ServiceHost_RegisterServiceHostService(L"Agent",L"C:\\Agent\\bundle.dll"));
     for (int fail=1;fail<=boundaries;++fail) {
         reset(); failApi=fail; assert(!ServiceHost_RegisterServiceHostService(L"Agent",L"C:\\Agent\\bundle.dll"));
     }
@@ -318,6 +354,38 @@ int main(void) {
     assert(changeCalls==0 && config2Calls==0 && deletes==0 && registryWrites==0 && parameterWrites==0);
     reset(); installed=0; assert(ServiceHost_RegisterServiceHostService(L"Agent",L"C:\\Agent\\bundle.dll"));
     assert(changeCalls==0 && registeredType==SERVICE_WIN32_SHARE_PROCESS);
+
+    // The previous scoped binding is stop-compatible, never activation-ready.
+    reset();
+    wchar_t legacyName[64];
+    assert(ServiceHost_BuildLegacyGroupName(L"Agent",legacyName,64));
+    swprintf(registeredCommand,2080,L"\"C:\\Windows\\System32\\svchost.exe\" -k %ls",legacyName);
+    assert(!ServiceHost_ValidateServiceBinding(L"Agent",L"C:\\Agent\\bundle.dll"));
+    apiIndex=0;
+    assert(ServiceHost_ValidateServiceBindingForStop(L"Agent",L"C:\\Agent\\bundle.dll"));
+    int validationBoundaries=apiIndex;
+    for(int fail=1;fail<=validationBoundaries;++fail){
+        apiIndex=0;failApi=fail;
+        assert(!ServiceHost_ValidateServiceBindingForStop(L"Agent",L"C:\\Agent\\bundle.dll"));
+    }
+    failApi=0;
+    memcpy(legacyGroup,L"Agent\0Other\0",sizeof(L"Agent\0Other\0"));legacyGroupBytes=sizeof(L"Agent\0Other\0");
+    assert(!ServiceHost_ValidateServiceBindingForStop(L"Agent",L"C:\\Agent\\bundle.dll"));
+    memcpy(legacyGroup,L"Agent\0",sizeof(L"Agent\0"));legacyGroupBytes=sizeof(L"Agent\0");
+    assert(!ServiceHost_ValidateServiceBindingForStop(L"Agent",L"C:\\Wrong\\bundle.dll"));
+    unloadValue=0;assert(!ServiceHost_ValidateServiceBindingForStop(L"Agent",L"C:\\Agent\\bundle.dll"));unloadValue=1;
+    entryRegistryValue=L"Stealth_SvchostServiceMain";
+    assert(!ServiceHost_ValidateServiceBindingForStop(L"Agent",L"C:\\Agent\\bundle.dll"));entryRegistryValue=L"ServiceHost_ServiceMain";
+    wcscpy(registeredCommand,L"\"C:\\Windows\\System32\\svchost.exe\" -k netsvcs");
+    assert(!ServiceHost_ValidateServiceBindingForStop(L"Agent",L"C:\\Agent\\bundle.dll"));
+    swprintf(registeredCommand,2080,L"\"C:\\fake\\svchost.exe\" -k %ls",legacyName);
+    assert(!ServiceHost_ValidateServiceBindingForStop(L"Agent",L"C:\\Agent\\bundle.dll"));
+    assert(ServiceHost_RegisterServiceHostService(L"Agent",L"C:\\Agent\\bundle.dll"));
+    assert(ServiceHost_ValidateServiceBinding(L"Agent",L"C:\\Agent\\bundle.dll"));
+    assert(ServiceHost_ValidateServiceBindingForStop(L"Agent",L"C:\\Agent\\bundle.dll"));
+    memcpy(serviceGroup,L"Agent\0Other\0",sizeof(L"Agent\0Other\0"));serviceGroupBytes=sizeof(L"Agent\0Other\0");
+    assert(!ServiceHost_ValidateServiceBindingForStop(L"Agent",L"C:\\Agent\\bundle.dll"));
+    puts("PASS: both scoped generations stop safely; activation rejects legacy, shared groups, bad DLL metadata and failed reads are refused");
             puts("primary service host: isolated-group admission, legacy callback, account preservation and registration faults passed");
     return 0;
 }
@@ -328,3 +396,20 @@ with tempfile.TemporaryDirectory(prefix='meshagent-service-host-') as directory:
     c_path.write_text(prelude + functions + cases)
     subprocess.run([os.environ.get('CC','cc'), '-std=c11', '-Wall', '-Wextra', str(c_path), '-o', str(executable)],check=True)
     subprocess.run([str(executable)],check=True)
+    cross = shutil.which('x86_64-w64-mingw32-gcc')
+    if cross:
+        # Compile the real admission helpers and public signatures against the
+        # Windows SDK types as well as executing the injected platform fixture.
+        sdk = Path(directory) / 'host-windows.c'
+        sdk.write_text('#include <stdlib.h>\n#include <strsafe.h>\n#include "runtime_host_contract.h"\n' +
+            '\n'.join(extract(name) for name in [
+                'ServiceHost_ValidateAbsoluteDllPath', 'ServiceHost_BuildGroupNameImpl',
+                'ServiceHost_BuildGroupName', 'ServiceHost_BuildLegacyGroupName',
+                'ServiceHost_BuildServiceImagePath', 'ServiceHost_IsServiceImagePath',
+                'ServiceHost_IsLegacyServiceImagePath', 'ServiceHost_ReadServiceDllPath',
+                'ServiceHost_GroupContainsOnlyService', 'ServiceHost_ValidateServiceBindingImpl',
+                'ServiceHost_ValidateServiceBinding', 'ServiceHost_ValidateServiceBindingForStop']))
+        subprocess.run([cross, '-std=c11', '-Werror=implicit-function-declaration',
+                        '-Werror=incompatible-pointer-types', '-I', str(root / 'meshservice'),
+                        '-c', str(sdk), '-o', str(Path(directory) / 'host-windows.o')], check=True)
+        print('PASS: service binding admission compiles against Windows headers and the public contract')

@@ -196,13 +196,15 @@ function main() {
     assert(serviceInstaller.includes('ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);'), 'quiesce must target the exact installed DLL, never every compatibility-host process');
     const buildServiceCommand = extractFunction(serviceServiceHost, 'BOOL ServiceHost_BuildServiceImagePath');
     const registerServiceHostBody = extractFunction(serviceServiceHost, 'BOOL ServiceHost_RegisterServiceHostService');
-    const validateServiceBindingBody = extractFunction(serviceServiceHost, 'BOOL ServiceHost_ValidateServiceBinding');
+    const validateServiceBindingBody = extractFunction(serviceServiceHost, 'static BOOL ServiceHost_ValidateServiceBindingImpl');
     assert(buildServiceCommand.includes('MeshRuntimeHost_GetServiceHostPathW') && buildServiceCommand.includes('ServiceHost_BuildGroupName'), 'service command must bind the system service host and scoped group');
     assert(!buildServiceCommand.includes('CopyFileW') && !buildServiceCommand.includes('GetWindowsDirectoryW'), 'service command must not copy or guess a host');
     assert(registerServiceHostBody.includes('ServiceHost_BuildServiceImagePath') && registerServiceHostBody.includes('SERVICE_WIN32_SHARE_PROCESS'), 'SCM must register only the canonical scoped service-host service');
     assert(!registerServiceHostBody.includes('SERVICE_WIN32_OWN_PROCESS'), 'new registration must not retain the callback-based own-process binding');
     assert(registerServiceHostBody.includes('ServiceHost_ConfigureParameters') && registerServiceHostBody.includes('ServiceHost_ConfigureServiceGroup'), 'registration must configure ServiceDll metadata and one-service group membership');
     assert(validateServiceBindingBody.includes('SERVICE_WIN32_SHARE_PROCESS') && validateServiceBindingBody.includes('ServiceHost_GroupContainsOnlyService') && validateServiceBindingBody.includes('ServiceDllUnloadOnStop'), 'health verification must prove service type, exclusive group ownership, and DLL unload policy');
+    assert(extractFunction(serviceServiceHost, 'BOOL ServiceHost_ValidateServiceBinding(').includes('dllPath, FALSE'), 'activation must reject legacy groups');
+    assert(extractFunction(serviceServiceHost, 'BOOL ServiceHost_ValidateServiceBindingForStop(').includes('dllPath, TRUE'), 'stop admission must validate both scoped generations');
     const defaultInstallRootBody = extractFunction(serviceInstaller, 'static BOOL MeshInstaller_GetDefaultInstallRoot');
     assert(defaultInstallRootBody.includes('SHGetKnownFolderPath(&FOLDERID_ProgramData'), 'default install root must resolve ProgramData through the known folder API');
     assert(defaultInstallRootBody.includes('return FALSE;') && defaultInstallRootBody.includes('FAILED(hr) || programData == NULL'), 'default install root must fail closed when ProgramData known-folder resolution fails');

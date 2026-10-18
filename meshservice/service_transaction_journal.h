@@ -160,7 +160,9 @@ static BOOL ServiceJournal_Encode(ServiceJournalBuffer* b, const wchar_t* name, 
     /* An older service DLL may run recovery after a crash, and it reads only
      * version 1. Write version 2 only when incumbent paths must be preserved. */
     incumbent = s && (s->incumbentExePath[0] || s->incumbentDllPath[0] || s->incumbentDbPath[0]);
-    ServiceJournal_Put32(b, 0x4a42534dUL); ServiceJournal_Put32(b, incumbent ? 2 : 1);
+    /* A checkpoint with branded-group membership needs the new reader. Old
+     * bindings still write v1/v2, allowing the incumbent DLL to recover them. */
+    ServiceJournal_Put32(b, 0x4a42534dUL); ServiceJournal_Put32(b, s && s->brandedGroupMember ? 3 : incumbent ? 2 : 1);
     ServiceJournal_Put32(b, phase); ServiceJournal_Put32(b, fileMask);
     ServiceJournal_PutText(b, name, 512, name, FALSE);
     ServiceJournal_Put32(b, s ? 1 : 0);
@@ -168,7 +170,7 @@ static BOOL ServiceJournal_Encode(ServiceJournalBuffer* b, const wchar_t* name, 
     {
     ServiceJournal_Put32(b, (s->running ? 1 : 0) | (s->legacy ? 2 : 0) |
         (s->legacyGroupMember ? 4 : 0) | (s->parametersExisted ? 8 : 0) |
-        (s->serviceGroupMember ? 16 : 0));
+        (s->serviceGroupMember ? 16 : 0) | (s->brandedGroupMember ? 32 : 0));
     if (s->configBytes < sizeof(*c) || s->configBytes > SERVICE_BINDING_MAX_BYTES) { return FALSE; }
     ServiceJournal_Put32(b, c->dwServiceType); ServiceJournal_Put32(b, c->dwStartType);
     ServiceJournal_Put32(b, c->dwErrorControl); ServiceJournal_Put32(b, c->dwTagId);
@@ -216,7 +218,7 @@ static BOOL ServiceJournal_Encode(ServiceJournalBuffer* b, const wchar_t* name, 
         ServiceJournal_Put32(b, attrs ? attrs[i] : INVALID_FILE_ATTRIBUTES);
         ServiceJournal_Put32(b, size); if (size) { ServiceJournal_Put(b, dacl[i], size); }
     }
-    if (incumbent)
+    if (incumbent || (s && s->brandedGroupMember))
     {
         ServiceJournal_PutText(b, s->incumbentExePath, sizeof(s->incumbentExePath), s->incumbentExePath, FALSE);
         ServiceJournal_PutText(b, s->incumbentDllPath, sizeof(s->incumbentDllPath), s->incumbentDllPath, FALSE);
@@ -242,7 +244,7 @@ static ServiceJournalRecord* ServiceJournal_Decode(ServiceJournalBuffer* b, cons
     b->size -= 4;
     if (ServiceJournal_Get32(b) != 0x4a42534dUL) { goto fail; }
     version = ServiceJournal_Get32(b);
-    if (version != 1 && version != 2) { goto fail; }
+    if (version != 1 && version != 2 && version != 3) { goto fail; }
     r->phase = ServiceJournal_Get32(b); r->fileMask = ServiceJournal_Get32(b);
     if (!ServiceJournal_PhaseValid(r->phase) || r->fileMask & ~31UL) { goto fail; }
     used = ServiceJournal_Get32(b);
@@ -258,10 +260,11 @@ static ServiceJournalRecord* ServiceJournal_Decode(ServiceJournalBuffer* b, cons
     r->binding = s = (ServiceBindingSnapshot*)calloc(1, sizeof(*s));
     if (!s) { goto fail; }
     flags = ServiceJournal_Get32(b);
-    if (flags & ~31UL) { goto fail; }
+    if (flags & ~(version >= 3 ? 63UL : 31UL)) { goto fail; }
     s->running = (flags & 1) != 0; s->legacy = (flags & 2) != 0;
     s->legacyGroupMember = (flags & 4) != 0; s->parametersExisted = (flags & 8) != 0;
     s->serviceGroupMember = (flags & 16) != 0;
+    s->brandedGroupMember = (flags & 32) != 0;
     s->config = c = (QUERY_SERVICE_CONFIGW*)calloc(1, SERVICE_BINDING_MAX_BYTES);
     if (!c) { goto fail; }
     used = sizeof(*c); s->configBytes = SERVICE_BINDING_MAX_BYTES;

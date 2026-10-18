@@ -19,6 +19,9 @@ PRELUDE = r'''
 #include <stdio.h>
 #include <stdarg.h>
 #include <wchar.h>
+#ifndef _WIN32
+static size_t wcsnlen_s(const wchar_t* s,size_t n){size_t i=0;while(i<n&&s[i])++i;return i;}
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -38,6 +41,7 @@ static DWORD GetLastError(void) { return last_error; }
 #endif
 static int step, fail_step, aborts, closes, logs;
 static int existing_valid, checks;
+static int live_policy=1, transaction_policy;
 static DWORD failure_status=0x80320009;
 static wchar_t last_log[1024];
 static struct { const wchar_t *nameSuffix; } g_ServiceWfpFilters[]={{L"v4"},{L"v6"}};
@@ -49,11 +53,11 @@ static DWORD next(void) { return ++step==fail_step ? failure_status : ERROR_SUCC
 static DWORD Security_WfpOpenEngine(HANDLE *engine) {
     DWORD status=next(); *engine=status==ERROR_SUCCESS?(HANDLE)1:NULL; return status;
 }
-static DWORD FwpmTransactionBegin0(HANDLE e,DWORD flags) { assert(e); return next(); }
-static DWORD Security_WfpRemoveObjectsIfPresent(HANDLE e) { assert(e); return next(); }
-static DWORD Security_WfpAddProviderAndSubLayer(HANDLE e,const wchar_t*s) { assert(e&&s); return next(); }
+static DWORD FwpmTransactionBegin0(HANDLE e,DWORD flags) { assert(e); transaction_policy=live_policy; return next(); }
+static DWORD Security_WfpRemoveObjectsIfPresent(HANDLE e) { assert(e); DWORD result=next(); if(!result)transaction_policy=0; return result; }
+static DWORD Security_WfpAddProviderAndSubLayer(HANDLE e,const wchar_t*s) { assert(e&&s); DWORD result=next(); if(!result)transaction_policy=2; return result; }
 static DWORD Security_WfpAddPermitFilter(HANDLE e,const wchar_t*s,const wchar_t*p,const void*d) { assert(e&&s&&p&&d); return next(); }
-static DWORD FwpmTransactionCommit0(HANDLE e) { assert(e); return next(); }
+static DWORD FwpmTransactionCommit0(HANDLE e) { assert(e); DWORD result=next(); if(!result)live_policy=transaction_policy; return result; }
 static DWORD FwpmTransactionAbort0(HANDLE e) { assert(e); ++aborts; SetLastError(111); return 111; }
 static DWORD FwpmEngineClose0(HANDLE e) { assert(e); ++closes; SetLastError(222); return 222; }
 static void ServiceDeploy_LogInstallEvent(const wchar_t *format,...) {
@@ -78,11 +82,14 @@ static BOOL MeshRuntimeHost_GetServiceHostPathW(wchar_t *path,size_t count) {
 }
 static BOOL Security_CheckFirewallRuleForService(const wchar_t*s,const wchar_t*p) { return ordinary_valid; }
 static BOOL Security_CheckWebRtcFirewallRuleForService(const wchar_t*s,const wchar_t*p,BOOL host) { return ordinary_valid; }
-static BOOL Security_RemoveFirewallRuleForService(const wchar_t*s) {
-    ++removals; ordinary_valid=0; step=0;
-    // The cleanup transaction failed with FWP_E_IN_USE and was aborted,
-    // leaving the previously verified WFP configuration intact.
-    return FALSE;
+static int migrate_ok=1, migrations;
+static BOOL Security_MigrateFirewallRuleNames(const wchar_t*s,const wchar_t*h,const wchar_t*a) { ++migrations; return migrate_ok; }
+static int wfp_removals, ordinary_cleanup_ok=1;
+static BOOL Security_RemoveOrdinaryFirewallRulesForService(const wchar_t*s) {
+    ++removals; ordinary_valid=0; step=0; return ordinary_cleanup_ok;
+}
+static BOOL Security_RemoveWfpHardPermitForService(const wchar_t*s) {
+    ++wfp_removals; live_policy=0; return TRUE;
 }
 static BOOL Security_RemoveFirewallRulesByExePath(const wchar_t*p) {
     assert(!wcscmp(p,L"agent.exe")); ++path_removals; return TRUE;
@@ -125,6 +132,35 @@ static void test_refresh(void) {
     assert(!ServiceDeploy_RefreshFirewallRulesWithRetry(L"svc",L"host.exe",L"agent.exe"));
     assert(removals==3 && additions==9 && convergence_checks==3 && step==0);
     puts("PASS: retaining valid WFP does not hide ordinary firewall repair failure");
+    // Label-only drift is invalid to the new verifier, but the old rules still
+    // work. Every failed replacement must retain that committed policy.
+    for(fail_step=1;fail_step<=7;++fail_step) {
+        live_policy=1; existing_valid=0; ordinary_valid=repair_ok=1; convergence_ok=0;
+        removals=path_removals=additions=convergence_checks=0; step=aborts=closes=0;
+        assert(!ServiceDeploy_RefreshFirewallRulesWithRetry(L"svc",L"host.exe",L"agent.exe"));
+        assert(live_policy==1 && wfp_removals==0 && removals==3);
+    }
+    live_policy=1; fail_step=0; step=0; existing_valid=0;
+    ordinary_valid=repair_ok=convergence_ok=1;
+    assert(ServiceDeploy_RefreshFirewallRulesWithRetry(L"svc",L"host.exe",L"agent.exe"));
+    assert(live_policy==2 && wfp_removals==0);
+    puts("PASS: label migration retains working WFP on every replacement failure and changes it only at commit");
+    assert(Security_RemoveFirewallRuleForService(L"svc") && wfp_removals==1 && live_policy==0);
+    ordinary_cleanup_ok=0;live_policy=1;
+    assert(!Security_RemoveFirewallRuleForService(L"svc") && wfp_removals==2 && live_policy==0);
+    puts("PASS: uninstall still removes WFP even when ordinary-rule cleanup fails");
+    // A failed historical-label rename must not skip check/repair.
+    ordinary_cleanup_ok=1; migrate_ok=0; migrations=0; live_policy=2; fail_step=0; step=0;
+    existing_valid=ordinary_valid=repair_ok=convergence_ok=1;
+    removals=path_removals=additions=convergence_checks=0;
+    assert(ServiceDeploy_RefreshFirewallRulesWithRetry(L"svc",L"host.exe",L"agent.exe"));
+    assert(migrations==1 && removals==0 && additions==0 && wcsstr(last_log,L"branding migration failed"));
+    ordinary_valid=0;
+    assert(ServiceDeploy_RefreshFirewallRulesWithRetry(L"svc",L"host.exe",L"agent.exe"));
+    assert(migrations==2 && removals==1 && additions==3 && convergence_checks==1);
+    migrate_ok=1;
+    puts("PASS: a failed label rename still checks and repairs firewall rules");
+
 }
 '''
 TESTS = r'''
@@ -327,7 +363,8 @@ def main():
     fixture = args.out / 'probe.c'
     deployment = (ROOT / 'meshservice/service_deployment.c').read_text()
     fixture.write_text(PRELUDE + extract(source, 'Security_AddWfpHardPermitForApp') +
-                       DEPLOY_PRELUDE + extract(deployment, 'ServiceDeploy_DoFirewallRulesMatch') +
+                       DEPLOY_PRELUDE + extract(source, 'Security_RemoveFirewallRuleForService') +
+                       extract(deployment, 'ServiceDeploy_DoFirewallRulesMatch') +
                        extract(deployment, 'ServiceDeploy_RefreshFirewallRulesWithRetry') +
                        DEPLOY_TESTS + TESTS)
     run_fixture(args, fixture, 'probe')

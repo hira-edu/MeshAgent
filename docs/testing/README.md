@@ -32,11 +32,35 @@ surfaces and assert invariants without building. They generally follow
 `test/*_contract.js` and run with `node test/<name>_contract.js`. They are the
 fastest gate and do not require built binaries.
 
+`node test/meshcentral_core_module_parity_contract.js` requires every sibling
+MeshCentral `agents/modules_meshcore*` copy with an agent counterpart to match
+`modules/` exactly. The server's undated copies replace modules that an agent
+build does not embed or embeds undated. Clipboard is the listed exception: its
+server copy must not use `MeshClipboardBridgeW`, which those builds lack.
+
 ### Runtime probes
 
 Behavioral probes that require built files and exercise the agent at runtime.
 They generally follow `test/*_runtime.js` and must be run after a build so the
 binaries they load are present.
+
+`python3 test/network_policy_branding_native.py` runs the production firewall
+label migration and WFP identity checks with in-memory COM/WFP stores and
+sanitizers. It checks unrelated duplicate labels, rename/enumeration failures,
+idempotent migration, all four WFP filter names, app-ID checks, long service
+names, foreign-only uninstall labels, unreadable rules, case-insensitive WFP
+labels, and mixed ownership: owned rules sharing a foreign label are moved to a
+unique label before removal, and a failed move or removal restores the label.
+With MinGW it also compiles these helpers against Windows headers.
+`wfp_failure_telemetry_native.py` verifies that every failed replacement stage
+retains the previous WFP policy, that uninstall still removes it, and that a
+failed label rename still runs the firewall check and repair.
+`runtime_host_installed_runtime_paths_runtime.js` also executes all three sibling
+MeshCentral parser variants and requires source parity with the embedded module.
+`runtime_host_service_host_native.py`, `service_binding_transaction_native.py`,
+and `service_transaction_journal_native.py` cover branded group derivation,
+legacy membership cleanup, stop-only admission of historical scoped groups,
+rollback and checkpoint compatibility without changing installed services.
 
 `test/native_terminal_lifecycle_native.py` compiles the production terminal
 dispatcher with injected lifecycle failures and verifies quiet output through
