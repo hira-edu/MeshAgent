@@ -541,6 +541,29 @@ viewer's last position, unless another viewer still holds that button.
   end a press of the same button that the local user started after the departing
   viewer's press.
 
+On the agent side, when a remote desktop session ends (the last viewer tunnel
+closes, or the server-to-agent link drops), the Windows and Linux agents release
+each mouse button that session delivered and did not release. They send it at
+the session's last position, to the input helper, before the helper is stopped.
+
+- The agents record only presses they delivered, and never read the physical
+  button state.
+- On Windows, the release goes only over a live helper bridge in the same Windows
+  session that received the press. A press from before a session switch is
+  forgotten, not released into the new session.
+- Buttons another live remote-desktop session in that Windows session still holds
+  are kept.
+- On Linux, the agent waits up to 250 ms for the helper to read the release
+  before stopping it.
+- Not covered:
+  - the in-process console backend;
+  - the legacy stdin helper path;
+  - a helper that is not attached when the session ends;
+  - one viewer leaving while other unmultiplexed viewers stay. All of a device's
+    viewer tunnels feed one agent session, so that case is handled only by the
+    server multiplexer.
+- macOS releases held input at session end on its own.
+
 ### Files and tests
 
 The fork-owned files are:

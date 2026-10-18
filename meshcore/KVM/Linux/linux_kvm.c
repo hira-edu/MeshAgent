@@ -21,6 +21,7 @@ limitations under the License.
 #include "microstack/ILibAsyncServerSocket.h"
 #include "microstack/ILibProcessPipe.h"
 #include <sys/wait.h>
+#include <sys/ioctl.h>
 #include <limits.h>
 #include <time.h>
 
@@ -36,6 +37,7 @@ limitations under the License.
 #endif
 
 #include "linux_events.h"
+#include "meshcore/KVM/kvm_pointer_release.h"
 #include "linux_compression.h"
 
 #define EXIT_SUCCESS 0
@@ -127,6 +129,8 @@ int g_shutdown = 0;
 int change_display = 0;
 pid_t g_slavekvm = 0;
 int master2slave[2];
+// Mouse buttons this session handed to the slave and has not released (see kvm_cleanup).
+static KvmPointerTrack g_injectedPointer;
 int slave2master[2];
 char CURRENT_XDISPLAY[256];
 int CURRENT_DISPLAY_ID = -1;
@@ -796,6 +800,7 @@ int kvm_relay_feeddata(char* buf, int len)
 
 	if (written == -1) return 0;
 	if (len != (int)written) return written;
+	kvm_pointer_track_packet(&g_injectedPointer, buf, len);
 	return len;
 }
 
@@ -1531,9 +1536,22 @@ void kvm_cleanup()
 
 	if (master2slave[1] != 0 && g_slavekvm != 0) 
 	{ 
+		// Release what this session pressed and did not release, at its last position, before the
+		// slave goes: an XTest press outlives the client that made it. The slave sends no reply, so
+		// wait (at most 250 ms) until it has read the pipe; it injects what it reads before it next
+		// checks for SIGTERM. The physical button state is never read. Not delivered if the slave is
+		// mid display change (it drops input then) or does not read within the wait.
+		char packets[KVM_POINTER_RELEASE_MAX_PACKETS][KVM_POINTER_RELEASE_PACKET_SIZE];
+		int count = kvm_pointer_track_release_packets(&g_injectedPointer, 0, packets), i, queued = 0, waitedMs = 0;
+		for (i = 0; i < count; ++i)
+		{
+			if (write(master2slave[1], packets[i], KVM_POINTER_RELEASE_PACKET_SIZE) != KVM_POINTER_RELEASE_PACKET_SIZE) { break; }
+		}
+		while (count > 0 && waitedMs < 250 && ioctl(master2slave[1], FIONREAD, &queued) == 0 && queued > 0) { usleep(10000); waitedMs += 10; }
 		kill(g_slavekvm, SIGTERM); 
 		waitpid(g_slavekvm, &code, 0);
 		g_slavekvm = 0; 
 	}
+	kvm_pointer_track_reset(&g_injectedPointer);
 	g_totalRestartCount = 0;
 }

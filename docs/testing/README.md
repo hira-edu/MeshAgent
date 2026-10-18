@@ -481,6 +481,22 @@ These checks read the sibling `../MeshCentral` checkout and its installed
   double-click and wheel packets are not counted as presses. It also checks that
   the release still reaches a busy agent before it is closed, and that nothing
   is sent to an agent that is going away.
+- `python3 test/kvm_pointer_release_native.py` unit-tests the agent's
+  pointer-release tracker (`meshcore/KVM/kvm_pointer_release.h`) under ASan and
+  UBSan.
+- `python3 test/windows_kvm_pointer_release_native.py` and
+  `python3 test/linux_kvm_pointer_release_native.py` run the Windows relay's and
+  the Linux master's release functions, extracted from the sources, against a
+  recording bridge and a real pipe. They check:
+  - the release at session end;
+  - that no release goes into a different Windows session;
+  - that buttons held elsewhere are kept;
+  - the first failed write stops the release;
+  - the bounded Linux wait.
+- `test/kvm_pointer_release_contract.js` pins where both masters track and
+  release.
+
+  None of these replaces a built agent's runtime probe on Windows and Linux.
 - `test/meshcentral_trackpad_licence_contract.js` keeps the Apache Guacamole and
   Chromium attribution in the engine header and in `THIRD_PARTY_NOTICES.txt`.
 

@@ -23,6 +23,7 @@ limitations under the License.
 #include "tile.h"
 #include <signal.h>
 #include "input.h"
+#include "meshcore/KVM/kvm_pointer_release.h"
 #include <Winuser.h>
 
 #include "meshcore/meshdefines.h"
@@ -377,6 +378,10 @@ typedef struct KvmRelayContext
 	ULONGLONG parkedTickMs;
 	char lingerTimerToken;
 	struct KvmRelayProcessUser* processUser;
+	// Mouse buttons this session delivered to its helper and has not released, and the Windows
+	// session that received the presses (see kvm_relay_release_injected_pointer).
+	KvmPointerTrack injectedPointer;
+	DWORD injectedPointerSessionId;
 }KvmRelayContext;
 
 #define KVM_MAX_RELAY_CONTEXTS 16
@@ -4310,6 +4315,68 @@ typedef struct kvm_data_handler
 
 // Feed network data into the KVM. Return the number of bytes consumed.
 // This method consumes as many input commands as it can.
+// Record a MOUSE packet the helper has been given, so the session's end can release what it pressed.
+// The Windows session is stamped when the first button goes down. Presses made in another session
+// (the helper has since moved, for example after a console switch) are forgotten instead of being
+// carried into the new one, where releasing them would be a stray up.
+static void kvm_relay_note_injected_pointer(KvmRelayContext* ctx, char* buf, int len)
+{
+	unsigned char before;
+
+	if (ctx == NULL) { return; }
+	before = ctx->injectedPointer.held;
+	if (before != 0 && ctx->injectedPointerSessionId != ctx->processSessionId)
+	{
+		kvm_pointer_track_reset(&ctx->injectedPointer);
+		before = 0;
+	}
+	if (kvm_pointer_track_packet(&ctx->injectedPointer, buf, len) && before == 0 && ctx->injectedPointer.held != 0)
+	{
+		ctx->injectedPointerSessionId = ctx->processSessionId;
+	}
+}
+
+// Called with the relay lock held when a remote desktop session ends: release, at the last delivered
+// position, each mouse button this session pressed and did not release, unless another live session
+// in the same Windows session still holds it. The ups go only over a live bridge to a helper still in
+// the session that received the presses; anywhere else they would be stray releases. The physical
+// button state is never read; but SendInput's up is a logical release for the whole Windows session,
+// so it also ends a press of the same button the local user started meanwhile.
+// Limits: the position is replayed in the helper's current scale and display, so a later scaling or
+// display change moves the drop point (not the release); a move the bridge dropped under backpressure
+// can leave the position one move behind; a stalled helper adds up to one input-write timeout to the
+// cleanup, after which the existing teardown proceeds. Not covered: the in-process console backend,
+// the legacy stdin path, and a helper that is not attached when the session ends.
+static void kvm_relay_release_injected_pointer(KvmRelayContext* ctx)
+{
+	char packets[KVM_POINTER_RELEASE_MAX_PACKETS][KVM_POINTER_RELEASE_PACKET_SIZE];
+	unsigned char elsewhere = 0;
+	int i, count;
+
+	if (ctx == NULL || ctx->injectedPointer.held == 0) { return; }
+	for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i)
+	{
+		KvmRelayContext* other = gKvmRelayContexts[i];
+		if (other != NULL && other != ctx && other->injectedPointerSessionId == ctx->injectedPointerSessionId) { elsewhere |= other->injectedPointer.held; }
+	}
+	if (InterlockedCompareExchange(&ctx->childUsesBridge, 0, 0) != 0 &&
+		InterlockedCompareExchange(&ctx->bridgeTransportAttached, 0, 0) != 0 &&
+		ctx->processSessionId == ctx->injectedPointerSessionId)
+	{
+		count = kvm_pointer_track_release_packets(&ctx->injectedPointer, elsewhere, packets);
+		for (i = 0; i < count; ++i)
+		{
+			if (!kvm_relay_write_bridge_input(ctx, packets[i], KVM_POINTER_RELEASE_PACKET_SIZE))
+			{
+				kvm_trace_startupf("injected mouse release at session end failed error=%lu", (unsigned long)GetLastError());
+				break;
+			}
+			kvm_trace_startupf("released injected mouse button 0x%02x at session end", (unsigned int)(unsigned char)packets[i][5]);
+		}
+	}
+	kvm_pointer_track_reset(&ctx->injectedPointer);
+}
+
 int kvm_relay_feeddata(char* buf, int len, ILibKVM_WriteHandler writeHandler, void *reserved)
 {
 	KvmRelayContext* ctx = NULL;
@@ -4368,6 +4435,7 @@ int kvm_relay_feeddata(char* buf, int len, ILibKVM_WriteHandler writeHandler, vo
 					consumed = kvm_relay_prepare_bridge_respawn_from_input(ctx, buf, len, "write-failed", writeError) ? len : 0;
 					goto finish;
 				}
+				kvm_relay_note_injected_pointer(ctx, buf, len);
 			}
 			else if (!kvm_relay_input_is_replayable_after_respawn(buf, len) || !kvm_relay_cache_control_packet(ctx, buf, len))
 			{
@@ -6550,6 +6618,7 @@ void kvm_cleanup(void *reserved)
 		kvm_relay_unlock();
 		return;
 	}
+	kvm_relay_release_injected_pointer(ctx);
 	lingerSeconds = kvm_get_helper_linger_seconds();
 	if (lingerSeconds != 0 && kvmConsoleMode == 0 &&
 		(ctx->childProcess != NULL || (ctx == gKvmActiveContext && gChildProcess != NULL)) &&
