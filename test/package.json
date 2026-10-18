@@ -1,0 +1,8 @@
+{
+  "name": "meshagent-viewer-tests",
+  "private": true,
+  "description": "Test-only tooling for the browser viewer tests; never installed by deployment.",
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

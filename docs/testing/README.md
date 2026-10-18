@@ -407,6 +407,42 @@ An install command failure fails the phase even if the old service is healthy.
 
 `test/run_umh_playwright.js` covers the desktop and mobile UMH fixtures.
 
+### Viewer pointer input
+
+These checks read the sibling `../MeshCentral` checkout and its installed
+`node_modules/meshcentral`.
+
+- `test/meshcentral_desktop_pointer_baseline_runtime.js` runs the fork's
+  `agent-desktop-0.0.2.js` and `-min.js` in a Node VM. It drives desktop mouse
+  input, plus the touch and trackpad handlers sliced from the pinned upstream
+  `default3` and `default-mobile` views, with a fake DOM and clock. It compares
+  every mouse packet with the recorded traces, including known defects that must
+  not change by accident.
+- `test/meshcentral_trackpad_default3_coupling_contract.js` and
+  `test/meshcentral_trackpad_default_mobile_coupling_contract.js` pin the view
+  globals, element ids, canvas markups, lifecycle hooks and detection markers the
+  trackpad adapters depend on.
+- `test/meshcentral_viewer_min_build_contract.js` requires the served
+  `agent-desktop-0.0.2-min.js` to equal the output of
+  `../MeshCentral/scripts/build-viewer-min.js`.
+
+The baseline and both contracts are pinned to one MeshCentral version and fail
+when another version is installed. To upgrade:
+1. Review the upstream view changes.
+2. Rerun the baseline with `--print`.
+3. Update its traces and the pinned version.
+4. Adjust the contracts.
+
+`test/meshcentral_viewer_touch_harness_runtime.js` checks the browser event
+ordering the adapters rely on:
+- in Chromium with CDP multi-touch;
+- in WebKit with dispatched touch-typed events (desktop WebKit has no `Touch`
+  constructor), which cover DOM dispatch order but not WebKit's tap-to-mouse
+  conversion.
+
+It uses the Playwright version pinned in `test/package.json`. Set it up with
+`npm ci --prefix test`, then `npx --prefix test playwright install chromium webkit`.
+
 ### Release gates
 
 `test/release_signing_bundle_gate.js` and `test/release_bundle_gate.js` are the
