@@ -410,6 +410,16 @@ CORE_ARTIFACTS = {
         "remote_relative_path": "scripts/agent-desktop-trackpad-mobile-0.0.1.js",
         "publish_targets": ("module-public", "web-public"),
     },
+    "public/scripts/agent-desktop-trackpad-sharing-mobile-0.0.1.js": {
+        "local_path": "../MeshCentral/public/scripts/agent-desktop-trackpad-sharing-mobile-0.0.1.js",
+        "remote_relative_path": "scripts/agent-desktop-trackpad-sharing-mobile-0.0.1.js",
+        "publish_targets": ("module-public", "web-public"),
+    },
+    "public/scripts/agent-desktop-trackpad-sharing-0.0.1.js": {
+        "local_path": "../MeshCentral/public/scripts/agent-desktop-trackpad-sharing-0.0.1.js",
+        "remote_relative_path": "scripts/agent-desktop-trackpad-sharing-0.0.1.js",
+        "publish_targets": ("module-public", "web-public"),
+    },
     "public/scripts/THIRD_PARTY_NOTICES.txt": {
         "local_path": "../MeshCentral/THIRD_PARTY_NOTICES.txt",
         "remote_relative_path": "scripts/THIRD_PARTY_NOTICES.txt",

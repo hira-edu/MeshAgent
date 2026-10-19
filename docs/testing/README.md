@@ -418,10 +418,13 @@ These checks read the sibling `../MeshCentral` checkout and its installed
   `default3` and `default-mobile` views, with a fake DOM and clock. It compares
   every mouse packet with the recorded traces, including known defects that must
   not change by accident.
-- `test/meshcentral_trackpad_default3_coupling_contract.js` and
-  `test/meshcentral_trackpad_default_mobile_coupling_contract.js` pin the view
-  globals, element ids, canvas markups, lifecycle hooks and detection markers the
-  trackpad adapters depend on.
+- `test/meshcentral_trackpad_default3_coupling_contract.js`,
+  `test/meshcentral_trackpad_default_mobile_coupling_contract.js`,
+  `test/meshcentral_trackpad_sharing_mobile_coupling_contract.js` and
+  `test/meshcentral_trackpad_sharing_coupling_contract.js` pin the view globals,
+  element ids, canvas markups, lifecycle hooks and detection markers the trackpad
+  adapters depend on. The guest pages' contracts also pin where their adapters
+  add the trackpad toggle, and what it looks like.
 - `test/meshcentral_viewer_min_build_contract.js` requires the served
   `agent-desktop-0.0.2-min.js` to equal the output of
   `../MeshCentral/scripts/build-viewer-min.js`.
@@ -438,7 +441,9 @@ These checks read the sibling `../MeshCentral` checkout and its installed
   `ReleaseAllPointerButtons`, `GetRemoteGeometry`) packet by packet on both
   assets, and drives it from the trackpad engine end to end.
 - `test/meshcentral_trackpad_adapter_runtime.js` runs the trackpad controller and
-  both view adapters in Chromium (real multi-touch through CDP) and WebKit.
+  the four view adapters (Modern UI, classic mobile, and the guest share pages
+  for phones and for desktop browsers) in Chromium (real multi-touch through CDP)
+  and WebKit.
   The fixtures use each pinned view's exact canvas markup and its own touch,
   mouse and trackpad code, with the real `agent-desktop` module recording
   packets. The test checks that:
@@ -461,10 +466,29 @@ These checks read the sibling `../MeshCentral` checkout and its installed
   - turning trackpad on stops the page's edge-scroll interval;
   - a WebRTC module switch releases on the old module;
   - a pinch keeps its landing point on a scrolled page;
-  - uninstall removes every listener it added.
+  - a pinch in Modern UI fit mode switches to native zoom from the fit size,
+    keeps the picture point under the fingers on a letterboxed canvas, keeps the
+    screen's shape on a stretched one, and zooms out no further than the fit
+    size, for that screen size only;
+  - the view follows the pointer in native zoom, in classic and guest
+    fullscreen, and with the browser itself pinch-zoomed (Chromium page scale)
+    without scrolling the page;
+  - with the classic or guest top menu open, a tap only closes it;
+  - the arrow is sized like the remote pointer at the current zoom, within its
+    on-screen bounds;
+  - the guest page's trackpad button shows only in fullscreen with input
+    allowed, leaving fullscreen turns the mode off, and a view-only link or the
+    terminal panel offers nothing;
+  - the desktop guest page's Trackpad checkbox sits after Input, turns the mode
+    on and off, and is offered only on a touch device with a connected,
+    input-capable viewer on a link that is not view-only; the canvas the page
+    puts in on connect is still owned, a WebRTC switch releases on the old
+    module, and its 1:1 view mode scrolls `#DeskParent` after the pointer;
+  - uninstall removes every listener and element it added.
 - `test/meshcentral_trackpad_loader_runtime.js` runs the trackpad loader block of
   `custom.js` on the fixture pages, served from a routed origin, in Chromium and
-  WebKit. It checks that:
+  WebKit. These checks serve the loader with every default forced off. They check
+  that:
   - with the flag off nothing is loaded or registered;
   - `?trackpadengine=on|off|default` sets the per-browser flag for each page kind;
   - the engine, controller and adapter load in order and install;
@@ -472,9 +496,14 @@ These checks read the sibling `../MeshCentral` checkout and its installed
     hides the overlay; a WebRTC soft desktop coming up mid-drag releases on the
     old module and places the pointer once it knows its screen; another desktop
     module's state changes do not reach the controller;
-  - the guest share page, which has no trackpad mode, loads nothing;
+  - each guest share page has its own flag and loads its own adapter, and the
+    main desktop UI, which lacks the share link's `viewOnly`, loads nothing;
   - a failed script load leaves trackpad mode to the page and stops observing
     new modules.
+
+  A last check serves the loader as shipped. Each page kind loads its adapter
+  exactly when its `DEFAULT_ON` entry is `true`, `?trackpadengine=off` still
+  turns it off, and the main desktop UI loads nothing.
 - `test/meshcentral_multiplex_button_release_runtime.js` drives the real desktop
   multiplexer. It checks that a departing viewer's held buttons are released at
   its last position, unless another viewer holds them, and that view-only,
@@ -500,7 +529,7 @@ These checks read the sibling `../MeshCentral` checkout and its installed
 - `test/meshcentral_trackpad_licence_contract.js` keeps the Apache Guacamole and
   Chromium attribution in the engine header and in `THIRD_PARTY_NOTICES.txt`.
 
-The baseline and both contracts are pinned to one MeshCentral version and fail
+The baseline and the four contracts are pinned to one MeshCentral version and fail
 when another version is installed. To upgrade:
 1. Review the upstream view changes.
 2. Rerun the baseline with `--print`.

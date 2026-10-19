@@ -474,19 +474,39 @@ own gesture engine:
 - in the Modern UI page (`default3`) on touch devices;
 - in the classic mobile page (`default-mobile`) in fullscreen.
 
+The guest desktop share page for phones (`sharing-mobile`) has no upstream
+trackpad mode. With its flag on, the fork adds the classic page's trackpad
+button to the guest page's fullscreen buttons. As on the classic page, the
+button shows only in fullscreen with input allowed, and leaving fullscreen turns
+the mode off. A view-only share link never offers it.
+
+The guest share page for desktop browsers (`sharing`, also what iPadOS gets by
+default) has no upstream touch handling or trackpad mode. With its flag on, the
+fork adds a "Trackpad" checkbox after the page's "Input" checkbox. It is offered
+only on a touch device, on a link that is not view-only, while a viewer that is
+not Intel AMT is connected with input not stopped. Losing any of these turns the
+mode off. Unchecking "Input" blocks the trackpad, as it blocks the mouse.
+A touchscreen laptop counts as a touch device, and only its touches use the
+trackpad. While another panel of the page is shown, the pointer arrow is hidden.
+
 ### Turning it on
 
-- The replacement is off by default. Each page kind has its own per-browser
-  flag, stored in `localStorage` as `meshTrackpadEngine.default3` and
-  `meshTrackpadEngine.defaultMobile`.
+- The replacement is on by default for every page kind. Each page kind has its
+  own per-browser flag, stored in `localStorage` as `meshTrackpadEngine.default3`,
+  `meshTrackpadEngine.defaultMobile`, `meshTrackpadEngine.sharingMobile` and
+  `meshTrackpadEngine.sharing`.
 - Open a desktop page with `?trackpadengine=on` to turn it on for that browser
   and page kind, `?trackpadengine=off` to turn it off, or `?trackpadengine=default`
   to return to the default.
 - The defaults are `DEFAULT_ON` in the loader block of
-  `MeshCentral/public/scripts/custom.js`.
+  `MeshCentral/public/scripts/custom.js`. Setting a page kind's entry to `false`
+  rolls that page back to its own behaviour for every browser without a
+  per-browser flag.
+- The flag only loads the replacement. Trackpad mode itself stays off until the
+  user turns it on in the page.
 - With the flag off, the page loads none of the trackpad scripts and nothing
-  listens to its touches. Pages without a trackpad mode (including the guest
-  share pages) never load them.
+  listens to its touches. Other pages, including the main desktop UI, never
+  load them.
 - If a trackpad script fails to load, the page keeps its own trackpad mode.
 
 ### What it does when on
@@ -504,13 +524,28 @@ follows:
 | Two-finger tap | Right click |
 | Three-finger tap | Middle click |
 | Two-finger drag | Wheel, one ±120 packet per notch |
-| Pinch (Modern UI native zoom only) | Local zoom |
+| Pinch (Modern UI only) | Local zoom. In fit mode, the first pinch switches to native zoom from the fit size. |
 
-- The pointer is drawn by a fork-owned overlay, and the view scrolls to keep it
-  in sight.
+- The pointer is drawn by a fork-owned overlay. It is sized like a 100%-scaled
+  Windows arrow in the remote picture at the current zoom, kept between 16 and
+  24 screen pixels tall.
+- As in an RDP client, when the pointer nears the edge of what is shown, the view
+  pans to keep it in sight: the page's scroller (Modern UI native zoom, classic
+  and phone guest fullscreen, the desktop guest page's 1:1 view mode), then the
+  browser's own pinch zoom. Panning the
+  browser's pinch zoom is checked in Chromium only.
+- A pinch keeps the picture point under the fingers in place, including the
+  first pinch from a letterboxed fit view, and keeps the remote screen's shape
+  when landscape fullscreen had stretched the fit view. Zooming out stops at the
+  fit size the pinch started from, while the remote screen size is unchanged.
+- The page resets native zoom to 1:1 on a window resize or rotation (for
+  example the on-screen keyboard), on entering fullscreen, and on a remote
+  resolution change, with or without trackpad mode.
+- While the classic or guest page's top menu is open, a tap on the desktop only
+  closes the menu, as it does without trackpad mode.
 - Enabling the mode, or a switch to the WebRTC soft desktop while it is on, sends
   one pointer move to the centre of the visible desktop once that viewer knows
-  the remote screen size. No click is sent. Both pages turn trackpad mode off
+  the remote screen size. No click is sent. Every page turns trackpad mode off
   when the connection drops.
 - A held button is released when any of these happens:
   - the mode or the Input toggle turns off;
@@ -569,7 +604,8 @@ the session's last position, to the input helper, before the helper is stopped.
 The fork-owned files are:
 - `agent-desktop-trackpad-0.0.1.js` (engine);
 - `-controller-0.0.1.js`;
-- `-default3-0.0.1.js` and `-mobile-0.0.1.js` (adapters).
+- `-default3-0.0.1.js`, `-mobile-0.0.1.js`, `-sharing-mobile-0.0.1.js` and
+  `-sharing-0.0.1.js` (adapters).
 
 They are published with `THIRD_PARTY_NOTICES.txt`. `agent-desktop-0.0.2`
 provides the remote-pixel pointer API they use (`SendRemotePointer`,

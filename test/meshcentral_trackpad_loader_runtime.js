@@ -3,7 +3,8 @@
 // localStorage and query strings behave as on the server. Checks that with the flag off nothing
 // is loaded or listened to, that ?trackpadengine= sets the per-browser, per-page flag, that the
 // engine, controller and the page's adapter load in order and install, and that viewer modules
-// created later report their state to the controller.
+// created later report their state to the controller. Those checks run the loader with every
+// page kind's default forced off; the shipped DEFAULT_ON values are checked separately.
 // Requires: npm ci --prefix test && npx --prefix test playwright install chromium webkit
 const assert = require('assert');
 const fs = require('fs');
@@ -14,6 +15,9 @@ const meshcentral = path.resolve(__dirname, '../../MeshCentral');
 const scripts = path.join(meshcentral, 'public/scripts');
 const ORIGIN = 'https://mesh.test';
 
+const KINDS = ['default3', 'defaultMobile', 'sharingMobile', 'sharing'];
+const DEFAULT_ON_LINE = /\n  var DEFAULT_ON = \{[^}\n]*\};\n/;
+
 function loaderSource() {
     const custom = fs.readFileSync(path.join(scripts, 'custom.js'), 'utf8').replace(/\r\n/g, '\n');
     const start = custom.indexOf('/*\n * Trackpad ("mouse pointer") mode engine loader.');
@@ -22,10 +26,25 @@ function loaderSource() {
     return custom.slice(start, end);
 }
 
-async function openContext(browser) {
+// The shipped per-kind defaults, read from the loader's DEFAULT_ON line.
+function shippedDefaults() {
+    const m = DEFAULT_ON_LINE.exec(loaderSource());
+    assert(m, 'the loader declares DEFAULT_ON on one line');
+    const d = Function('return ' + m[0].trim().replace(/^var DEFAULT_ON = /, '').replace(/;$/, ''))();
+    assert.deepStrictEqual(Object.keys(d).sort(), KINDS.slice().sort(), 'DEFAULT_ON names every page kind');
+    return d;
+}
+
+// options.shipped: serve the loader as shipped; otherwise with every default off.
+async function openContext(browser, options) {
     const context = await browser.newContext({ hasTouch: true, viewport: { width: 640, height: 400 } });
     const requested = [];
-    const fx = fixtures(), loader = loaderSource();
+    let loader = loaderSource();
+    if (!(options && options.shipped)) {
+        assert(DEFAULT_ON_LINE.test(loader), 'the loader declares DEFAULT_ON on one line');
+        loader = loader.replace(DEFAULT_ON_LINE, '\n  var DEFAULT_ON = { ' + KINDS.map(k => k + ': false').join(', ') + ' };\n');
+    }
+    const fx = fixtures();
     await context.route(ORIGIN + '/**', route => {
         const url = new URL(route.request().url());
         const name = url.pathname.split('/').pop();
@@ -34,9 +53,23 @@ async function openContext(browser) {
             return route.fulfill({ status: 200, contentType: 'text/html', body: page });
         }
         if (url.pathname === '/sharing-mobile') {
-            // The guest share page has p10desktop, DeskParent and fullscreenzoom, but no trackpad mode.
-            const page = fx.mobile.page.replace('<head>', '<head><script src="/scripts/custom.js"></script>').replace('        var trackpadMode = false;\n', '');
+            // The guest share page for phones: the classic page's markers and viewOnly, but no trackpad mode.
+            const page = fx.sharing.page.replace('<head>', '<head><script src="/scripts/custom.js"></script>');
             assert(!/var trackpadMode/.test(page));
+            return route.fulfill({ status: 200, contentType: 'text/html', body: page });
+        }
+        if (url.pathname === '/mobile-without-modes') {
+            // The classic page's markers with neither a trackpad mode nor a share link's viewOnly.
+            const page = fx.mobile.page.replace('<head>', '<head><script src="/scripts/custom.js"></script>').replace('        var trackpadMode = false;\n', '');
+            assert(!/var trackpadMode|viewOnly/.test(page));
+            return route.fulfill({ status: 200, contentType: 'text/html', body: page });
+        }
+        if (url.pathname === '/sharing' || url.pathname === '/main-desktop') {
+            // The guest share page for desktop browsers (and iPadOS); without viewOnly it has the
+            // main desktop UI's markers, which must load nothing.
+            let page = fx.desktopShare.page.replace('<head>', '<head><script src="/scripts/custom.js"></script>');
+            if (url.pathname === '/main-desktop') { page = page.replace('var viewOnly = 0;\n', ''); assert(!/var viewOnly/.test(page)); }
+            if (url.searchParams.get('noinput') === '1') { page = page.replace('id="DeskControlSpan"', 'id="OtherSpan"').replace("Q('DeskControl').checked = true;", ''); assert(!page.includes('id="DeskControlSpan"')); }
             return route.fulfill({ status: 200, contentType: 'text/html', body: page });
         }
         if (url.pathname === '/scripts/custom.js') return route.fulfill({ status: 200, contentType: 'application/javascript', body: loader });
@@ -226,12 +259,71 @@ async function scenarios(engine, browser) {
         } finally { await ctx.context.close(); }
     });
 
-    await record(engine, 'the guest share page, without a trackpad mode, loads nothing', async () => {
+    await record(engine, 'the guest share page for phones has its own flag and adapter', async () => {
         const ctx = await openContext(browser);
         try {
-            const { page, errors } = await visit(ctx, '/sharing-mobile?trackpadengine=on');
-            assert.deepStrictEqual(trackpadScripts(ctx.requested), []);
-            assert.strictEqual(await page.evaluate(() => window.localStorage.getItem('meshTrackpadEngine.defaultMobile')), null, 'a share link cannot set the flag');
+            let { page, errors } = await visit(ctx, '/sharing-mobile');
+            assert.deepStrictEqual(trackpadScripts(ctx.requested), [], 'off by default');
+            await page.close();
+            ({ page } = await visit(ctx, '/mobile?trackpadengine=on'));
+            await page.close();
+            ({ page } = await visit(ctx, '/sharing-mobile'));
+            assert.deepStrictEqual(trackpadScripts(ctx.requested), [], 'the classic page\'s flag does not enable the guest page');
+            await page.close();
+            ({ page, errors } = await visit(ctx, '/sharing-mobile?trackpadengine=on'));
+            assert.deepStrictEqual(trackpadScripts(ctx.requested), ['agent-desktop-trackpad-0.0.1.js', 'agent-desktop-trackpad-controller-0.0.1.js', 'agent-desktop-trackpad-sharing-mobile-0.0.1.js']);
+            assert.strictEqual(await page.evaluate(() => window.localStorage.getItem('meshTrackpadEngine.sharingMobile')), 'on');
+            assert.strictEqual(await page.evaluate(() => MeshTrackpad.kind), 'sharingMobile');
+            await connect(page);
+            await page.evaluate(() => MeshTrackpad.controller.evaluate());
+            assert.strictEqual(await page.evaluate(() => Q('meshTrackpadOn').style.display), 'block', 'the guest page offers trackpad mode in fullscreen');
+            await page.click('#toggle');
+            await page.waitForFunction(() => MeshTrackpad.controller.isActive(), null, { timeout: 2000 });
+            await page.evaluate(() => packets.length = 0);
+            await page.touchscreen.tap(60, 100); await page.waitForTimeout(400);
+            const after = await page.evaluate(() => ({ calls: calls.filter(c => /^d(touch|mouse)/.test(c)), packets: packets.slice() }));
+            assert.deepStrictEqual(after.calls, [], 'the controller owns the tap');
+            assert.deepStrictEqual(after.packets.map(p => p.slice(10, 12)), ['02', '04']);
+            assert.deepStrictEqual(errors, []);
+            await page.close();
+            ({ page } = await visit(ctx, '/mobile-without-modes?trackpadengine=on'));
+            assert.deepStrictEqual(trackpadScripts(ctx.requested), [], 'neither a trackpad mode nor a share page: nothing');
+        } finally { await ctx.context.close(); }
+    });
+
+    await record(engine, 'the desktop guest share page has its own flag and adapter; the main desktop UI loads nothing', async () => {
+        const ctx = await openContext(browser);
+        try {
+            let { page, errors } = await visit(ctx, '/sharing');
+            assert.deepStrictEqual(trackpadScripts(ctx.requested), [], 'off by default');
+            await page.close();
+            ({ page } = await visit(ctx, '/sharing-mobile?trackpadengine=on'));
+            await page.close();
+            ({ page } = await visit(ctx, '/sharing'));
+            assert.deepStrictEqual(trackpadScripts(ctx.requested), [], 'the phone guest page\'s flag does not enable it');
+            await page.close();
+            ({ page, errors } = await visit(ctx, '/sharing?trackpadengine=on'));
+            assert.deepStrictEqual(trackpadScripts(ctx.requested), ['agent-desktop-trackpad-0.0.1.js', 'agent-desktop-trackpad-controller-0.0.1.js', 'agent-desktop-trackpad-sharing-0.0.1.js']);
+            assert.strictEqual(await page.evaluate(() => window.localStorage.getItem('meshTrackpadEngine.sharing')), 'on');
+            assert.strictEqual(await page.evaluate(() => MeshTrackpad.kind), 'sharing');
+            await connect(page);
+            await page.evaluate(() => MeshTrackpad.controller.evaluate());
+            assert.notStrictEqual(await page.evaluate(() => Q('meshTrackpadLabel').style.display), 'none', 'the Trackpad checkbox is offered');
+            await page.click('#toggle');
+            await page.waitForFunction(() => MeshTrackpad.controller.isActive(), null, { timeout: 2000 });
+            await page.evaluate(() => packets.length = 0);
+            await page.touchscreen.tap(60, 100); await page.waitForTimeout(400);
+            const after = await page.evaluate(() => ({ calls: calls.filter(c => /^d(touch|mouse)/.test(c)), packets: packets.slice() }));
+            assert.deepStrictEqual(after.calls, [], 'the controller owns the tap');
+            assert.deepStrictEqual(after.packets.map(p => p.slice(10, 12)), ['02', '04']);
+            assert.deepStrictEqual(errors, []);
+            await page.close();
+            ({ page } = await visit(ctx, '/sharing?trackpadengine=on&noinput=1'));
+            assert.deepStrictEqual(trackpadScripts(ctx.requested), [], 'no Input checkbox to sit beside: nothing');
+            await page.close();
+            ({ page, errors } = await visit(ctx, '/main-desktop?trackpadengine=on'));
+            assert.deepStrictEqual(trackpadScripts(ctx.requested), [], 'no viewOnly: the main desktop UI has no adapter');
+            assert.deepStrictEqual(await page.evaluate(() => [typeof window.MeshTrackpad, typeof window.MeshDesktopModuleObservers]), ['undefined', 'undefined']);
             assert.deepStrictEqual(errors, []);
         } finally { await ctx.context.close(); }
     });
@@ -250,6 +342,32 @@ async function scenarios(engine, browser) {
             await page.touchscreen.tap(60, 60); await page.waitForTimeout(300);
             assert((await page.evaluate(() => calls.slice())).includes('dtouchstart'));
             assert.deepStrictEqual(errors, []);
+        } finally { await ctx.context.close(); }
+    });
+
+    await record(engine, 'the shipped defaults load each page kind\'s adapter, and ?trackpadengine=off still turns it off', async () => {
+        const defaults = shippedDefaults();
+        const pages = { default3: ['/default3', 'default3'], defaultMobile: ['/mobile', 'mobile'], sharingMobile: ['/sharing-mobile', 'sharing-mobile'], sharing: ['/sharing', 'sharing'] };
+        const ctx = await openContext(browser, { shipped: true });
+        try {
+            for (const kind of KINDS) {
+                const [route, adapter] = pages[kind];
+                let { page, errors } = await visit(ctx, route);
+                const expected = defaults[kind] ? ['agent-desktop-trackpad-0.0.1.js', 'agent-desktop-trackpad-controller-0.0.1.js', `agent-desktop-trackpad-${adapter}-0.0.1.js`] : [];
+                assert.deepStrictEqual(trackpadScripts(ctx.requested), expected, `${kind} by default`);
+                if (defaults[kind]) assert.strictEqual(await page.evaluate(() => MeshTrackpad.kind), kind);
+                assert.deepStrictEqual(errors, []);
+                await page.close();
+                ({ page } = await visit(ctx, route + '?trackpadengine=off'));
+                assert.deepStrictEqual(trackpadScripts(ctx.requested), [], `${kind} turned off for this browser`);
+                await page.close();
+                ({ page } = await visit(ctx, route + '?trackpadengine=default'));
+                assert.deepStrictEqual(trackpadScripts(ctx.requested), expected, `${kind} back to its default`);
+                await page.close();
+            }
+            const { page } = await visit(ctx, '/main-desktop');
+            assert.deepStrictEqual(trackpadScripts(ctx.requested), [], 'the main desktop UI loads nothing by default');
+            await page.close();
         } finally { await ctx.context.close(); }
     });
 }

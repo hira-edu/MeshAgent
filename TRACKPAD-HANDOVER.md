@@ -12,12 +12,12 @@ desktop viewer.
 
 - Phases 1–5 and the server-side button release (P1a) are on `main` in both
   hira-edu/MeshAgent and hira-edu/MeshCentral.
-- The agent-side button release (P1b) is on its own branch, waiting to be
-  built and tested on Windows.
-- The page flags default to off, so users see no change until a flag is
-  turned on.
-- None of this is deployed yet. The release coordinator has
-  `AUTO_DEPLOY=false`.
+- The agent-side button release (P1b) is merged into MeshAgent `main`, and
+  production agents run it. Its endpoint probes are still open (below).
+- The page flags default to on for all four page kinds, without the planned
+  opt-in soak. Users still turn trackpad mode on themselves in the page.
+- Production is updated with `deploy.py` from a Windows checkout. The release
+  coordinator has `AUTO_DEPLOY=false`.
 
 ## Where everything is
 
@@ -25,8 +25,8 @@ desktop viewer.
 |---|---|---|
 | MeshCentral `main` | `5646fea5` | 6 commits on `94f5d70d`:<br>• reproducible viewer min build<br>• gesture engine<br>• remote-pixel pointer API in `agent-desktop-0.0.2.js`<br>• controller and adapters<br>• `custom.js` loader<br>• multiplexer viewer-departure release (P1a) |
 | MeshAgent `main` | `12553cb9` (plus this file) | 6 commits on `25401cb2`: tests for each phase, `test/package.json` (Playwright 1.63.0), `deploy.py` publish entries, docs |
-| MeshAgent `trackpad/p1b-agent-release` | `c94bbf57` | P1b, one commit on top of `12553cb9`. **Not merged.** |
-| Both repos: `trackpad/phase1-safety-net` … `phase5-loader`, `p1a-viewer-release` | — | The stack from before the rebase, pushed for history. `main` has rebased copies of these commits. **Do not merge these branches into `main`.** |
+| MeshAgent `main` | — | P1b, then the zoom-follow, arrow size and guest-page tests and docs |
+| MeshCentral `main` | — | Zoom-follow, arrow size, both guest-page adapters, and every flag on by default |
 | MeshCentral `deps/meshcentral-1.2.6` | `471ff267` | The version bump branch. Only on the Mac, not pushed. On hold until 1.2.6 is published to npm. |
 
 ## What was built
@@ -47,19 +47,22 @@ desktop viewer.
     unchanged.
 - **Controller and adapters**: one shared controller
   (`agent-desktop-trackpad-controller-0.0.1.js`), plus one adapter for Modern
-  UI (`-default3-0.0.1.js`) and one for the classic mobile UI
-  (`-mobile-0.0.1.js`).
+  UI (`-default3-0.0.1.js`), one for the classic mobile UI
+  (`-mobile-0.0.1.js`) and one for the guest share page for phones
+  (`-sharing-mobile-0.0.1.js`), which adds the trackpad button that page lacks,
+  and one for the desktop guest share page iPadOS gets (`-sharing-0.0.1.js`),
+  which adds a Trackpad checkbox beside Input.
   - A capture-phase touch listener on `#DeskParent` owns the touch, so the
     page's own handlers and compatibility clicks never run.
   - Buttons are released on: mode off, Input off, dialogs, a hidden page,
     blur, a screen change, a module switch and disconnect.
 - **Loader** in `custom.js`, placed before the audio block. Each page has its
-  own flag, and both default to off.
+  own flag, and all four default to on.
 - **P1a** (`meshdesktopmultiplex.js`):
   - When a viewer leaves, the multiplexer sends a button-up for each button
     that viewer held and no other viewer holds, at the viewer's last position.
   - The queue drains before the agent is closed.
-- **P1b** (branch only): the Windows and Linux KVM masters track the buttons
+- **P1b**: the Windows and Linux KVM masters track the buttons
   they injected and release them when the session ends. The physical button
   state is never read.
 - **Docs**:
@@ -71,13 +74,12 @@ desktop viewer.
 
 ### Turning it on
 
-- **Per browser:** add `?trackpadengine=on` (or `off` / `default`) to the
-  page URL. This sets the localStorage key `meshTrackpadEngine.default3` or
-  `meshTrackpadEngine.defaultMobile`.
-- **As the default for a UI:** change that UI's entry in `DEFAULT_ON` in
-  `custom.js`. That is Stage 2 of the rollout.
+- **Per browser:** add `?trackpadengine=off` (or `on` / `default`) to the
+  page URL. This sets the localStorage key `meshTrackpadEngine.<kind>`.
+- **For everyone:** every entry in `DEFAULT_ON` in `custom.js` is `true`.
+  Setting one to `false` and deploying rolls that page kind back.
 
-## Next on Windows: build and probe P1b
+## P1b on Windows
 
 **Changed files:**
 
@@ -124,33 +126,30 @@ python test\linux_kvm_pointer_release_native.py
 | Press in one Windows session, switch sessions (lock and unlock, or switch user), then end the viewer | Nothing is released into the new session. |
 | `test/run_grouped_regression.js` (elevated, approved host) | Install, update and uninstall still pass. |
 
-When everything passes, merge `trackpad/p1b-agent-release` into `main` with a
-fast-forward or rebase. A push to `main` starts the release workflow, but
-nothing deploys while `AUTO_DEPLOY` is `false`. If a probe fails, fix it on the
-branch first.
+P1b is merged and deployed without these probes. The native harnesses pass;
+the grouped regression failed in its GUI install step. If a probe fails, fix it
+on `main`.
 
 ## Everything still pending
 
-1. **[Blocker] P1b Windows build, probes and grouped regression.** See above.
-   This is gate G5. Until it passes, trackpad mode stays opt-in only, because
-   production runs with `desktopmultiplex = true`.
-2. **[Blocker] P1b Linux probe under X.**
+1. **P1b Windows probes and grouped regression.** See above. This was gate
+   G5; the flags were turned on before it passed.
+2. **P1b Linux probe under X.**
    - `linux_kvm.c` writes the button-ups before it sends SIGTERM, then waits
      up to 250 ms for the slave to read them. It checks the pipe with
      `FIONREAD`.
    - The harness covers this with a real pipe, but it has never run against
      an X session.
-3. **Merge P1b into `main`**, after both probes pass.
-4. **Deploy to production.** Not done. Deploying is a separate, deliberate step
-   while `AUTO_DEPLOY=false`. With the flags off, a deploy changes nothing users
-   see. **Then delete this file.**
-5. **Real-device testing and tuning.**
+3. **Real-device testing and tuning.**
    - Devices:
      - iPhone Safari (iOS 18 and 26);
      - iPad with and without a trackpad;
      - an Android phone and tablet;
      - a Windows touchscreen laptop, which must stay on the direct path.
-   - Cover both UIs on each device.
+   - Cover both UIs and the guest share page on each device.
+   - Check that the view pans after the pointer with the browser itself
+     pinch-zoomed on iOS Safari; the browser tests cover only Chromium.
+   - Check the arrow size against the remote pointer at fit, 1:1 and zoomed in.
    - Agents:
      - Windows 10/11 with a single monitor, multiple monitors, mixed DPI, and
        a monitor at negative coordinates;
@@ -161,13 +160,10 @@ branch first.
      between a 150 and a 250 ms release delay.
    - Record the measured values in the change description, not in the
      repository.
-6. **Stage 1 opt-in soak, then Stage 2.**
-   - Each adapter goes through this on its own.
-   - Run a 14-day opt-in soak.
-   - Move to default-on only with zero confirmed stuck buttons, zero desktop or
-     direct-touch regressions, and no open device blockers.
-   - Roll back by turning that adapter's flag off.
-7. **MeshCentral 1.2.6 bump and re-pin.** When 1.2.6 is on npm, follow the
+4. **Watch the default-on rollout.** The opt-in soak was skipped. Roll a page
+   kind back by setting its `DEFAULT_ON` entry to `false` on any confirmed stuck
+   button or desktop/direct-touch regression.
+5. **MeshCentral 1.2.6 bump and re-pin.** When 1.2.6 is on npm, follow the
    `docs/DEPLOYMENT.md` upgrade gate:
    1. Run both coupling contracts.
    2. Review the upstream diff of the views' touch, trackpad, zoom and state
@@ -177,7 +173,7 @@ branch first.
    4. Then change the pin.
 
    The coupling tests currently pin 1.2.5.
-8. **Small independent fixes.**
+6. **Small independent fixes.**
    - `tools/meshcentral_viewer_asset_parity.js` reports a failure when files
      differ only in CRLF line endings. Normalise line endings before hashing
      (P7).
@@ -186,12 +182,13 @@ branch first.
    - Two MeshCentral tests already failed before this work:
      `tests/desktop-audio-relay.test.js` expects 1.2.1, and
      `tests/native-runtime.test.js:660` also fails.
-9. **v1.1 (deferred):**
+7. **v1.1 (deferred):**
    - remote cursor shapes (needs agent change P3);
    - right-button drag;
    - modifier-plus-gesture combinations;
    - pen handling;
-   - pinch in fit mode;
+   - pinch zoom on the classic and guest mobile pages (their zoom is a 1x / 0.5x
+     button);
    - remembering trackpad mode between sessions.
 
 ## Known limitations
@@ -205,9 +202,14 @@ branch first.
 - Every click's button-up arrives late by `clickReleaseDelayMs`.
 - The overlay is always an arrow. Agent-drawn and overlay cursors can both show.
 - The classic mobile UI only offers trackpad mode in fullscreen, as upstream
-  does, and has no pinch there.
+  does, and has no pinch there. The guest share page for phones follows it.
+- A pinch that switched Modern UI fit mode to native zoom stays in native zoom;
+  "Scale to Fit" in the menu returns to fit mode. Upstream resets native zoom
+  to 1:1 on any window resize or rotation (including the on-screen keyboard),
+  on entering fullscreen and on a remote resolution change.
 - iPadOS gets the classic desktop UI by default, which has no touch support.
-  iPad users need Modern UI.
+  iPad users need Modern UI. iPad guests get the desktop share page, which now
+  offers the Trackpad checkbox.
 
 ## Running the tests
 
@@ -226,14 +228,16 @@ npx playwright install chromium webkit
 |---|---|---|
 | `meshcentral_trackpad_engine_runtime.js` | Gesture table and the randomized property test | 40 + 100,000 runs |
 | `meshcentral_desktop_remote_pointer_runtime.js` | Viewer API packets, on both the full and min assets | 50 |
-| `meshcentral_trackpad_adapter_runtime.js` | Both adapters in Chromium and WebKit | 50 |
-| `meshcentral_trackpad_loader_runtime.js` | The `custom.js` loader and flags | 18 |
-| `meshcentral_trackpad_default3_coupling_contract.js` | Upstream coupling, Modern UI | 38 checks |
-| `meshcentral_trackpad_default_mobile_coupling_contract.js` | Upstream coupling, classic mobile | 36 checks |
+| `meshcentral_trackpad_adapter_runtime.js` | All four adapters in Chromium and WebKit, including follow and arrow size | 112 |
+| `meshcentral_trackpad_loader_runtime.js` | The `custom.js` loader, flags and shipped defaults | 22 |
+| `meshcentral_trackpad_default3_coupling_contract.js` | Upstream coupling, Modern UI | 40 checks |
+| `meshcentral_trackpad_default_mobile_coupling_contract.js` | Upstream coupling, classic mobile | 37 checks |
+| `meshcentral_trackpad_sharing_mobile_coupling_contract.js` | Upstream coupling, guest share for phones | 34 checks |
+| `meshcentral_trackpad_sharing_coupling_contract.js` | Upstream coupling, guest share for desktop browsers and iPad | 31 checks |
 | `meshcentral_desktop_pointer_baseline_runtime.js` | Packet traces of the unchanged mouse paths | 47 scenarios |
 | `meshcentral_multiplex_button_release_runtime.js` | P1a. Run it with no arguments: the first argument is read as a source path. | 12 |
 | `meshcentral_trackpad_licence_contract.js`, `meshcentral_viewer_min_build_contract.js`, `meshcentral_viewer_touch_harness_runtime.js`, `deploy_publish_paths_contract.js` | Licences, min-file rebuild, touch event order, deploy manifest | — |
-| `kvm_pointer_release_*` (P1b branch only) | Tracker unit test, extracted Windows and Linux functions, wiring contract | 3 + 15 checks |
+| `kvm_pointer_release_*` | Tracker unit test, extracted Windows and Linux functions, wiring contract | 3 + 15 checks |
 
 MeshCentral wrapper: `node --test tests/*.test.js` gives 142/145. The 2
 failures already existed before this work.
