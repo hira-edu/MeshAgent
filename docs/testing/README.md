@@ -487,7 +487,8 @@ These checks read the sibling `../MeshCentral` checkout and its installed
   - uninstall removes every listener and element it added.
 - `test/meshcentral_trackpad_loader_runtime.js` runs the trackpad loader block of
   `custom.js` on the fixture pages, served from a routed origin, in Chromium and
-  WebKit. It checks that:
+  WebKit. These checks serve the loader with every default forced off. They check
+  that:
   - with the flag off nothing is loaded or registered;
   - `?trackpadengine=on|off|default` sets the per-browser flag for each page kind;
   - the engine, controller and adapter load in order and install;
@@ -499,6 +500,10 @@ These checks read the sibling `../MeshCentral` checkout and its installed
     main desktop UI, which lacks the share link's `viewOnly`, loads nothing;
   - a failed script load leaves trackpad mode to the page and stops observing
     new modules.
+
+  A last check serves the loader as shipped. Each page kind loads its adapter
+  exactly when its `DEFAULT_ON` entry is `true`, `?trackpadengine=off` still
+  turns it off, and the main desktop UI loads nothing.
 - `test/meshcentral_multiplex_button_release_runtime.js` drives the real desktop
   multiplexer. It checks that a departing viewer's held buttons are released at
   its last position, unless another viewer holds them, and that view-only,

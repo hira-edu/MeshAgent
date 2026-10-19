@@ -491,15 +491,19 @@ trackpad. While another panel of the page is shown, the pointer arrow is hidden.
 
 ### Turning it on
 
-- The replacement is off by default. Each page kind has its own per-browser
-  flag, stored in `localStorage` as `meshTrackpadEngine.default3`,
+- The replacement is on by default for every page kind. Each page kind has its
+  own per-browser flag, stored in `localStorage` as `meshTrackpadEngine.default3`,
   `meshTrackpadEngine.defaultMobile`, `meshTrackpadEngine.sharingMobile` and
   `meshTrackpadEngine.sharing`.
 - Open a desktop page with `?trackpadengine=on` to turn it on for that browser
   and page kind, `?trackpadengine=off` to turn it off, or `?trackpadengine=default`
   to return to the default.
 - The defaults are `DEFAULT_ON` in the loader block of
-  `MeshCentral/public/scripts/custom.js`.
+  `MeshCentral/public/scripts/custom.js`. Setting a page kind's entry to `false`
+  rolls that page back to its own behaviour for every browser without a
+  per-browser flag.
+- The flag only loads the replacement. Trackpad mode itself stays off until the
+  user turns it on in the page.
 - With the flag off, the page loads none of the trackpad scripts and nothing
   listens to its touches. Other pages, including the main desktop UI, never
   load them.

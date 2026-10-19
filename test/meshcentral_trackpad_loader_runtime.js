@@ -3,7 +3,8 @@
 // localStorage and query strings behave as on the server. Checks that with the flag off nothing
 // is loaded or listened to, that ?trackpadengine= sets the per-browser, per-page flag, that the
 // engine, controller and the page's adapter load in order and install, and that viewer modules
-// created later report their state to the controller.
+// created later report their state to the controller. Those checks run the loader with every
+// page kind's default forced off; the shipped DEFAULT_ON values are checked separately.
 // Requires: npm ci --prefix test && npx --prefix test playwright install chromium webkit
 const assert = require('assert');
 const fs = require('fs');
@@ -14,6 +15,9 @@ const meshcentral = path.resolve(__dirname, '../../MeshCentral');
 const scripts = path.join(meshcentral, 'public/scripts');
 const ORIGIN = 'https://mesh.test';
 
+const KINDS = ['default3', 'defaultMobile', 'sharingMobile', 'sharing'];
+const DEFAULT_ON_LINE = /\n  var DEFAULT_ON = \{[^}\n]*\};\n/;
+
 function loaderSource() {
     const custom = fs.readFileSync(path.join(scripts, 'custom.js'), 'utf8').replace(/\r\n/g, '\n');
     const start = custom.indexOf('/*\n * Trackpad ("mouse pointer") mode engine loader.');
@@ -22,10 +26,25 @@ function loaderSource() {
     return custom.slice(start, end);
 }
 
-async function openContext(browser) {
+// The shipped per-kind defaults, read from the loader's DEFAULT_ON line.
+function shippedDefaults() {
+    const m = DEFAULT_ON_LINE.exec(loaderSource());
+    assert(m, 'the loader declares DEFAULT_ON on one line');
+    const d = Function('return ' + m[0].trim().replace(/^var DEFAULT_ON = /, '').replace(/;$/, ''))();
+    assert.deepStrictEqual(Object.keys(d).sort(), KINDS.slice().sort(), 'DEFAULT_ON names every page kind');
+    return d;
+}
+
+// options.shipped: serve the loader as shipped; otherwise with every default off.
+async function openContext(browser, options) {
     const context = await browser.newContext({ hasTouch: true, viewport: { width: 640, height: 400 } });
     const requested = [];
-    const fx = fixtures(), loader = loaderSource();
+    let loader = loaderSource();
+    if (!(options && options.shipped)) {
+        assert(DEFAULT_ON_LINE.test(loader), 'the loader declares DEFAULT_ON on one line');
+        loader = loader.replace(DEFAULT_ON_LINE, '\n  var DEFAULT_ON = { ' + KINDS.map(k => k + ': false').join(', ') + ' };\n');
+    }
+    const fx = fixtures();
     await context.route(ORIGIN + '/**', route => {
         const url = new URL(route.request().url());
         const name = url.pathname.split('/').pop();
@@ -323,6 +342,32 @@ async function scenarios(engine, browser) {
             await page.touchscreen.tap(60, 60); await page.waitForTimeout(300);
             assert((await page.evaluate(() => calls.slice())).includes('dtouchstart'));
             assert.deepStrictEqual(errors, []);
+        } finally { await ctx.context.close(); }
+    });
+
+    await record(engine, 'the shipped defaults load each page kind\'s adapter, and ?trackpadengine=off still turns it off', async () => {
+        const defaults = shippedDefaults();
+        const pages = { default3: ['/default3', 'default3'], defaultMobile: ['/mobile', 'mobile'], sharingMobile: ['/sharing-mobile', 'sharing-mobile'], sharing: ['/sharing', 'sharing'] };
+        const ctx = await openContext(browser, { shipped: true });
+        try {
+            for (const kind of KINDS) {
+                const [route, adapter] = pages[kind];
+                let { page, errors } = await visit(ctx, route);
+                const expected = defaults[kind] ? ['agent-desktop-trackpad-0.0.1.js', 'agent-desktop-trackpad-controller-0.0.1.js', `agent-desktop-trackpad-${adapter}-0.0.1.js`] : [];
+                assert.deepStrictEqual(trackpadScripts(ctx.requested), expected, `${kind} by default`);
+                if (defaults[kind]) assert.strictEqual(await page.evaluate(() => MeshTrackpad.kind), kind);
+                assert.deepStrictEqual(errors, []);
+                await page.close();
+                ({ page } = await visit(ctx, route + '?trackpadengine=off'));
+                assert.deepStrictEqual(trackpadScripts(ctx.requested), [], `${kind} turned off for this browser`);
+                await page.close();
+                ({ page } = await visit(ctx, route + '?trackpadengine=default'));
+                assert.deepStrictEqual(trackpadScripts(ctx.requested), expected, `${kind} back to its default`);
+                await page.close();
+            }
+            const { page } = await visit(ctx, '/main-desktop');
+            assert.deepStrictEqual(trackpadScripts(ctx.requested), [], 'the main desktop UI loads nothing by default');
+            await page.close();
         } finally { await ctx.context.close(); }
     });
 }
