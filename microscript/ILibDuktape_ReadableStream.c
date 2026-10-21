@@ -741,7 +741,9 @@ int ILibDuktape_readableStream_resume_flush(ILibDuktape_readableStream *rs)
 			if (writePaused != 0) { break; }
 		}
 		--rs->resumeFlushDepth;
-		return(rs->paused_data == NULL ? 0 : 1);
+		// The last chunk can re-pause the stream (a destination went congested again). That is not
+		// "flushed": callers must not resume the source until the destination drains.
+		return((rs->paused_data == NULL && rs->paused == 0) ? 0 : 1);
 	}
 }
 

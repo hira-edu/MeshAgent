@@ -322,6 +322,11 @@ immediate caller-buffer reuse must deliver every plaintext byte in order with
 correct ciphertext accounting. The probe uses Clang ASan/UBSan and the bundled
 OpenSSL libraries; it does not run an installed agent or use a remote endpoint.
 
+`python3 test/readable_stream_resume_flush_native.py` compiles the production
+readable-stream resume path with stubbed destinations on any POSIX host. When
+redelivering the last buffered chunk congests a destination again, the stream
+must stay paused and its source must not be resumed until the destination drains.
+
 `python test/wfp_failure_telemetry_native.py` injects WFP failures at each
 transaction stage and clobbers last-error during cleanup and logging. It checks
 original status retention, stage/filter identification, and transaction cleanup.
