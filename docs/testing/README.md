@@ -322,6 +322,10 @@ immediate caller-buffer reuse must deliver every plaintext byte in order with
 correct ciphertext accounting. The probe uses Clang ASan/UBSan and the bundled
 OpenSSL libraries; it does not run an installed agent or use a remote endpoint.
 
+`node test/tls_context_options_contract.js` rejects `SSL_MODE_*` flags passed to
+`SSL_CTX_set_options()` (in OpenSSL 3 those bits turn off Extended Master Secret)
+and any call that enables partial writes, which the TLS send path does not handle.
+
 `python3 test/readable_stream_resume_flush_native.py` compiles the production
 readable-stream resume path with stubbed destinations on any POSIX host. When
 redelivering the last buffered chunk congests a destination again, the stream
