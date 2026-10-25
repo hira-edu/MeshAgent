@@ -9,6 +9,8 @@ const SWITCH_TO_ACTION = new Map([
     ['-fullinstall', 'install'],
     ['-fullupdate', 'update'],
     ['-fulluninstall', 'uninstall'],
+    ['-restart', 'restart'],
+    ['--restart', 'restart'],
     ['-validate-install', 'validate-install'],
     ['--validate-install', 'validate-install'],
     ['-validate-update', 'validate-update'],
@@ -168,7 +170,8 @@ function commandFromLifecycleArgs(targetExe, args, options = {}) {
     let hostDll = sourceDll;
     if (action === 'uninstall') {
         hostDll = sourceDll || installedDll;
-    } else if (action === 'validate-install' ||
+    } else if (action === 'restart' ||
+        action === 'validate-install' ||
         action === 'validate-update' ||
         (action === 'validate-uninstall' && installedDll)) {
         hostDll = installedDll || sourceDll;

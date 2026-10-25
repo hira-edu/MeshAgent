@@ -1,4 +1,4 @@
-﻿/*
+/*
 Copyright 2020 Intel Corporation
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -961,7 +961,14 @@ function testServiceRestart()
         global.agentipc_next = nextp;
 
         console.log('      -> Restarting Service...');
-        ret.self.consoleCommand("service restart").catch(function (x)
+        ret.self.consoleCommand("service restart").then(function (reply)
+        {
+            var text = reply != null ? ('' + reply).trim() : '';
+            if (text.indexOf('Command returned an exception error:') >= 0 || text.indexOf('not allowed') >= 0)
+            {
+                finish(false, '         -> Restarted.....................[FAILED] ' + text);
+            }
+        }).catch(function (x)
         {
             // ignore, we will verify via status/IPC
         });
@@ -1026,7 +1033,7 @@ function testServiceRestart()
                 }
             }
 
-            if (sawNotRunning || sawPidChange || ((Date.now() - restartIssued) >= 8000))
+            if (sawNotRunning || sawPidChange || (initialPid == 0 && ((Date.now() - restartIssued) >= 8000)))
             {
                 finish(true);
                 return;

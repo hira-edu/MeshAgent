@@ -222,7 +222,8 @@ function main() {
     const embedded = {
         dispatcher: embeddedModuleSource(sources.polyfills, 'win-dispatcher'),
         processManager: embeddedModuleSource(sources.polyfills, 'process-manager'),
-        userConsent: embeddedModuleSource(sources.polyfills, 'win-userconsent')
+        userConsent: embeddedModuleSource(sources.polyfills, 'win-userconsent'),
+        serviceManager: embeddedModuleSource(sources.polyfills, 'service-manager')
     };
     const runtimeRuntimeHostProbeSources = [
         sources.kvmRuntimeHelpers,
@@ -1118,6 +1119,27 @@ function main() {
             sources.serviceManager.includes("throw (windowsServiceManagerLifecycleDisabledError('uninstall'));") &&
             sources.serviceManager.includes('Windows service-manager install is disabled. Use the rundll32 MeshLifecycleHostW manifest path.') &&
             sources.serviceManager.includes('Windows service-manager uninstall is disabled. Use the rundll32 MeshLifecycleHostW manifest path.'),
+        serviceManagerWindowsSelfRestartUsesLifecycleHost:
+            sources.runtimeHostContract.includes('#define MESH_LIFECYCLE_ACTION_RESTART_W      L"restart"') &&
+            sources.runtimeHostContract.includes('MESH_RUNTIME_HOST_LIFECYCLE_ACTION_RESTART') &&
+            sources.runtimeHostContractImpl.includes('action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_RESTART ||') &&
+            sources.runtimeHostContractImpl.includes('case MESH_RUNTIME_HOST_LIFECYCLE_ACTION_RESTART: return MESH_LIFECYCLE_ACTION_RESTART_W;') &&
+            sources.runtimeHostContractImpl.includes('else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_RESTART_W) == 0) { action = MESH_RUNTIME_HOST_LIFECYCLE_ACTION_RESTART; }') &&
+            sources.installer.includes('static BOOL ServiceDeploy_RunServiceRestart(void)') &&
+            sources.installer.includes('if (_wcsicmp(actionName, MESH_LIFECYCLE_ACTION_RESTART_W) == 0)') &&
+            sources.installer.includes('return ServiceDeploy_RunServiceRestart();') &&
+            sources.installer.includes('if (!ServiceDeploy_RecoverInterruptedTransaction() || !ServiceDeploy_SelectIncumbent())') &&
+            sources.installer.includes('!ServiceDeploy_SuspendServiceRecoveryRestarters()') &&
+            sources.agentcore.includes('static BOOL MeshAgent_RunNativeServiceRestart(') &&
+            sources.agentcore.includes('ILibDuktape_CreateInstanceMethod(ctx, "activateNativeRestart", ILibDuktape_MeshAgent_ActivateNativeRestart, DUK_VARARGS);') &&
+            sources.serviceManager.includes('function windowsRestartSelfViaLifecycleHost(service)') &&
+            sources.serviceManager.includes('windowsRestartSelfViaLifecycleHost(this);') &&
+            sources.serviceManager.includes('meshAgent.activateNativeRestart(serviceName);') &&
+            sources.serviceManager.includes("child = require('child_process').execFile(runtimeHostPath, [serviceDllPath + ',MeshLifecycleHostW', manifestPath], { type: 4, detached: true });") &&
+            !sources.serviceManager.includes('process.env.TEMP || process.env.TMP') &&
+            !sources.serviceManager.includes('Windows self restart through a command host is disabled in this build') &&
+            embedded.serviceManager.includes('windowsRestartSelfViaLifecycleHost(this);') &&
+            !embedded.serviceManager.includes('Windows self restart through a command host is disabled in this build'),
         windowsDaemonWrappersDisabled:
             sources.daemon.includes('function rejectWindowsDaemon(operation)') &&
             sources.daemon.includes("if (process.platform == 'win32')") &&

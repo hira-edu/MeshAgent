@@ -6164,6 +6164,80 @@ static BOOL ServiceDeploy_RunDelegatedUpdateRecovery(void)
     return FALSE;
 }
 
+static BOOL ServiceDeploy_RunServiceRestart(void)
+{
+    wchar_t serviceName[256] = {0};
+    ServiceInstallPaths paths;
+
+    if (!ServiceDeploy_RecoverInterruptedTransaction() || !ServiceDeploy_SelectIncumbent())
+    {
+        ServiceDeploy_LogInstallEvent(L"[RESTART] Refusing service restart while an interrupted update transaction remains unresolved");
+        return FALSE;
+    }
+    ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
+    if (serviceName[0] == L'\0')
+    {
+        ServiceDeploy_LogInstallEvent(L"[RESTART] Service name unavailable");
+        SetLastError(ERROR_INVALID_NAME);
+        return FALSE;
+    }
+    if (!ServiceDeploy_ServiceExists(serviceName))
+    {
+        ServiceDeploy_LogInstallEvent(L"[RESTART] Service %ls does not exist", serviceName);
+        SetLastError(ERROR_SERVICE_DOES_NOT_EXIST);
+        return FALSE;
+    }
+    ZeroMemory(&paths, sizeof(paths));
+    if (!ServiceDeploy_GetInstallPaths(&paths) ||
+        paths.dllPath[0] == L'\0' ||
+        !ServiceDeploy_VerifyServiceHostServiceBinding(serviceName, paths.dllPath))
+    {
+        ServiceDeploy_LogInstallEvent(L"[RESTART] Service %ls failed binding verification", serviceName);
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+
+    if (!ServiceDeploy_SuspendServiceRecoveryRestarters() ||
+        !ServiceDeploy_ClearServiceRecovery(serviceName))
+    {
+        DWORD suspendError = GetLastError();
+        ServiceDeploy_LogInstallEvent(L"[RESTART] Failed to suspend recovery restarters for %ls (error=%lu)", serviceName, suspendError);
+        (void)ServiceDeploy_ReconcileServiceRecovery();
+        SetLastError(suspendError != ERROR_SUCCESS ? suspendError : ERROR_GEN_FAILURE);
+        return FALSE;
+    }
+
+    ServiceDeploy_LogInstallEvent(L"[RESTART] Stopping service %ls for restart", serviceName);
+    if (!ServiceDeploy_StopServiceAndWait(serviceName, 30000, TRUE))
+    {
+        DWORD stopError = GetLastError();
+        ServiceDeploy_LogInstallEvent(L"[RESTART] Failed to stop service %ls (error=%lu)", serviceName, stopError);
+        (void)ServiceDeploy_ReconcileServiceRecovery();
+        (void)ServiceDeploy_StartServiceHostServiceAndWait(serviceName, 15000);
+        SetLastError(stopError != ERROR_SUCCESS ? stopError : ERROR_GEN_FAILURE);
+        return FALSE;
+    }
+
+    ServiceDeploy_LogInstallEvent(L"[RESTART] Starting service %ls after stop", serviceName);
+    if (!ServiceDeploy_StartServiceHostServiceAndWait(serviceName, 30000))
+    {
+        DWORD startError = GetLastError();
+        ServiceDeploy_LogInstallEvent(L"[RESTART] Failed to start service %ls (error=%lu)", serviceName, startError);
+        (void)ServiceDeploy_ReconcileServiceRecovery();
+        SetLastError(startError != ERROR_SUCCESS ? startError : ERROR_GEN_FAILURE);
+        return FALSE;
+    }
+
+    if (!ServiceDeploy_ReconcileServiceRecovery())
+    {
+        ServiceDeploy_LogInstallEvent(L"[WARN] [RESTART] Service recovery companions for %ls require later reconciliation", serviceName);
+    }
+
+    ServiceDeploy_LogInstallEvent(L"[RESTART] Service %ls restarted successfully", serviceName);
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
+
 static BOOL ServiceDeploy_RunLifecycleHostOperationLocked(
     const wchar_t* actionName,
     const wchar_t* sourceExePath,
@@ -6199,6 +6273,10 @@ static BOOL ServiceDeploy_RunLifecycleHostOperationLocked(
     if (_wcsicmp(actionName, MESH_LIFECYCLE_ACTION_RECOVER_UPDATE_W) == 0)
     {
         return ServiceDeploy_RunDelegatedUpdateRecovery();
+    }
+    if (_wcsicmp(actionName, MESH_LIFECYCLE_ACTION_RESTART_W) == 0)
+    {
+        return ServiceDeploy_RunServiceRestart();
     }
     if (_wcsicmp(actionName, L"validate-install") == 0)
     {
@@ -8921,6 +8999,7 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
     DWORD stopError = ERROR_TIMEOUT;
     BOOL statusKnown = FALSE;
     DWORD lastStopAttempt = 0;
+    DWORD initialPid = 0;
     BOOL stopAttempted = FALSE;
     BOOL loggedStopFailure = FALSE;
     wchar_t serviceDll[MAX_PATH * 4] = {0};
@@ -8937,6 +9016,10 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
 
     if (QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &needed))
     {
+        if (ssp.dwCurrentState != SERVICE_STOPPED)
+        {
+            initialPid = ssp.dwProcessId;
+        }
         /* The service host accepts STOP while START_PENDING, so only an
          * in-flight stop suppresses the control. */
         if (ssp.dwCurrentState != SERVICE_STOPPED && ssp.dwCurrentState != SERVICE_STOP_PENDING && canStop)
@@ -8977,10 +9060,15 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
             break;
         }
         statusKnown = TRUE;
-        if (ssp.dwCurrentState == SERVICE_STOPPED)
+        if (ssp.dwCurrentState == SERVICE_STOPPED ||
+            (stopAttempted && initialPid != 0 && ssp.dwProcessId != 0 && ssp.dwProcessId != initialPid))
         {
             stopped = TRUE;
             break;
+        }
+        if (initialPid == 0 && ssp.dwCurrentState != SERVICE_STOPPED)
+        {
+            initialPid = ssp.dwProcessId;
         }
         waited = GetTickCount() - stopStarted;
         if (waited >= timeoutMs) { break; }

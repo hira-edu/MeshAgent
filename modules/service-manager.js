@@ -55,6 +55,161 @@ function windowsServiceExecutable(command)
     if (!match || !/\.exe$/i.test(match[1])) { throw new Error('Invalid service executable command line: ' + command); }
     return match[1];
 }
+var windowsLifecycleManifestCounter = 0;
+function windowsLifecycleServiceNameValid(name)
+{
+    if (typeof name != 'string' || name.length == 0 || name.length >= 256) { return (false); }
+    for (var i = 0; i < name.length; ++i)
+    {
+        var c = name.charCodeAt(i);
+        if (c < 0x20 || c == 0x5C || c == 0x2F) { return (false); }
+    }
+    return (true);
+}
+function windowsValidateServiceRuntimeDllPath(dll)
+{
+    if (typeof dll != 'string' || dll.length >= 260 || !/^[a-zA-Z]:\\[^,:<>|?*\x00-\x1f]+\.dll$/i.test(dll) ||
+        /(?:^|\\)\.{1,2}(?:\\|$)/.test(dll) || /[\\/]$/.test(dll) || dll.indexOf('/') >= 0 || dll.indexOf('\\\\') >= 0)
+    {
+        throw new Error('Service runtime DLL must be an absolute local DLL path.');
+    }
+    return (dll);
+}
+function windowsResolveRuntimeHostPath(service)
+{
+    if (service != null && service._GM != null && service._proxy2 != null && typeof service._proxy2.GetSystemDirectoryW == 'function')
+    {
+        var bufferCch = 32768;
+        var buffer = service._GM.CreateVariable(bufferCch * 2);
+        var len = service._proxy2.GetSystemDirectoryW(buffer, bufferCch).Val;
+        if (len > 0 && len < bufferCch)
+        {
+            return (buffer.Wide2UTF8.replace(/[\\\/]+$/, '') + '\\rundll32.exe');
+        }
+    }
+    throw new Error('GetSystemDirectoryW failed or returned a truncated path.');
+}
+function windowsResolveInstalledServiceDll(service)
+{
+    var serviceName = service != null ? service.name : null;
+    if (!windowsLifecycleServiceNameValid(serviceName)) { throw new Error('Invalid service name.'); }
+    var reg = require('win-registry');
+    var key = 'SYSTEM\\CurrentControlSet\\Services\\' + serviceName;
+    var command = reg.QueryKey(reg.HKEY.LocalMachine, key, 'ImagePath');
+    if (typeof command != 'string' || command.length > 1024) { throw new Error('Invalid service runtime command.'); }
+    var systemDir = windowsResolveRuntimeHostPath(service).replace(/\\rundll32\.exe$/i, '');
+    var binding = /^"([^"\r\n]+)" -k ([A-Za-z0-9_-]{1,40}-[0-9A-Fa-f]{16})$/.exec(command);
+    if (binding == null)
+    {
+        var match = /^"([^"\r\n]+)" "([^"\r\n]+)",MeshServiceHostW$/.exec(command);
+        if (match == null || match[0].length != command.length || match[1].toLowerCase() != (systemDir + '\\rundll32.exe').toLowerCase())
+        {
+            throw new Error('Service runtime must use the canonical system rundll32 command.');
+        }
+        return (windowsValidateServiceRuntimeDllPath(match[2]));
+    }
+    if (binding[0].length != command.length ||
+        binding[1].toLowerCase() != (systemDir + '\\svchost.exe').toLowerCase() ||
+        reg.QueryKey(reg.HKEY.LocalMachine, key, 'Type') !== 32)
+    {
+        throw new Error('Invalid scoped service-host binding.');
+    }
+    var members = reg.QueryKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost', binding[2]);
+    if (members == null || members._type !== 7 || members.length !== (serviceName.length + 2) * 2)
+    {
+        throw new Error('Service-host group must contain only the requested service.');
+    }
+    var memberText = '';
+    for (var i = 0; i < members.length; i += 2)
+    {
+        memberText += String.fromCharCode(members[i] | (members[i + 1] << 8));
+    }
+    if (memberText.toLowerCase() != serviceName.toLowerCase() + '\x00\x00')
+    {
+        throw new Error('Service-host group must contain only the requested service.');
+    }
+    var parameters = key + '\\Parameters';
+    if (reg.QueryKey(reg.HKEY.LocalMachine, parameters, 'ServiceMain') !== 'ServiceHost_ServiceMain' ||
+        reg.QueryKey(reg.HKEY.LocalMachine, parameters, 'ServiceDllUnloadOnStop') !== 1)
+    {
+        throw new Error('Invalid service DLL entry or unload policy.');
+    }
+    return (windowsValidateServiceRuntimeDllPath(reg.QueryKey(reg.HKEY.LocalMachine, parameters, 'ServiceDll')));
+}
+function windowsRestartSelfViaLifecycleHost(service)
+{
+    var serviceName = service != null ? ('' + service.name) : '';
+    if (!windowsLifecycleServiceNameValid(serviceName))
+    {
+        throw new Error('Invalid service name for Windows self restart: ' + serviceName);
+    }
+    var meshAgent = null;
+    try { meshAgent = require('MeshAgent'); } catch (e) { meshAgent = null; }
+    if (meshAgent != null && typeof meshAgent.activateNativeRestart == 'function')
+    {
+        meshAgent.activateNativeRestart(serviceName);
+        return;
+    }
+
+    var fs = require('fs');
+    var runtimeHostPath = windowsResolveRuntimeHostPath(service);
+    var serviceDllPath = windowsResolveInstalledServiceDll(service);
+    if (!fs.existsSync(runtimeHostPath)) { throw new Error('rundll32.exe not found at ' + runtimeHostPath); }
+    if (!fs.existsSync(serviceDllPath)) { throw new Error('Service runtime DLL not found at ' + serviceDllPath); }
+
+    var dllDir = serviceDllPath.substring(0, serviceDllPath.lastIndexOf('\\'));
+    var stateRoot = dllDir + '\\state';
+    var stateDir = stateRoot + '\\runtime-host-lifecycle';
+    var manifestDir = null;
+    if (fs.existsSync(stateDir))
+    {
+        manifestDir = stateDir;
+    }
+    else if (fs.existsSync(stateRoot))
+    {
+        try { fs.mkdirSync(stateDir); } catch (e) { }
+        if (fs.existsSync(stateDir)) { manifestDir = stateDir; }
+    }
+    if (manifestDir == null && fs.existsSync(dllDir))
+    {
+        manifestDir = dllDir;
+    }
+    if (manifestDir == null || manifestDir.length == 0)
+    {
+        throw new Error('Unable to stage Windows self-restart lifecycle manifest.');
+    }
+    var manifestPath = manifestDir + '\\manifest-' + process.pid + '-' + Date.now() + '-' + (++windowsLifecycleManifestCounter) + '.ini';
+    var cleanDll = ('' + serviceDllPath).replace(/[\r\n"]/g, ' ').trim();
+    var cleanName = ('' + serviceName).replace(/[\r\n"]/g, ' ').trim();
+    var lines = [
+        '[Lifecycle]',
+        'Action=restart',
+        'SourceDll=' + cleanDll,
+        'ServiceName=' + cleanName,
+        'RequireConfig=0',
+        ''
+    ];
+    var text = '\ufeff' + lines.join('\r\n');
+    var bytes = Buffer.alloc(text.length * 2);
+    for (var i = 0; i < text.length; ++i) { bytes.writeUInt16LE(text.charCodeAt(i), i * 2); }
+    fs.writeFileSync(manifestPath, bytes);
+
+    var child = null;
+    try
+    {
+        child = require('child_process').execFile(runtimeHostPath, [serviceDllPath + ',MeshLifecycleHostW', manifestPath], { type: 4, detached: true });
+    }
+    catch (launchError)
+    {
+        try { fs.unlinkSync(manifestPath); } catch (cleanupError) { }
+        throw launchError;
+    }
+    if (child == null)
+    {
+        try { fs.unlinkSync(manifestPath); } catch (cleanupError2) { }
+        throw new Error('Windows self-restart lifecycle host launch failed.');
+    }
+}
 
 function readSystemdDirective(file, name)
 {
@@ -162,7 +317,8 @@ function prepareFolders(folderPath)
     {
         path = (path == null ? tokens.shift() : (path + dlmtr + tokens.shift()));
         if (path.indexOf(process.platform == 'win32' ? '\\' : '/') < 0) { continue; }
-        try { require('fs').mkdirSync(path); } catch (e) { if (e.code !== 'EEXIST') { throw e; } }
+        if (require('fs').existsSync(path)) { continue; }
+        try { require('fs').mkdirSync(path); } catch (e) { if (e.code !== 'EEXIST' && !require('fs').existsSync(path)) { throw e; } }
     }
 }
 
@@ -857,6 +1013,7 @@ function serviceManager()
 
         this.proxy2 = this.GM.CreateNativeProxy('Kernel32.dll');
         this.proxy2.CreateMethod('GetLastError');
+        this.proxy2.CreateMethod('GetSystemDirectoryW');
 
         this.isAdmin = function isAdmin() {
             var NTAuthority = this.GM.CreateVariable(6);
@@ -1145,7 +1302,10 @@ function serviceManager()
                     {
                         if (this.isMe())
                         {
-                            throw ('Windows self restart through a command host is disabled in this build; use the native lifecycle host or SCM control path.');
+                            windowsRestartSelfViaLifecycleHost(this);
+                            var selfRestartPromise = new promise(function (a, r) { this._a = a; this._r = r; });
+                            selfRestartPromise._a();
+                            return (selfRestartPromise);
                         }
                         else
                         {

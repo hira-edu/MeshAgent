@@ -253,3 +253,101 @@ assert.throws(() => cleanup.uninstallService2(['_stop'], '/old.msh'), /Service u
 cleanupMode = 'data';
 assert.throws(() => cleanup.uninstallService2(['_stop', '--_deleteData=1', '_workingDir=/opt/old', '_appPrefix=old'], '/old.msh'), /database locked/);
 assert.equal(continued, 0, 'cleanup errors cannot continue into success or reinstall');
+
+// Windows self-restart routes through the native MeshLifecycleHostW contract (never cmd.exe/_execve).
+let nativeRestartCalls = [];
+let writtenManifest = null, unlinkedManifest = null, spawnedRestart = null, failRestartSpawn = false;
+const selfRestartHelpers = [
+    'function prepareFolders(',
+    'function windowsLifecycleServiceNameValid(',
+    'function windowsValidateServiceRuntimeDllPath(',
+    'function windowsResolveRuntimeHostPath(',
+    'function windowsResolveInstalledServiceDll(',
+    'function windowsRestartSelfViaLifecycleHost('
+].map(sig => extract(serviceManager, sig)).join('\n');
+const restartCtx = vm.createContext({
+    Buffer, Date, Math,
+    process: {platform: 'win32', pid: 4242, env: {TEMP: 'C:\\Windows\\Temp'}},
+    windowsLifecycleManifestCounter: 0,
+    promise: function(fn) { fn.call(this, () => { this.resolved = true; }, (e) => { this.rejected = e; }); },
+    require(name) {
+        if (name === 'MeshAgent' && nativeRestartCalls != null) {
+            return {activateNativeRestart(svcName) { nativeRestartCalls.push(svcName); return true; }};
+        }
+        if (name === 'win-registry') {
+            return {
+                HKEY: {LocalMachine: 1},
+                QueryKey(hive, key, val) {
+                    if (val === 'ImagePath') return '"C:\\Windows\\System32\\svchost.exe" -k MeshGroup-0123456789abcdef';
+                    if (val === 'Type') return 32;
+                    if (key.endsWith('Svchost')) {
+                        const raw = Buffer.from('Mesh Agent\x00\x00', 'utf16le');
+                        raw._type = 7;
+                        return raw;
+                    }
+                    if (val === 'ServiceMain') return 'ServiceHost_ServiceMain';
+                    if (val === 'ServiceDllUnloadOnStop') return 1;
+                    if (val === 'ServiceDll') return 'C:\\Program Files\\Mesh Agent\\MeshService64.dll';
+                    throw Error('unexpected registry query: ' + key + ' ' + val);
+                }
+            };
+        }
+        if (name === 'fs') {
+            return {
+                mkdirSync(p) {
+                    if (p === 'C:\\Program Files' || p === 'C:\\Program Files\\Mesh Agent') {
+                        throw Error('fs.mkdirSync(): Unable to create dir: ' + p);
+                    }
+                },
+                existsSync(p) {
+                    return p === 'C:\\Windows\\System32\\rundll32.exe' ||
+                        p === 'C:\\Program Files\\Mesh Agent' ||
+                        p === 'C:\\Program Files\\Mesh Agent\\MeshService64.dll';
+                },
+                writeFileSync(p, data) { writtenManifest = {path: p, data: Buffer.from(data)}; },
+                unlinkSync(p) { unlinkedManifest = p; }
+            };
+        }
+        if (name === 'child_process') {
+            return {
+                execFile(file, args, opts) {
+                    if (failRestartSpawn) return null;
+                    spawnedRestart = {file, args, opts};
+                    return {pid: 9001};
+                }
+            };
+        }
+        throw Error('unexpected require: ' + name);
+    }
+});
+vm.runInContext(selfRestartHelpers, restartCtx);
+vm.runInContext('var retVal = {}; ' + extract(serviceManager, 'retVal.restart = function ()'), restartCtx);
+const mockSelfService = {
+    name: 'Mesh Agent',
+    isMe: () => true,
+    _GM: {CreateVariable: () => ({Wide2UTF8: 'C:\\Windows\\System32\\'})},
+    _proxy2: {GetSystemDirectoryW: () => ({Val: 19})},
+    restart: restartCtx.retVal.restart
+};
+assert.equal(mockSelfService.restart().resolved, true);
+assert.deepEqual(nativeRestartCalls, ['Mesh Agent']);
+assert.throws(() => ({...mockSelfService, name: 'bad\\name'}).restart(), /Invalid service name/);
+
+// Fallback manifest + detached rundll32 MeshLifecycleHostW path when MeshAgent native binding is absent.
+nativeRestartCalls = null;
+assert.equal(mockSelfService.restart().resolved, true);
+assert.equal(spawnedRestart.file, 'C:\\Windows\\System32\\rundll32.exe');
+assert.equal(spawnedRestart.args[0], 'C:\\Program Files\\Mesh Agent\\MeshService64.dll,MeshLifecycleHostW');
+assert.equal(spawnedRestart.args[1], writtenManifest.path);
+assert(writtenManifest.path.startsWith('C:\\Program Files\\Mesh Agent\\manifest-'), 'self-restart manifest must stage in protected install root, never %TEMP%');
+assert.deepEqual(spawnedRestart.opts, {type: 4, detached: true});
+assert.equal(writtenManifest.data[0], 0xFF);
+assert.equal(writtenManifest.data[1], 0xFE);
+const decodedManifest = writtenManifest.data.subarray(2).toString('utf16le');
+assert(decodedManifest.includes('[Lifecycle]\r\nAction=restart\r\nSourceDll=C:\\Program Files\\Mesh Agent\\MeshService64.dll\r\nServiceName=Mesh Agent\r\nRequireConfig=0\r\n'));
+
+// If child_process.execFile fails, the staged manifest is unlinked before throwing.
+failRestartSpawn = true;
+assert.throws(() => mockSelfService.restart(), /launch failed/);
+assert.equal(unlinkedManifest, writtenManifest.path);
+console.log('Windows self-restart: native activation, UTF-16LE manifest fallback and failure cleanup passed');

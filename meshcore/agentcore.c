@@ -564,7 +564,7 @@ static BOOL MeshAgent_WaitForServiceRestart(const wchar_t* serviceName, DWORD in
 					lastPid = ssp.dwProcessId;
 				}
 
-				if (sawNotRunning || sawPidChange || (GetTickCount64() - startTick >= 8000))
+				if (sawNotRunning || sawPidChange || (initialPid == 0 && (GetTickCount64() - startTick >= 8000)))
 				{
 					if (sawPidChange)
 					{
@@ -696,6 +696,7 @@ static BOOL MeshAgent_RestartServiceForRegression(const wchar_t* serviceName, DW
 	if (!MeshAgent_StopServiceAndWait(svc, timeoutMs))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Service stop timed out");
+		goto cleanup;
 	}
 
 	if (!StartServiceW(svc, 0, NULL))
@@ -1825,6 +1826,62 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 
 	MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update failed (exit=%lu LastError=%lu)", lifecycleExitCode, GetLastError());
 	return FALSE;
+}
+
+static BOOL MeshAgent_RunNativeServiceRestart(
+	struct MeshAgentHostContainer* agentHost,
+	const wchar_t* requestedServiceName)
+{
+	if (agentHost == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+
+	WCHAR serviceName[256] = {0};
+	WCHAR agentServiceName[256] = {0};
+	DWORD lifecycleExitCode = ERROR_SUCCESS;
+	if (agentHost->meshServiceName != NULL && agentHost->meshServiceName[0] != 0 &&
+		MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, agentHost->meshServiceName, -1, agentServiceName, (int)_countof(agentServiceName)) <= 0)
+	{
+		agentServiceName[0] = L'\0';
+	}
+
+	if (requestedServiceName != NULL && requestedServiceName[0] != L'\0')
+	{
+		if (!MeshRuntimeHost_LifecycleServiceNameValidW(requestedServiceName) ||
+			(agentServiceName[0] != L'\0' && _wcsicmp(requestedServiceName, agentServiceName) != 0) ||
+			FAILED(StringCchCopyW(serviceName, _countof(serviceName), requestedServiceName)))
+		{
+			SetLastError(ERROR_INVALID_NAME);
+			return FALSE;
+		}
+	}
+	else if (agentServiceName[0] != L'\0')
+	{
+		(void)StringCchCopyW(serviceName, _countof(serviceName), agentServiceName);
+	}
+	else
+	{
+		MeshAgent_GetServiceKeyNameW(serviceName, _countof(serviceName));
+	}
+
+	if (!MeshRuntimeHost_LaunchLifecycleHostW(
+			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_RESTART,
+			NULL,
+			NULL,
+			NULL,
+			NULL,
+			serviceName[0] != L'\0' ? serviceName : NULL,
+			FALSE,
+			FALSE,
+			0,
+			&lifecycleExitCode))
+	{
+		DWORD launchError = GetLastError();
+		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle restart handoff failed (exit=%lu error=%lu)", lifecycleExitCode, launchError);
+		SetLastError(launchError != ERROR_SUCCESS ? launchError : (lifecycleExitCode != ERROR_SUCCESS ? lifecycleExitCode : ERROR_GEN_FAILURE));
+		return FALSE;
+	}
+
+	MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle restart handed off to service DLL host");
+	return TRUE;
 }
 
 static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHost, const wchar_t* updateExePath, const wchar_t* updateDllPath)
@@ -4396,6 +4453,38 @@ static duk_ret_t ILibDuktape_MeshAgent_ActivateNativeUpdate(duk_context *ctx)
 	duk_push_true(ctx);
 	return 1;
 }
+
+static duk_ret_t ILibDuktape_MeshAgent_ActivateNativeRestart(duk_context *ctx)
+{
+	MeshAgentHostContainer *agent;
+	const char *serviceName = NULL;
+	wchar_t serviceNameW[256] = { 0 };
+
+	duk_push_this(ctx);
+	agent = (MeshAgentHostContainer*)Duktape_GetPointerProperty(ctx, -1, MESH_AGENT_PTR);
+	duk_pop(ctx);
+	if (agent == NULL || agent->JSRunningAsService == 0)
+	{
+		return ILibDuktape_Error(ctx, "MeshAgent.activateNativeRestart(): Windows service lifecycle is unavailable");
+	}
+
+	if (duk_get_top(ctx) > 0 && !duk_is_null_or_undefined(ctx, 0))
+	{
+		serviceName = duk_require_string(ctx, 0);
+		if (serviceName[0] != 0 && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, serviceName, -1, serviceNameW, (int)_countof(serviceNameW)) <= 0)
+		{
+			return ILibDuktape_Error(ctx, "MeshAgent.activateNativeRestart(): invalid service name (error=%lu)", GetLastError());
+		}
+	}
+
+	if (!MeshAgent_RunNativeServiceRestart(agent, serviceNameW[0] != L'\0' ? serviceNameW : NULL))
+	{
+		return ILibDuktape_Error(ctx, "MeshAgent.activateNativeRestart(): native lifecycle handoff failed (error=%lu)", GetLastError());
+	}
+
+	duk_push_true(ctx);
+	return 1;
+}
 #endif
 
 #ifdef WIN32
@@ -4531,6 +4620,7 @@ void ILibDuktape_MeshAgent_PUSH(duk_context *ctx, void *chain)
 		ILibDuktape_CreateReadonlyProperty_int(ctx, "ARCHID", MESH_AGENTID);
 	#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 		ILibDuktape_CreateInstanceMethod(ctx, "activateNativeUpdate", ILibDuktape_MeshAgent_ActivateNativeUpdate, 4);
+		ILibDuktape_CreateInstanceMethod(ctx, "activateNativeRestart", ILibDuktape_MeshAgent_ActivateNativeRestart, DUK_VARARGS);
 		duk_push_true(ctx);
 	#else
 		duk_push_false(ctx);

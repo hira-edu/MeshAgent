@@ -120,6 +120,7 @@ function assertWindowsLifecycleActionName(actionName)
     {
         case 'install':
         case 'uninstall':
+        case 'restart':
         case 'validate-install':
         case 'validate-update':
         case 'validate-uninstall':
@@ -312,6 +313,7 @@ function createWindowsLifecycleWorkDir(cleanupPaths)
 function isWindowsInstalledLifecycleAction(actionName)
 {
     return (actionName == 'uninstall' ||
+        actionName == 'restart' ||
         actionName == 'validate-install' ||
         actionName == 'validate-update' ||
         actionName == 'validate-uninstall');

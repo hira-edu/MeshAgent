@@ -74,7 +74,10 @@ int wmain(int argc, wchar_t** argv)
     parsed = wrote && MeshRuntimeHost_ReadLifecycleManifestW(argv[1], &read);
     recoveryAction = MeshRuntimeHost_LifecycleActionFromStringW(MESH_LIFECYCLE_ACTION_RECOVER_UPDATE_W, &action) &&
         action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_RECOVER_UPDATE &&
-        wcscmp(MeshRuntimeHost_LifecycleActionNameW(action), MESH_LIFECYCLE_ACTION_RECOVER_UPDATE_W) == 0;
+        wcscmp(MeshRuntimeHost_LifecycleActionNameW(action), MESH_LIFECYCLE_ACTION_RECOVER_UPDATE_W) == 0 &&
+        MeshRuntimeHost_LifecycleActionFromStringW(MESH_LIFECYCLE_ACTION_RESTART_W, &action) &&
+        action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_RESTART &&
+        wcscmp(MeshRuntimeHost_LifecycleActionNameW(action), MESH_LIFECYCLE_ACTION_RESTART_W) == 0;
     equal = parsed && wcscmp(read.sourceExePath, argv[2]) == 0 && wcscmp(read.sourceDllPath, argv[2]) == 0 &&
         wcscmp(read.displayName, argv[3]) == 0 && wcscmp(read.serviceDescription, argv[3]) == 0 &&
         wcscmp(read.serviceName, MeshRuntimeHost_LifecycleServiceNameValidW(argv[3]) ? argv[3] : L"") == 0 &&
