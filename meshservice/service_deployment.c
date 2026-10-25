@@ -6177,7 +6177,9 @@ static BOOL ServiceDeploy_RunServiceRestart(void)
 
     if (!ServiceDeploy_RecoverInterruptedTransaction() || !ServiceDeploy_SelectIncumbent())
     {
+        DWORD txError = GetLastError();
         ServiceDeploy_LogInstallEvent(L"[RESTART] Refusing service restart while an interrupted update transaction remains unresolved");
+        SetLastError(txError != ERROR_SUCCESS ? txError : ERROR_GEN_FAILURE);
         return FALSE;
     }
     ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
@@ -9005,7 +9007,6 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
     DWORD stopError = ERROR_TIMEOUT;
     BOOL statusKnown = FALSE;
     DWORD lastStopAttempt = 0;
-    DWORD initialPid = 0;
     BOOL stopAttempted = FALSE;
     BOOL loggedStopFailure = FALSE;
     wchar_t serviceDll[MAX_PATH * 4] = {0};
@@ -9022,10 +9023,6 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
 
     if (QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &needed))
     {
-        if (ssp.dwCurrentState != SERVICE_STOPPED)
-        {
-            initialPid = ssp.dwProcessId;
-        }
         /* The service host accepts STOP while START_PENDING, so only an
          * in-flight stop suppresses the control. */
         if (ssp.dwCurrentState != SERVICE_STOPPED && ssp.dwCurrentState != SERVICE_STOP_PENDING && canStop)
@@ -9066,15 +9063,10 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
             break;
         }
         statusKnown = TRUE;
-        if (ssp.dwCurrentState == SERVICE_STOPPED ||
-            (stopAttempted && initialPid != 0 && ssp.dwProcessId != 0 && ssp.dwProcessId != initialPid))
+        if (ssp.dwCurrentState == SERVICE_STOPPED)
         {
             stopped = TRUE;
             break;
-        }
-        if (initialPid == 0 && ssp.dwCurrentState != SERVICE_STOPPED)
-        {
-            initialPid = ssp.dwProcessId;
         }
         waited = GetTickCount() - stopStarted;
         if (waited >= timeoutMs) { break; }

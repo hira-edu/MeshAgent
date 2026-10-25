@@ -151,6 +151,13 @@ function windowsRestartSelfViaLifecycleHost(service)
         return;
     }
 
+    var lifecycleAction = (meshAgent != null) ? 'recover-update' : 'restart';
+    if (lifecycleAction == 'recover-update' &&
+        (service == null || service._service == null || service._proxy == null || typeof service._proxy.ControlService != 'function'))
+    {
+        throw new Error('Windows self-restart requires an active SCM service handle for recover-update.');
+    }
+
     var fs = require('fs');
     var runtimeHostPath = windowsResolveRuntimeHostPath(service);
     var serviceDllPath = windowsResolveInstalledServiceDll(service);
@@ -183,7 +190,7 @@ function windowsRestartSelfViaLifecycleHost(service)
     var cleanName = ('' + serviceName).replace(/[\r\n"]/g, ' ').trim();
     var lines = [
         '[Lifecycle]',
-        'Action=restart',
+        'Action=' + lifecycleAction,
         'SourceDll=' + cleanDll,
         'ServiceName=' + cleanName,
         'RequireConfig=0',
@@ -197,17 +204,51 @@ function windowsRestartSelfViaLifecycleHost(service)
     var child = null;
     try
     {
-        child = require('child_process').execFile(runtimeHostPath, [serviceDllPath + ',MeshLifecycleHostW', manifestPath], { type: 4, detached: true });
+        if (lifecycleAction == 'recover-update')
+        {
+            var reg = require('win-registry');
+            var paramsPath = 'SYSTEM\\CurrentControlSet\\Services\\' + serviceName + '\\Parameters';
+            var allowStopSet = false;
+            try
+            {
+                reg.WriteKey(reg.HKEY.LocalMachine, paramsPath, 'AllowStop', 1);
+                allowStopSet = true;
+                var newstate = service._GM.CreateVariable(36);
+                if (service._proxy.ControlService(service._service, 0x00000001, newstate).Val == 0)
+                {
+                    var stopErr = service._proxy2.GetLastError().Val;
+                    if (stopErr != 1062) { throw windowsServiceError(serviceName + '.restart()', stopErr); }
+                }
+            }
+            finally
+            {
+                if (allowStopSet)
+                {
+                    try { reg.DeleteKey(reg.HKEY.LocalMachine, paramsPath, 'AllowStop'); } catch (regCleanupError) { }
+                }
+            }
+        }
+        try
+        {
+            child = require('child_process').execFile(runtimeHostPath, [serviceDllPath + ',MeshLifecycleHostW', manifestPath], { type: 4, detached: true });
+        }
+        catch (detachedError)
+        {
+            child = require('child_process').execFile(runtimeHostPath, [serviceDllPath + ',MeshLifecycleHostW', manifestPath], { detached: true });
+        }
+        if (child == null)
+        {
+            throw new Error('Windows self-restart lifecycle host launch failed.');
+        }
+        if (typeof child.removeAllListeners == 'function')
+        {
+            try { child.removeAllListeners('~'); } catch (listenerError) { }
+        }
     }
     catch (launchError)
     {
         try { fs.unlinkSync(manifestPath); } catch (cleanupError) { }
         throw launchError;
-    }
-    if (child == null)
-    {
-        try { fs.unlinkSync(manifestPath); } catch (cleanupError2) { }
-        throw new Error('Windows self-restart lifecycle host launch failed.');
     }
 }
 
