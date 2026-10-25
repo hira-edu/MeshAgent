@@ -297,7 +297,7 @@ static BOOL MeshRuntimeHost_WriteManifestStringW(const wchar_t* manifestPath, co
 
 // Same shape ServiceHost_AcceptScmName accepts from the SCM dispatcher: a non-empty key
 // name under 256 characters without control characters or path separators.
-static BOOL MeshRuntimeHost_LifecycleServiceNameValidW(const wchar_t* serviceName)
+BOOL MeshRuntimeHost_LifecycleServiceNameValidW(const wchar_t* serviceName)
 {
     size_t length;
     size_t i;

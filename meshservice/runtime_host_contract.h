@@ -87,6 +87,7 @@ typedef struct MeshRuntimeHostLifecycleManifest
 
 const wchar_t* MeshRuntimeHost_LifecycleActionNameW(MeshRuntimeHostLifecycleAction action);
 BOOL MeshRuntimeHost_LifecycleActionFromStringW(const wchar_t* value, MeshRuntimeHostLifecycleAction* actionOut);
+BOOL MeshRuntimeHost_LifecycleServiceNameValidW(const wchar_t* serviceName);
 BOOL MeshRuntimeHost_ReadLifecycleManifestW(const wchar_t* manifestPath, MeshRuntimeHostLifecycleManifest* manifestOut);
 // serviceName may be NULL/empty; it is written only when present and must be a valid SCM key name.
 BOOL MeshRuntimeHost_WriteLifecycleManifestW(

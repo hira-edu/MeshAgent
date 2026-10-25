@@ -6164,6 +6164,12 @@ static BOOL ServiceDeploy_RunDelegatedUpdateRecovery(void)
     return FALSE;
 }
 
+static BOOL ServiceDeploy_ServiceExists(const wchar_t* serviceName)
+{
+    BOOL exists = FALSE;
+    return ServiceBinding_QueryExists(serviceName, &exists) && exists;
+}
+
 static BOOL ServiceDeploy_RunServiceRestart(void)
 {
     wchar_t serviceName[256] = {0};
