@@ -55,10 +55,10 @@ function main() {
     const meshinfo = readRepoFile(repoRoot, path.join('meshcore', 'meshinfo.c'), 'native power state implementation');
     const configCommon = readRepoFile(repoRoot, path.join('meshcore', 'config', 'config_common.h'), 'default host power action policy');
     const brandingTemplate = readRepoFile(repoRoot, path.join('meshcore', 'config', 'branding_profile.template.h'), 'branding template that documents the default policy');
-    const generatedBranding = readRepoFile(repoRoot, path.join('meshcore', 'generated', 'meshagent_branding.h'), 'generated branding header for the current lab build');
     const generator = readRepoFile(repoRoot, path.join('tools', 'generate_branding_assets.py'), 'branding generator that emits the policy');
     const schema = JSON.parse(readRepoFile(repoRoot, path.join('schema', 'meshagent.schema.json'), 'configuration schema that allows the policy flag'));
-    const localConfig = JSON.parse(readRepoFile(repoRoot, 'branding_config.local.json', 'current lab branding configuration'));
+    // Tracked sources only, so this contract passes on a clean clone. The checks on the lab's
+    // branding_config.local.json and generated meshagent_branding.h are in power_action_policy_lab_runtime.js.
     const meshCentralRoot = path.resolve(repoRoot, '..', 'MeshCentral');
     // Stage 3 of the MeshCentral fork drops the meshctrl.js override for upstream's file (plan S5, G6);
     // retarget this read to the package's meshctrl.js then.
@@ -83,16 +83,12 @@ function main() {
         templateDocumentsDefaultDeny:
             brandingTemplate.includes('Local Operations Policy') &&
             /#define\s+MESH_AGENT_ALLOW_HOST_POWER_ACTIONS\s+0/.test(brandingTemplate),
-        generatedBrandingCarriesCurrentPolicy:
-            /#define\s+MESH_AGENT_ALLOW_HOST_POWER_ACTIONS\s+1/.test(generatedBranding),
         schemaAllowsPolicyFlag:
             schema.properties.advanced.properties.allowHostPowerActions.type === 'boolean',
         generatorReadsAdvancedAndEmitsPolicy:
             generator.includes('advanced = get_value(config, "advanced", {}) or {}') &&
             generator.includes('MESH_AGENT_ALLOW_HOST_POWER_ACTIONS') &&
             generator.includes("get_bool(advanced, 'allowHostPowerActions')"),
-        currentLabConfigAllowsHostPowerActions:
-            localConfig.advanced.allowHostPowerActions === true,
         meshCtrlMapsDevicePowerToAgentPowerStateValues:
             meshCtrl.includes("args.off") &&
             meshCtrl.includes("actiontype: 2") &&
@@ -149,7 +145,6 @@ function main() {
             agentcore: path.join(repoRoot, 'meshcore', 'agentcore.c'),
             meshinfo: path.join(repoRoot, 'meshcore', 'meshinfo.c'),
             configCommon: path.join(repoRoot, 'meshcore', 'config', 'config_common.h'),
-            generatedBranding: path.join(repoRoot, 'meshcore', 'generated', 'meshagent_branding.h'),
             meshCtrl: path.join(meshCentralRoot, 'meshctrl.js'),
             meshCentralAgentCore: path.join(meshCentralRoot, 'agents', 'meshcore.js')
         },
@@ -163,10 +158,8 @@ function main() {
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
             'CONFIG_DEFAULT_ALLOW_HOST_POWER_ACTIONS=false',
-            'CURRENT_ALLOW_HOST_POWER_ACTIONS=true',
             'DEVICE_POWER_ACTIONS=off:2,reset:3,sleep:4',
-            'AGENT_DISPATCH=poweraction->ExecPowerState',
-            'HOST_POWER_ACTIONS=enabled_by_branding'
+            'AGENT_DISPATCH=poweraction->ExecPowerState'
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');
