@@ -2538,6 +2538,17 @@ def run_local_command(command, cwd, timeout=120):
     )
 
 
+def remove_remote_temp_files(paths):
+    """Delete server temp files (the uploaded login key) and fail loudly if any remain."""
+    quoted = [remote_quote(path) for path in paths]
+    checks = " && ".join(f"test ! -e {path}" for path in quoted)
+    if ssh_cmd(f"rm -f {' '.join(quoted)} && {checks}") is None:
+        raise RuntimeError(
+            "Could not confirm removal of temporary files from the server; delete them by hand: "
+            + ", ".join(paths)
+        )
+
+
 def run_meshctrl(action_args, login_user, login_key_file, timeout=180):
     """Run meshctrl and return the completed process object."""
     meshctrl = LOCAL_MESHCENTRAL_REPO / "meshctrl.js"
@@ -2579,7 +2590,7 @@ def run_meshctrl(action_args, login_user, login_key_file, timeout=180):
             return subprocess.CompletedProcess(remote_args, 1, "", "remote meshctrl failed without a result")
         return result
     finally:
-        ssh_cmd(f"rm -f {remote_quote(remote_key_file)}", check=False)
+        remove_remote_temp_files([remote_key_file])
 
 
 def run_meshctrl_json(action_args, login_user, login_key_file, timeout=180):
@@ -2699,7 +2710,7 @@ NODE"""
                 raise RuntimeError(detail or "remote update helper failed")
             return json.loads(result.stdout)
         finally:
-            ssh_cmd(f"rm -f {remote_quote(remote_key_file)} {remote_quote(remote_nodeids_file)}", check=False)
+            remove_remote_temp_files([remote_key_file, remote_nodeids_file])
     finally:
         try:
             os.unlink(nodeids_file)

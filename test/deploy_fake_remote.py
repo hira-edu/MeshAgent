@@ -32,6 +32,8 @@ sys.path.insert(0, str(ROOT))
 import deploy  # noqa: E402
 
 REMOTE_BASE = deploy.MESHCENTRAL_BASE
+# deploy.py's remote meshctrl fallback puts the login key in the server's /tmp.
+REMOTE_TMP_PREFIX = "/tmp/meshcentral-"
 
 SYSTEMCTL_SHIM = r"""#!/bin/sh
 echo "$*" >> "$FAKE_STATE/systemctl.log"
@@ -56,19 +58,19 @@ case "$1" in
 esac
 """
 
-# Fails a cp whose destination contains one of the newline-separated patterns in
-# $FAKE_STATE/cp-fail (used to break a publish part-way through).
-CP_SHIM = r"""#!/bin/sh
-if [ -f "$FAKE_STATE/cp-fail" ]; then
+# Fails the command when its last argument contains one of the newline-separated patterns
+# in $FAKE_STATE/<command>-fail (used to break a publish part-way through, and so on).
+FAILING_COMMAND_SHIM = r"""#!/bin/sh
+if [ -f "$FAKE_STATE/@NAME@-fail" ]; then
   for last; do :; done
-  while IFS= read -r suffix; do
-    [ -n "$suffix" ] || continue
+  while IFS= read -r pattern; do
+    [ -n "$pattern" ] || continue
     case "$last" in
-      *"$suffix"*) echo "fake cp: injected failure for $last" >&2; exit 1 ;;
+      *"$pattern"*) echo "fake @NAME@: injected failure for $last" >&2; exit 1 ;;
     esac
-  done < "$FAKE_STATE/cp-fail"
+  done < "$FAKE_STATE/@NAME@-fail"
 fi
-exec /usr/bin/cp "$@"
+exec /usr/bin/@NAME@ "$@"
 """
 
 
@@ -96,10 +98,14 @@ class FakeRemote:
         self.shims = self.workdir / "shims"
         self.shims.mkdir()
         self.fake_base = self.base.as_posix()
+        self.tmp = self.workdir / "tmp"
+        self.tmp.mkdir()
+        self.fake_tmp_prefix = self.tmp.as_posix() + "/meshcentral-"
         self.shell = find_posix_shell()
         self.calls = []
         self._write_shim("systemctl", SYSTEMCTL_SHIM)
-        self._write_shim("cp", CP_SHIM)
+        for name in ("cp", "rm"):
+            self._write_shim(name, FAILING_COMMAND_SHIM.replace("@NAME@", name))
         python = pathlib.Path(sys.executable).as_posix()
         self._write_shim("python3", f'#!/bin/sh\nexec "{python}" "$@"\n')
 
@@ -110,16 +116,27 @@ class FakeRemote:
 
     # Path translation between deploy.py's remote paths and the temp directory.
     def to_fake(self, text):
-        return text.replace(REMOTE_BASE, self.fake_base)
+        return text.replace(REMOTE_BASE, self.fake_base).replace(REMOTE_TMP_PREFIX, self.fake_tmp_prefix)
 
     def from_fake(self, text):
-        return text.replace(self.fake_base, REMOTE_BASE).replace(str(self.base), REMOTE_BASE)
+        for fake, remote in (
+            (self.fake_base, REMOTE_BASE),
+            (str(self.base), REMOTE_BASE),
+            (self.fake_tmp_prefix, REMOTE_TMP_PREFIX),
+        ):
+            text = text.replace(fake, remote)
+        return text
 
     def path(self, remote_path):
         """Return the local file standing in for a remote path."""
-        if remote_path != REMOTE_BASE and not remote_path.startswith(REMOTE_BASE + "/"):
+        inside_base = remote_path == REMOTE_BASE or remote_path.startswith(REMOTE_BASE + "/")
+        if not inside_base and not remote_path.startswith(REMOTE_TMP_PREFIX):
             raise ValueError(f"Remote path outside the fake server: {remote_path}")
         return pathlib.Path(self.to_fake(remote_path))
+
+    def temp_files(self):
+        """Return the names of meshcentral-* files left in the fake server's /tmp."""
+        return sorted(path.name for path in self.tmp.iterdir())
 
     def write(self, remote_path, data):
         target = self.path(remote_path)
@@ -150,8 +167,11 @@ class FakeRemote:
     def plan_restarts(self, outcomes):
         (self.state / "restart-plan").write_text("\n".join(outcomes) + "\n", encoding="utf-8", newline="\n")
 
+    def fail_command(self, name, *patterns):
+        (self.state / f"{name}-fail").write_text("\n".join(patterns) + "\n", encoding="utf-8", newline="\n")
+
     def fail_cp_to(self, *patterns):
-        (self.state / "cp-fail").write_text("\n".join(patterns) + "\n", encoding="utf-8", newline="\n")
+        self.fail_command("cp", *patterns)
 
     def clear_cp_failures(self):
         with contextlib.suppress(FileNotFoundError):
