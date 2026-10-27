@@ -7,8 +7,20 @@ function assert(condition, message) {
     }
 }
 
-function readRepoFile(repoRoot, relativePath) {
-    return fs.readFileSync(path.join(repoRoot, relativePath), 'utf8');
+// Every input is required: a missing or empty file fails the contract and says what it was for.
+function readRepoFile(repoRoot, relativePath, purpose) {
+    const fullPath = path.join(repoRoot, relativePath);
+    let text;
+    try {
+        text = fs.readFileSync(fullPath, 'utf8');
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            throw new Error(`required input missing: ${fullPath} (${purpose})`, { cause: error });
+        }
+        throw error;
+    }
+    assert(text.trim().length > 0, `required input is empty: ${fullPath} (${purpose})`);
+    return text;
 }
 
 function extractFunction(source, signature) {
@@ -39,25 +51,27 @@ function main() {
     const evidenceIndex = process.argv.indexOf('--evidence');
     const evidenceDir = evidenceIndex >= 0 ? path.resolve(process.argv[evidenceIndex + 1]) : null;
 
-    const agentcore = readRepoFile(repoRoot, path.join('meshcore', 'agentcore.c'));
-    const meshinfo = readRepoFile(repoRoot, path.join('meshcore', 'meshinfo.c'));
-    const configCommon = readRepoFile(repoRoot, path.join('meshcore', 'config', 'config_common.h'));
-    const brandingTemplate = readRepoFile(repoRoot, path.join('meshcore', 'config', 'branding_profile.template.h'));
-    const generatedBranding = readRepoFile(repoRoot, path.join('meshcore', 'generated', 'meshagent_branding.h'));
-    const generator = readRepoFile(repoRoot, path.join('tools', 'generate_branding_assets.py'));
-    const schema = JSON.parse(readRepoFile(repoRoot, path.join('schema', 'meshagent.schema.json')));
-    const localConfig = JSON.parse(readRepoFile(repoRoot, 'branding_config.local.json'));
+    const agentcore = readRepoFile(repoRoot, path.join('meshcore', 'agentcore.c'), 'agent core whose ExecPowerState policy is checked');
+    const meshinfo = readRepoFile(repoRoot, path.join('meshcore', 'meshinfo.c'), 'native power state implementation');
+    const configCommon = readRepoFile(repoRoot, path.join('meshcore', 'config', 'config_common.h'), 'default host power action policy');
+    const brandingTemplate = readRepoFile(repoRoot, path.join('meshcore', 'config', 'branding_profile.template.h'), 'branding template that documents the default policy');
+    const generator = readRepoFile(repoRoot, path.join('tools', 'generate_branding_assets.py'), 'branding generator that emits the policy');
+    const schema = JSON.parse(readRepoFile(repoRoot, path.join('schema', 'meshagent.schema.json'), 'configuration schema that allows the policy flag'));
+    // Tracked sources only, so this contract passes on a clean clone. The checks on the lab's
+    // branding_config.local.json and generated meshagent_branding.h are in power_action_policy_lab_runtime.js.
     const meshCentralRoot = path.resolve(repoRoot, '..', 'MeshCentral');
-    const meshCtrl = fs.readFileSync(path.join(meshCentralRoot, 'meshctrl.js'), 'utf8');
-    const meshCentralAgentCore = fs.readFileSync(path.join(meshCentralRoot, 'agents', 'meshcore.js'), 'utf8');
-    const meshCentralDataCore = fs.readFileSync(path.join(meshCentralRoot, 'meshcentral-data', 'meshcore.js'), 'utf8');
+    // Stage 3 of the MeshCentral fork drops the meshctrl.js override for upstream's file (plan S5, G6);
+    // retarget this read to the package's meshctrl.js then.
+    const meshCtrl = readRepoFile(meshCentralRoot, 'meshctrl.js', 'MeshCentral meshctrl device power mapping');
+    // Tracked MeshCentral agent core. The untracked meshcentral-data/meshcore.js copy is no longer read:
+    // it is local deploy state that Stage 1 removes (SSOT D16, D18; plan G6).
+    const meshCentralAgentCore = readRepoFile(meshCentralRoot, path.join('agents', 'meshcore.js'), 'tracked MeshCentral agent core whose poweraction dispatch is checked');
 
     const disruptiveHelper = extractFunction(agentcore, 'static int MeshAgent_IsHostDisruptivePowerAction(');
     const policyHelper = extractFunction(agentcore, 'static int MeshAgent_HostPowerActionsAllowed()');
     const execPowerState = extractFunction(agentcore, 'duk_ret_t ILibDuktape_MeshAgent_ExecPowerState(');
     const nativePowerState = extractFunction(meshinfo, 'int MeshInfo_PowerState(');
     const meshCentralPowerAction = extractFunction(meshCentralAgentCore, "case 'poweraction':");
-    const meshCentralDataPowerAction = extractFunction(meshCentralDataCore, "case 'poweraction':");
 
     const nativeCallIndex = execPowerState.indexOf('MeshInfo_PowerState(action, force)');
     const blockIndex = execPowerState.indexOf('ExecPowerState blocked host-disruptive');
@@ -69,16 +83,12 @@ function main() {
         templateDocumentsDefaultDeny:
             brandingTemplate.includes('Local Operations Policy') &&
             /#define\s+MESH_AGENT_ALLOW_HOST_POWER_ACTIONS\s+0/.test(brandingTemplate),
-        generatedBrandingCarriesCurrentPolicy:
-            /#define\s+MESH_AGENT_ALLOW_HOST_POWER_ACTIONS\s+1/.test(generatedBranding),
         schemaAllowsPolicyFlag:
             schema.properties.advanced.properties.allowHostPowerActions.type === 'boolean',
         generatorReadsAdvancedAndEmitsPolicy:
             generator.includes('advanced = get_value(config, "advanced", {}) or {}') &&
             generator.includes('MESH_AGENT_ALLOW_HOST_POWER_ACTIONS') &&
             generator.includes("get_bool(advanced, 'allowHostPowerActions')"),
-        currentLabConfigAllowsHostPowerActions:
-            localConfig.advanced.allowHostPowerActions === true,
         meshCtrlMapsDevicePowerToAgentPowerStateValues:
             meshCtrl.includes("args.off") &&
             meshCtrl.includes("actiontype: 2") &&
@@ -90,10 +100,6 @@ function main() {
             meshCentralPowerAction.includes('data.actiontype = parseInt(data.actiontype);') &&
             meshCentralPowerAction.includes('var r = mesh.ExecPowerState(data.actiontype, forced);') &&
             meshCentralPowerAction.includes('ExecPowerState returned code: '),
-        meshCentralDataCoreDispatchesPowerActionToExecPowerState:
-            meshCentralDataPowerAction.includes('data.actiontype = parseInt(data.actiontype);') &&
-            meshCentralDataPowerAction.includes('var r = mesh.ExecPowerState(data.actiontype, forced);') &&
-            meshCentralDataPowerAction.includes('ExecPowerState returned code: '),
         disruptiveSetCoversAllHostSessionAndPowerLossActions:
             ['POWERSTATE_LOGOFF', 'POWERSTATE_SHUTDOWN', 'POWERSTATE_REBOOT', 'POWERSTATE_SLEEP', 'POWERSTATE_HIBERNATE']
                 .every((name) => disruptiveHelper.includes(name)),
@@ -139,10 +145,8 @@ function main() {
             agentcore: path.join(repoRoot, 'meshcore', 'agentcore.c'),
             meshinfo: path.join(repoRoot, 'meshcore', 'meshinfo.c'),
             configCommon: path.join(repoRoot, 'meshcore', 'config', 'config_common.h'),
-            generatedBranding: path.join(repoRoot, 'meshcore', 'generated', 'meshagent_branding.h'),
             meshCtrl: path.join(meshCentralRoot, 'meshctrl.js'),
-            meshCentralAgentCore: path.join(meshCentralRoot, 'agents', 'meshcore.js'),
-            meshCentralDataCore: path.join(meshCentralRoot, 'meshcentral-data', 'meshcore.js')
+            meshCentralAgentCore: path.join(meshCentralRoot, 'agents', 'meshcore.js')
         },
         checks
     };
@@ -154,10 +158,8 @@ function main() {
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
             'CONFIG_DEFAULT_ALLOW_HOST_POWER_ACTIONS=false',
-            'CURRENT_ALLOW_HOST_POWER_ACTIONS=true',
             'DEVICE_POWER_ACTIONS=off:2,reset:3,sleep:4',
-            'AGENT_DISPATCH=poweraction->ExecPowerState',
-            'HOST_POWER_ACTIONS=enabled_by_branding'
+            'AGENT_DISPATCH=poweraction->ExecPowerState'
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');

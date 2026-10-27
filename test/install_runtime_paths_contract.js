@@ -280,22 +280,26 @@ function main() {
     assert(!winSystemPaths.includes("process.env['SystemRoot']"), 'win-system-paths must not trust SystemRoot environment for system executable resolution');
     assert(!winSystemPaths.includes('process.env.windir'), 'win-system-paths must not trust windir environment for system executable resolution');
 
+    // The sibling MeshCentral checkout is a required input: its agent module copies are what the
+    // server sends to agents, so a missing checkout fails here instead of skipping these checks.
     const meshCentralRoot = path.resolve(repoRoot, '..', 'MeshCentral');
-    if (fs.existsSync(meshCentralRoot)) {
-        [
-            'agents/modules_meshcore/win-system-paths.js',
-            'agents/modules_meshcore_min/win-system-paths.js',
-            'agents/modules_meshcore_min/win-system-paths.min.js'
-        ].forEach((relativePath) => {
-            const deployedWinSystemPaths = fs.readFileSync(path.join(meshCentralRoot, relativePath), 'utf8').replace(/\r\n?/g, '\n');
-            assert(deployedWinSystemPaths.includes('SHGetKnownFolderPath'), `${relativePath} must expose known-folder resolution`);
-            assert(deployedWinSystemPaths.includes('programDataDirectory'), `${relativePath} must expose ProgramData known-folder resolution`);
-            assert(deployedWinSystemPaths.includes('{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}'), `${relativePath} must use FOLDERID_ProgramData`);
-            assert(!deployedWinSystemPaths.includes("process.env['SystemRoot']"), `${relativePath} must not trust SystemRoot environment fallback`);
-            assert(!deployedWinSystemPaths.includes('process.env.windir'), `${relativePath} must not trust windir environment fallback`);
-            assert(!deployedWinSystemPaths.includes("return (system32Path('cmd.exe'));"), `${relativePath} must not re-enable command-host path helpers`);
-        });
-    }
+    assert(fs.existsSync(meshCentralRoot), `required input missing: ${meshCentralRoot} (MeshCentral checkout whose agents/modules_meshcore win-system-paths copies are checked)`);
+    [
+        'agents/modules_meshcore/win-system-paths.js',
+        'agents/modules_meshcore_min/win-system-paths.js',
+        'agents/modules_meshcore_min/win-system-paths.min.js'
+    ].forEach((relativePath) => {
+        const deployedPath = path.join(meshCentralRoot, relativePath);
+        assert(fs.existsSync(deployedPath), `required input missing: ${deployedPath} (MeshCentral copy of win-system-paths served to agents)`);
+        const deployedWinSystemPaths = fs.readFileSync(deployedPath, 'utf8').replace(/\r\n?/g, '\n');
+        assert(deployedWinSystemPaths.trim().length > 0, `required input is empty: ${deployedPath} (MeshCentral copy of win-system-paths served to agents)`);
+        assert(deployedWinSystemPaths.includes('SHGetKnownFolderPath'), `${relativePath} must expose known-folder resolution`);
+        assert(deployedWinSystemPaths.includes('programDataDirectory'), `${relativePath} must expose ProgramData known-folder resolution`);
+        assert(deployedWinSystemPaths.includes('{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}'), `${relativePath} must use FOLDERID_ProgramData`);
+        assert(!deployedWinSystemPaths.includes("process.env['SystemRoot']"), `${relativePath} must not trust SystemRoot environment fallback`);
+        assert(!deployedWinSystemPaths.includes('process.env.windir'), `${relativePath} must not trust windir environment fallback`);
+        assert(!deployedWinSystemPaths.includes("return (system32Path('cmd.exe'));"), `${relativePath} must not re-enable command-host path helpers`);
+    });
 
     for (const modulePath of ['modules/umhctl.js', 'modules/RecoveryCore.js']) {
         const moduleSource = readRepoFile(repoRoot, modulePath);

@@ -8,7 +8,20 @@ const PINNED_MESHCENTRAL = '1.2.5';
 const moduleRoot = path.resolve(__dirname, '../../MeshCentral/node_modules/meshcentral');
 const scriptsDir = path.resolve(__dirname, '../../MeshCentral/public/scripts');
 
-function read(file) { return fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n'); }
+// Every input is required: a missing or empty file fails the contract and says what it was for.
+function read(file) {
+    const purpose = file.startsWith(moduleRoot + path.sep) ? `installed MeshCentral package file this contract pins to ${PINNED_MESHCENTRAL}`
+        : file.startsWith(scriptsDir + path.sep) ? 'fork script checked against the pinned upstream page' : 'coupling contract input';
+    let text;
+    try {
+        text = fs.readFileSync(file, 'utf8');
+    } catch (error) {
+        if (error.code === 'ENOENT') throw new Error(`required input missing: ${file} (${purpose})`, { cause: error });
+        throw error;
+    }
+    if (text.trim().length === 0) throw new Error(`required input is empty: ${file} (${purpose})`);
+    return text.replace(/\r\n/g, '\n');
+}
 function count(text, needle) { return text.split(needle).length - 1; }
 function declaresVar(text, name) { return new RegExp('\\n\\s*var ' + name + '\\s*(=|;)').test(text); }
 function declaresFunction(text, name) { return text.includes('function ' + name + '('); }

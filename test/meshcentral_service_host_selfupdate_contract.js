@@ -40,16 +40,30 @@ function assert(condition, message) {
     }
 }
 
-function loadText(filePath) {
-    return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
+// A missing or empty required input fails the contract and says what it was for.
+function loadText(filePath, purpose) {
+    let text;
+    try {
+        text = fs.readFileSync(filePath, 'utf8');
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            throw new Error(`required input missing: ${filePath} (${purpose})`, { cause: error });
+        }
+        throw error;
+    }
+    assert(text.trim().length > 0, `required input is empty: ${filePath} (${purpose})`);
+    return text.replace(/\r\n?/g, '\n');
 }
 
-function loadOptionalText(filePath) {
-    try {
-        return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
-    } catch (e) {
+// Optional inputs are declared, not discovered: only a missing file is tolerated, it is recorded in
+// absentOptionalInputs (and so in the report), and any other read error or an empty file still fails.
+function loadOptionalText(filePath, purpose, absentOptionalInputs) {
+    if (!fs.existsSync(filePath)) {
+        absentOptionalInputs[filePath] = purpose;
+        console.error(`optional input absent, not checked: ${filePath} (${purpose})`);
         return null;
     }
+    return loadText(filePath, purpose);
 }
 
 function extractFunction(source, signature) {
@@ -128,18 +142,22 @@ function main() {
     const meshcentralDataMeshcorePath = path.resolve('..', 'MeshCentral', 'meshcentral-data', 'meshcore.js');
     const recoverycorePath = path.resolve('..', 'MeshCentral', 'agents', 'recoverycore.js');
 
-    const agentcoreSource = loadText(agentcorePath);
-    const updateContractSource = loadText(updateContractPath);
-    const agentInstallerSource = loadText(agentInstallerPath);
-    const serviceMainSource = loadText(serviceMainPath);
-    const runtimeHostContractSource = loadText(runtimeHostContractPath);
-    const serviceInstallerSource = loadText(serviceInstallerPath);
-    const rootMeshcoreSource = loadOptionalText(rootMeshcorePath);
-    const rootMeshcoreMinSource = loadOptionalText(rootMeshcoreMinPath);
-    const meshcoreSource = loadOptionalText(meshcorePath);
-    const meshcoreMinSource = loadOptionalText(meshcoreMinPath);
-    const meshcentralDataMeshcoreSource = loadOptionalText(meshcentralDataMeshcorePath);
-    const recoverycoreSource = loadOptionalText(recoverycorePath);
+    const agentcoreSource = loadText(agentcorePath, 'agent core whose native self-update path is checked');
+    const updateContractSource = loadText(updateContractPath, 'update constants header');
+    const agentInstallerSource = loadText(agentInstallerPath, 'agent installer module whose update delegation is checked');
+    const serviceMainSource = loadText(serviceMainPath, 'service entry whose self-update ingress is checked');
+    const runtimeHostContractSource = loadText(runtimeHostContractPath, 'runtime host whose lifecycle host is checked');
+    const serviceInstallerSource = loadText(serviceInstallerPath, 'service deployment whose update transaction is checked');
+    // The tracked MeshCentral agent cores are required. The other cores are optional by layout:
+    // root meshcore.js / meshcore.min.js exist in no current layout, and meshcentral-data/meshcore.js
+    // is an untracked deploy leftover that Stage 1 removes (SSOT D16, D18). Each is checked when present.
+    const absentOptionalInputs = {};
+    const rootMeshcoreSource = loadOptionalText(rootMeshcorePath, 'legacy-layout MeshCentral root agent core', absentOptionalInputs);
+    const rootMeshcoreMinSource = loadOptionalText(rootMeshcoreMinPath, 'legacy-layout MeshCentral root minified agent core', absentOptionalInputs);
+    const meshcoreSource = loadText(meshcorePath, 'tracked MeshCentral agent core whose JavaScript updater must stay disabled on Windows');
+    const meshcoreMinSource = loadText(meshcoreMinPath, 'tracked MeshCentral minified agent core whose JavaScript updater must stay disabled on Windows');
+    const meshcentralDataMeshcoreSource = loadOptionalText(meshcentralDataMeshcorePath, 'untracked meshcentral-data agent core left by earlier deploys', absentOptionalInputs);
+    const recoverycoreSource = loadText(recoverycorePath, 'tracked MeshCentral recovery core whose JavaScript updater must stay disabled on Windows');
     const agentcoreSelfUpdate = extractFunction(agentcoreSource, 'void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)');
     const nativeJsUpdateActivation = extractFunction(agentcoreSource, 'static duk_ret_t ILibDuktape_MeshAgent_ActivateNativeUpdate(duk_context *ctx)');
     const jsUpdateActivation = extractFunction(agentInstallerSource, 'function runWindowsNativeUpdateActivation(parms)');
@@ -277,6 +295,7 @@ function main() {
         meshcentralDataMeshcoreLegacyHits,
         recoverycoreLegacyHits,
         meshcentralSourcesAvailable: meshcoreSource != null && meshcoreMinSource != null && meshcentralDataMeshcoreSource != null && recoverycoreSource != null,
+        absentOptionalInputs,
         checks
     };
 
@@ -300,6 +319,7 @@ function main() {
             `MESHCORE_MIN_LEGACY_HITS=${formatTokenList(meshcoreMinLegacyHits)}`,
             `MESHCENTRAL_DATA_MESHCORE_LEGACY_HITS=${formatTokenList(meshcentralDataMeshcoreLegacyHits)}`,
             `RECOVERYCORE_LEGACY_HITS=${formatTokenList(recoverycoreLegacyHits)}`,
+            `ABSENT_OPTIONAL_INPUTS=${Object.keys(absentOptionalInputs).join(',') || 'none'}`,
             `CHECKS=${Object.entries(checks).map(([name, passed]) => `${name}:${passed}`).join(',')}`
         ].join('\n') + '\n');
     } else {

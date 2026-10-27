@@ -7,12 +7,44 @@ function assert(condition, message) {
     }
 }
 
-function read(relPath) {
-    return fs.readFileSync(path.resolve(relPath), 'utf8').replace(/\r\n?/g, '\n');
+// A missing or empty input fails the contract and says what it was for.
+function read(relPath, purpose) {
+    const fullPath = path.resolve(relPath);
+    let text;
+    try {
+        text = fs.readFileSync(fullPath, 'utf8');
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            throw new Error(`required input missing: ${fullPath} (${purpose})`, { cause: error });
+        }
+        throw error;
+    }
+    assert(text.trim().length > 0, `required input is empty: ${fullPath} (${purpose})`);
+    return text.replace(/\r\n?/g, '\n');
 }
 
-function existingPaths(paths) {
-    return paths.filter((relPath) => fs.existsSync(path.resolve(relPath)));
+// Each input group declares every copy it checks:
+// - required: tracked sources (this repository, the MeshCentral repository) and the installed
+//   MeshCentral package. Each one must exist.
+// - localState: untracked copies that earlier deploys left in meshcentral-data. Stage 1 removes
+//   them (SSOT D16, D18). Until then each is checked when present and listed in the report when absent.
+// - legacyLayout: paths that no current layout produces. Checked when present, listed when absent.
+function declaredInputs(group, purpose, declared, absentOptional) {
+    const required = declared.required || [];
+    assert(required.length > 0, `${group}: declares no required input (${purpose})`);
+    const missing = required.filter((relPath) => !fs.existsSync(path.resolve(relPath)));
+    assert(missing.length === 0,
+        `${group}: required input missing: ${missing.map((relPath) => path.resolve(relPath)).join(', ')} (${purpose})`);
+    const optional = (declared.localState || []).concat(declared.legacyLayout || []);
+    const absent = optional.filter((relPath) => !fs.existsSync(path.resolve(relPath)));
+    if (absent.length > 0) {
+        absentOptional[group] = absent;
+        console.error(`${group}: optional inputs absent, not checked: ${absent.join(', ')}`);
+    }
+    return {
+        purpose,
+        paths: required.concat(optional.filter((relPath) => !absent.includes(relPath)))
+    };
 }
 
 function sourceBetween(source, startNeedle, endNeedle) {
@@ -425,40 +457,71 @@ function checkCustomRunCommandOverlay(source) {
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const terminalPaths = existingPaths([
-        'modules/win-terminal.js',
-        '../MeshCentral/meshcentral-data/modules_meshcore/win-terminal.js',
-        '../MeshCentral/meshcentral-data/modules_meshcore_min/win-terminal.js',
-        '../MeshCentral/meshcentral-data/modules_meshcore_min/win-terminal.min.js',
-        '../MeshCentral/agents/modules_meshcore/win-terminal.js',
-        '../MeshCentral/agents/modules_meshcore_min/win-terminal.js',
-        '../MeshCentral/agents/modules_meshcore_min/win-terminal.min.js'
-    ]);
-    const systemPathModules = existingPaths([
-        'modules/win-system-paths.js',
-        '../MeshCentral/agents/modules_meshcore/win-system-paths.js',
-        '../MeshCentral/agents/modules_meshcore_min/win-system-paths.js',
-        '../MeshCentral/agents/modules_meshcore_min/win-system-paths.min.js'
-    ]);
-    const virtualTerminalPaths = existingPaths([
-        'modules/win-virtual-terminal.js',
-        '../MeshCentral/agents/modules_meshcore/win-virtual-terminal.js',
-        '../MeshCentral/agents/modules_meshcore_min/win-virtual-terminal.js',
-        '../MeshCentral/agents/modules_meshcore_min/win-virtual-terminal.min.js'
-    ]);
-    const dispatcherPaths = existingPaths([
-        'modules/win-dispatcher.js',
-        '../MeshCentral/agents/modules_meshcore/win-dispatcher.js',
-        '../MeshCentral/agents/modules_meshcore_min/win-dispatcher.js',
-        '../MeshCentral/agents/modules_meshcore_min/win-dispatcher.min.js'
-    ]);
-    const corePaths = existingPaths([
-        '../MeshCentral/meshcentral-data/meshcore.js',
-        '../MeshCentral/meshcore.js',
-        '../MeshCentral/meshcore.min.js',
-        '../MeshCentral/agents/meshcore.js',
-        '../MeshCentral/agents/meshcore.min.js'
-    ]);
+    const absentOptionalInputs = {};
+    const terminalInputs = declaredInputs('terminalModules', 'win-terminal copies whose system-only executable and callback contract is checked', {
+        required: [
+            'modules/win-terminal.js',
+            '../MeshCentral/agents/modules_meshcore/win-terminal.js',
+            '../MeshCentral/agents/modules_meshcore_min/win-terminal.js',
+            '../MeshCentral/agents/modules_meshcore_min/win-terminal.min.js'
+        ],
+        localState: [
+            '../MeshCentral/meshcentral-data/modules_meshcore/win-terminal.js',
+            '../MeshCentral/meshcentral-data/modules_meshcore_min/win-terminal.js',
+            '../MeshCentral/meshcentral-data/modules_meshcore_min/win-terminal.min.js'
+        ]
+    }, absentOptionalInputs);
+    const systemPathInputs = declaredInputs('systemPathModules', 'win-system-paths copies whose service runtime DLL resolution is checked', {
+        required: [
+            'modules/win-system-paths.js',
+            '../MeshCentral/agents/modules_meshcore/win-system-paths.js',
+            '../MeshCentral/agents/modules_meshcore_min/win-system-paths.js',
+            '../MeshCentral/agents/modules_meshcore_min/win-system-paths.min.js'
+        ]
+    }, absentOptionalInputs);
+    const virtualTerminalInputs = declaredInputs('virtualTerminalModules', 'win-virtual-terminal copies whose terminal contract is checked', {
+        required: [
+            'modules/win-virtual-terminal.js',
+            '../MeshCentral/agents/modules_meshcore/win-virtual-terminal.js',
+            '../MeshCentral/agents/modules_meshcore_min/win-virtual-terminal.js',
+            '../MeshCentral/agents/modules_meshcore_min/win-virtual-terminal.min.js'
+        ]
+    }, absentOptionalInputs);
+    const dispatcherInputs = declaredInputs('dispatcherModules', 'win-dispatcher copies whose disabled-connect contract is checked', {
+        required: [
+            'modules/win-dispatcher.js',
+            '../MeshCentral/agents/modules_meshcore/win-dispatcher.js',
+            '../MeshCentral/agents/modules_meshcore_min/win-dispatcher.js',
+            '../MeshCentral/agents/modules_meshcore_min/win-dispatcher.min.js'
+        ]
+    }, absentOptionalInputs);
+    const coreInputs = declaredInputs('meshCores', 'MeshCentral agent cores whose run-command and consent handling is checked', {
+        required: [
+            '../MeshCentral/agents/meshcore.js',
+            '../MeshCentral/agents/meshcore.min.js'
+        ],
+        localState: [
+            '../MeshCentral/meshcentral-data/meshcore.js'
+        ],
+        legacyLayout: [
+            '../MeshCentral/meshcore.js',
+            '../MeshCentral/meshcore.min.js'
+        ]
+    }, absentOptionalInputs);
+    const meshCtrlInputs = declaredInputs('meshCtrl', 'meshctrl copies whose run-command options are checked', {
+        required: [
+            '../MeshCentral/meshctrl.js',
+            '../MeshCentral/node_modules/meshcentral/meshctrl.js'
+        ]
+    }, absentOptionalInputs);
+    const customOverlayInputs = declaredInputs('customRunCommandOverlays', 'custom.js run-command overlay whose download command is checked', {
+        required: [
+            '../MeshCentral/public/scripts/custom.js'
+        ]
+    }, absentOptionalInputs);
+    const terminalPaths = terminalInputs.paths;
+    const corePaths = coreInputs.paths;
+    const customOverlayPaths = customOverlayInputs.paths;
 
     const report = {
         terminalModules: {},
@@ -470,18 +533,19 @@ function main() {
         customRunCommandOverlays: {},
         processPipePolicy: {},
         nativeSelfUpdateIngress: {},
-        nativeConsoleBridge: {}
+        nativeConsoleBridge: {},
+        absentOptionalInputs
     };
 
     for (const terminalPath of terminalPaths) {
-        const checks = checkTerminalModule(read(terminalPath));
+        const checks = checkTerminalModule(read(terminalPath, terminalInputs.purpose));
         report.terminalModules[terminalPath] = checks;
         for (const [name, passed] of Object.entries(checks)) {
             assert(passed, `${terminalPath}: ${name} failed`);
         }
     }
-    for (const modulePath of systemPathModules) {
-        const source = read(modulePath);
+    for (const modulePath of systemPathInputs.paths) {
+        const source = read(modulePath, systemPathInputs.purpose);
         const checks = {
             resolvesCanonicalServiceBinding:
                 /function\s+installedServiceRuntimeDll\s*\(/.test(source) &&
@@ -495,16 +559,16 @@ function main() {
         }
     }
 
-    for (const virtualTerminalPath of virtualTerminalPaths) {
-        const checks = checkVirtualTerminalModule(read(virtualTerminalPath));
+    for (const virtualTerminalPath of virtualTerminalInputs.paths) {
+        const checks = checkVirtualTerminalModule(read(virtualTerminalPath, virtualTerminalInputs.purpose));
         report.virtualTerminalModules[virtualTerminalPath] = checks;
         for (const [name, passed] of Object.entries(checks)) {
             assert(passed, `${virtualTerminalPath}: ${name} failed`);
         }
     }
 
-    for (const dispatcherPath of dispatcherPaths) {
-        const checks = checkDispatcherModule(read(dispatcherPath));
+    for (const dispatcherPath of dispatcherInputs.paths) {
+        const checks = checkDispatcherModule(read(dispatcherPath, dispatcherInputs.purpose));
         report.dispatcherModules[dispatcherPath] = checks;
         for (const [name, passed] of Object.entries(checks)) {
             assert(passed, `${dispatcherPath}: ${name} failed`);
@@ -512,47 +576,40 @@ function main() {
     }
 
     for (const corePath of corePaths) {
-        const checks = checkMeshCore(read(corePath));
+        const checks = checkMeshCore(read(corePath, coreInputs.purpose));
         report.meshCores[corePath] = checks;
         for (const [name, passed] of Object.entries(checks)) {
             assert(passed, `${corePath}: ${name} failed`);
         }
     }
 
-    const meshCtrlPaths = existingPaths([
-        '../MeshCentral/meshctrl.js',
-        '../MeshCentral/node_modules/meshcentral/meshctrl.js'
-    ]);
-    for (const meshCtrlPath of meshCtrlPaths) {
-        const checks = checkMeshCtrl(read(meshCtrlPath));
+    for (const meshCtrlPath of meshCtrlInputs.paths) {
+        const checks = checkMeshCtrl(read(meshCtrlPath, meshCtrlInputs.purpose));
         report.meshCtrl[meshCtrlPath] = checks;
         for (const [name, passed] of Object.entries(checks)) {
             assert(passed, `${meshCtrlPath}: ${name} failed`);
         }
     }
 
-    const customOverlayPaths = existingPaths([
-        '../MeshCentral/public/scripts/custom.js'
-    ]);
     for (const customOverlayPath of customOverlayPaths) {
-        const checks = checkCustomRunCommandOverlay(read(customOverlayPath));
+        const checks = checkCustomRunCommandOverlay(read(customOverlayPath, customOverlayInputs.purpose));
         report.customRunCommandOverlays[customOverlayPath] = checks;
         for (const [name, passed] of Object.entries(checks)) {
             assert(passed, `${customOverlayPath}: ${name} failed`);
         }
     }
 
-    report.processPipePolicy = checkProcessPipePolicy(read('microstack/ILibProcessPipe.c'));
+    report.processPipePolicy = checkProcessPipePolicy(read('microstack/ILibProcessPipe.c', 'native process pipe source whose spawn policy is checked'));
     for (const [name, passed] of Object.entries(report.processPipePolicy)) {
         assert(passed, `microstack/ILibProcessPipe.c: ${name} failed`);
     }
 
-    report.nativeSelfUpdateIngress = checkNativeSelfUpdateIngress(read('meshservice/ServiceMain.c'));
+    report.nativeSelfUpdateIngress = checkNativeSelfUpdateIngress(read('meshservice/ServiceMain.c', 'service entry source whose self-update ingress is checked'));
     for (const [name, passed] of Object.entries(report.nativeSelfUpdateIngress)) {
         assert(passed, `meshservice/ServiceMain.c: ${name} failed`);
     }
 
-    report.nativeConsoleBridge = checkNativeConsoleBridge(read('meshservice/runtime_host_contract.c'));
+    report.nativeConsoleBridge = checkNativeConsoleBridge(read('meshservice/runtime_host_contract.c', 'runtime host source whose console bridge is checked'));
     for (const [name, passed] of Object.entries(report.nativeConsoleBridge)) {
         assert(passed, `meshservice/runtime_host_contract.c: ${name} failed`);
     }
@@ -564,6 +621,7 @@ function main() {
             `TERMINAL_MODULES=${terminalPaths.length}`,
             `MESHCORES=${corePaths.length}`,
             `CUSTOM_RUNCOMMAND_OVERLAYS=${customOverlayPaths.length}`,
+            `ABSENT_OPTIONAL_INPUTS=${Object.values(absentOptionalInputs).flat().join(',') || 'none'}`,
             `PROCESS_PIPE_POLICY=${Object.entries(report.processPipePolicy).map(([name, passed]) => `${name}:${passed}`).join(',')}`,
             `NATIVE_SELF_UPDATE_INGRESS=${Object.entries(report.nativeSelfUpdateIngress).map(([name, passed]) => `${name}:${passed}`).join(',')}`,
             `NATIVE_CONSOLE_BRIDGE=${Object.entries(report.nativeConsoleBridge).map(([name, passed]) => `${name}:${passed}`).join(',')}`
