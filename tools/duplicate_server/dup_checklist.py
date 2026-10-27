@@ -17,6 +17,7 @@ from pathlib import Path
 from dup_common import (
     LAYOUTS, NODE_EXE, REPORTS, SECRETS, TOOL_DIR, DupError, layout_root, log, node_env, read_json, write_json,
 )
+import dup_config
 import dup_layout
 
 LANGUAGES = ("en", "de", "fr")
@@ -52,7 +53,7 @@ def tls_context(layout):
         raise DupError(f"{root_cert} missing; start the layout first")
     context = ssl.create_default_context(cafile=str(root_cert))
     # The certificate is checked against the layout's own root and its name is checked below, because
-    # the connection goes to 127.0.0.1 while the certificate names the *.localhost host.
+    # the connection goes to the bind address while the certificate names the *.localhost host.
     context.check_hostname = False
     # MeshCentral's generated certificates carry no Authority Key Identifier, which Python 3.13+ rejects
     # under VERIFY_X509_STRICT. The chain is still verified against the layout's own root.
@@ -70,7 +71,8 @@ def check_peer_name(sock, expected):
 
 def connection(layout):
     port = LAYOUTS[layout]["port"]
-    conn = http.client.HTTPSConnection("127.0.0.1", port, context=tls_context(layout), timeout=60)
+    host = dup_config.configured_bind(layout)
+    conn = http.client.HTTPSConnection(host, port, context=tls_context(layout), timeout=60)
     conn.connect()
     check_peer_name(conn.sock, LAYOUTS[layout]["cert"])
     return conn

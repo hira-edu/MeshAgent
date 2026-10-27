@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Local duplicate of the production MeshCentral server (work package A1).
 
-    python tools/duplicate_server/dupserver.py setup            # installs + layout A + config + users
+    python tools/duplicate_server/dupserver.py setup [--bind 127.0.0.1]   # installs + layout A + config + users
     python tools/duplicate_server/dupserver.py start [--layout A|B]
     python tools/duplicate_server/dupserver.py checklist [--layout A|B]
     python tools/duplicate_server/dupserver.py status
     python tools/duplicate_server/dupserver.py stop [--layout A|B|all]
-    python tools/duplicate_server/dupserver.py layout-b (--tarball <tgz> | --standin)
+    python tools/duplicate_server/dupserver.py layout-b (--tarball <tgz> | --standin) [--bind 127.0.0.1]
     python tools/duplicate_server/dupserver.py reset [--layout A|B|all]
     python tools/duplicate_server/dupserver.py teardown
 
@@ -59,15 +59,18 @@ def create_web_admin(layout):
     return creds
 
 
-def configure_layout(layout):
+def configure_layout(layout, bind):
+    """bind is the address MeshCentral listens on (portBind, mpsPortBind). mongod stays on 127.0.0.1."""
+    dup_config.validate_bind(bind)
     dup_mongo.start()
     dup_mongo.initialize_users()
-    dup_config.write_config(layout, dup_mongo.connection_uri(layout))
+    dup_config.write_config(layout, dup_mongo.connection_uri(layout), bind)
     create_web_admin(layout)
 
 
 def cmd_setup(args):
     ensure_windows()
+    dup_config.validate_bind(args.bind)
     create_root()
     installs = [dup_install.install_node(), dup_install.install_mongo()]
     write_json(REPORTS / "installs.json", installs)
@@ -75,15 +78,16 @@ def cmd_setup(args):
         log(f"  {item['name']} {item['version']} sha256 {item['sha256']} (checked against {item['checksum_source']})")
     dup_config.build_denylist()
     dup_layout.build_layout_a()
-    configure_layout("A")
+    configure_layout("A", args.bind)
     log("setup complete: run `start` then `checklist`")
 
 
 def cmd_layout_b(args):
     require_root_marker()
+    dup_config.validate_bind(args.bind)
     tgz = dup_layout.pack_standin() if args.standin else Path(args.tarball)
     dup_layout.build_layout_b(tgz)
-    configure_layout("B")
+    configure_layout("B", args.bind)
     log("layout B ready: run `start --layout B` then `checklist --layout B`")
 
 
@@ -102,16 +106,17 @@ def cmd_start(args):
             continue
         dup_mongo.start()
         port = LAYOUTS[layout]["port"]
-        dup_process.assert_port_free(port, f"layout {layout}")
+        host = dup_config.configured_bind(layout)
+        dup_process.assert_port_free(port, f"layout {layout}", host)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         log_path = root / "logs" / f"meshcentral-{stamp}.log"
         # The production systemd drop-in: NODE_OPTIONS=--require /opt/meshcentral/bin/harden-image-size.js
         env = node_env({"NODE_OPTIONS": "--require " + str(root / "bin" / "harden-image-size.js")})
         pid = dup_process.spawn(f"meshcentral-{layout}", mc_command(layout), cwd=root, env=env, log_path=log_path)
-        dup_process.wait_for_port(port, 300, alive=lambda: dup_process.pid_alive(pid), what=f"layout {layout}")
-        write_json(REPORTS / f"start-{layout}.json", {"pid": pid, "log": str(log_path), "port": port,
+        dup_process.wait_for_port(port, 300, alive=lambda: dup_process.pid_alive(pid), what=f"layout {layout}", host=host)
+        write_json(REPORTS / f"start-{layout}.json", {"pid": pid, "log": str(log_path), "port": port, "bind": host,
                                                       "started": datetime.now(timezone.utc).isoformat()})
-        log(f"  layout {layout} pid {pid} on https://127.0.0.1:{port} ({LAYOUTS[layout]['cert']}); log {log_path}")
+        log(f"  layout {layout} pid {pid} on https://{host}:{port} ({LAYOUTS[layout]['cert']}); log {log_path}")
 
 
 def stop_layout(layout):
@@ -144,9 +149,11 @@ def cmd_status(args):
     for layout, cfg in LAYOUTS.items():
         root = layout_root(layout)
         procs = dup_process.processes_for(root)
-        status[layout] = {"configured": (root / "meshcentral-data" / "config.json").is_file(),
-                          "running": bool(procs), "pids": [p["ProcessId"] for p in procs],
-                          "port": cfg["port"], "listening": dup_process.port_open(cfg["port"])}
+        configured = (root / "meshcentral-data" / "config.json").is_file()
+        host = dup_config.configured_bind(layout) if configured else None
+        status[layout] = {"configured": configured, "running": bool(procs), "pids": [p["ProcessId"] for p in procs],
+                          "bind": host, "port": cfg["port"],
+                          "listening": dup_process.port_open(cfg["port"], host) if host else False}
     print(__import__("json").dumps(status, indent=2))
 
 
@@ -199,8 +206,10 @@ def cmd_teardown(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("setup")
+    bind_help = "address MeshCentral listens on: 127.0.0.1 (default) or a host-only/private address for the VM"
+    sub.add_parser("setup").add_argument("--bind", default="127.0.0.1", help=bind_help)
     b = sub.add_parser("layout-b")
+    b.add_argument("--bind", default="127.0.0.1", help=bind_help)
     group = b.add_mutually_exclusive_group(required=True)
     group.add_argument("--tarball")
     group.add_argument("--standin", action="store_true", help="use `npm pack meshcentral@1.2.5` until the fork tarball exists")

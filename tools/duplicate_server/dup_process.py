@@ -79,15 +79,15 @@ def port_open(port, host="127.0.0.1"):
         return sock.connect_ex((host, port)) == 0
 
 
-def wait_for_port(port, timeout, alive=None, what="process"):
+def wait_for_port(port, timeout, alive=None, what="process", host="127.0.0.1"):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if port_open(port):
+        if port_open(port, host):
             return
         if alive is not None and not alive():
             raise DupError(f"{what} exited before listening on {port}")
         time.sleep(1)
-    raise DupError(f"{what} did not listen on 127.0.0.1:{port} within {timeout}s")
+    raise DupError(f"{what} did not listen on {host}:{port} within {timeout}s")
 
 
 def pid_alive(pid):
@@ -114,9 +114,9 @@ def wait_gone(tag_path, timeout, what):
     raise DupError(f"{what} still running after {timeout}s: pids {remaining}")
 
 
-def assert_port_free(port, what):
-    if port_open(port):
-        raise DupError(f"Port 127.0.0.1:{port} for {what} is already in use")
+def assert_port_free(port, what, host="127.0.0.1"):
+    if port_open(port, host):
+        raise DupError(f"Port {host}:{port} for {what} is already in use")
 
 
 def runtime_root_processes():

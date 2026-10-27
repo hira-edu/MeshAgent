@@ -8,10 +8,10 @@ changes and has no production access.
 ## Commands
 
 ```powershell
-python tools\duplicate_server\dupserver.py setup                    # installs, layout A, config, users
+python tools\duplicate_server\dupserver.py setup [--bind <ip>]       # installs, layout A, config, users
 python tools\duplicate_server\dupserver.py start                    # layout A on https://127.0.0.1:4431
 python tools\duplicate_server\dupserver.py checklist                # plan section 5 checks for layout A
-python tools\duplicate_server\dupserver.py layout-b --tarball <tgz> # layout B from a fork tarball
+python tools\duplicate_server\dupserver.py layout-b --tarball <tgz> [--bind <ip>] # layout B from a fork tarball
 python tools\duplicate_server\dupserver.py layout-b --standin       # layout B from npm pack meshcentral@1.2.5
 python tools\duplicate_server\dupserver.py start --layout B         # layout B on https://127.0.0.1:4432
 python tools\duplicate_server\dupserver.py checklist --layout B --label <name>
@@ -112,8 +112,12 @@ Build the test agent only with explicit, duplicate-only inputs kept outside the 
    msbuild .\MeshAgent.Build.proj /m /nologo /verbosity:minimal "/p:MeshAgentBrandingConfig=C:\mc-dup\agent\branding.dup.json" "/p:MeshAgentProvisioningManifest=C:\mc-dup\agent\Dup.msh"
    ```
 
-The duplicate binds `127.0.0.1` only. A VM agent needs `portBind` changed to the host-only adapter
-address.
+MeshCentral listens on the `--bind` address given to `setup` or `layout-b`. It is written into
+`portBind` and `mpsPortBind`, and added to `allowedorigin`. The default is `127.0.0.1`. For the VM,
+rebuild the layout with the host-only adapter address, for example
+`reset --layout A` then `setup --bind 192.168.56.1`. Only loopback, private and link-local addresses
+are accepted; `0.0.0.0` and public addresses are refused. mongod always stays on `127.0.0.1`.
+`start`, `status` and `checklist` read the address back from the layout's `config.json`.
 
 ## Tests
 

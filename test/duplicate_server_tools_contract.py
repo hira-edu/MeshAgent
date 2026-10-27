@@ -169,6 +169,12 @@ def test_generated_config(denylist_path):
     assert configs["A"]["domains"][""]["customFiles"] == extra["customFiles"]
     assert "customFiles" not in configs["B"]["domains"][""], "layout B drops the canary entry (D16)"
     assert "mpsPort" not in configs["A"]["settings"] and configs["B"]["settings"]["mpsPort"] == 4434
+    assert configs["A"]["settings"]["mpsPortBind"] == "127.0.0.1", "loopback is the default bind"
+    hostonly, _ = dup_config.generate("A", "mongodb://x", bind="192.168.56.1")
+    assert hostonly["settings"]["portBind"] == hostonly["settings"]["mpsPortBind"] == "192.168.56.1"
+    assert "192.168.56.1" in hostonly["domains"][""]["allowedorigin"]
+    for bad in ("0.0.0.0", "::", "8.8.8.8", "mc-dup-a.localhost"):
+        expect_error(lambda: dup_config.validate_bind(bad), "--bind")
     for key in ("sessionKey", "dbEncryptKey", "dbRecordsEncryptKey"):
         assert configs["A"]["settings"][key] != configs["B"]["settings"][key], f"{key} must be fresh per layout"
 
