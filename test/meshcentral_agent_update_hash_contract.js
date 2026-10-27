@@ -7,17 +7,25 @@ function assert(condition, message) {
     }
 }
 
-function read(relPath) {
-    return fs.readFileSync(path.resolve(relPath), 'utf8').replace(/\r\n?/g, '\n');
-}
-
-function readOptional(relPath) {
-    try { return read(relPath); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+// Every input is required: a missing or empty file fails the contract and says what it was for.
+function read(relPath, purpose) {
+    const fullPath = path.resolve(relPath);
+    let text;
+    try {
+        text = fs.readFileSync(fullPath, 'utf8');
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            throw new Error(`required input missing: ${fullPath} (${purpose})`, { cause: error });
+        }
+        throw error;
+    }
+    assert(text.trim().length > 0, `required input is empty: ${fullPath} (${purpose})`);
+    return text.replace(/\r\n?/g, '\n');
 }
 
 function main() {
-    const source = read('../MeshCentral/meshagent.js');
-    const packageSource = readOptional('../MeshCentral/node_modules/meshcentral/meshagent.js');
+    const source = read('../MeshCentral/meshagent.js', 'tracked MeshCentral meshagent.js whose agent update hash handling is checked');
+    const packageSource = read('../MeshCentral/node_modules/meshcentral/meshagent.js', 'installed MeshCentral package copy of meshagent.js, which the server runs');
     const compareStart = source.indexOf('function compareAgentBinaryHash(agentExeInfo, agentHash)');
     assert(compareStart >= 0, 'compareAgentBinaryHash is missing');
     const compareEnd = source.indexOf('// Request that the core dump file', compareStart);
@@ -41,8 +49,8 @@ function main() {
         'HTTP agent update command must advertise served/appended fileHashHex when present'
     );
     assert(
-        packageSource == null || (packageSource.includes('(agentExeInfo.fileHash != null && agentExeInfo.fileHash == agentHash)') &&
-        packageSource.includes('obj.agentUpdate.agentUpdateHash = obj.agentExeInfo.hash;')),
+        packageSource.includes('(agentExeInfo.fileHash != null && agentExeInfo.fileHash == agentHash)') &&
+        packageSource.includes('obj.agentUpdate.agentUpdateHash = obj.agentExeInfo.hash;'),
         'installed MeshCentral package copy must match agent update hash contract'
     );
 
@@ -52,8 +60,8 @@ function main() {
             compareAcceptsFileHash: true,
             ramUpdateUsesNativeNormalizedHash: true,
             httpUpdateUsesFileHashHex: true,
-            installedPackageCopyAligned: packageSource != null,
-            installedPackageCopyPresent: packageSource != null
+            installedPackageCopyAligned: true,
+            installedPackageCopyPresent: true
         }
     }, null, 2));
 }
