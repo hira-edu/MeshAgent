@@ -5,13 +5,17 @@ import hashlib
 import json
 import re
 import subprocess
+import sys
 import tempfile
 
 root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(root / "test" / "lib"))
+import meshcentral_paths  # noqa: E402
+
 spec = importlib.util.spec_from_file_location("deployment", root / "deploy.py")
 deployment = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(deployment)
-source = (root.parent / "MeshCentral/node_modules/meshcentral/meshcentral.js").read_text(encoding="utf-8")
+source = (meshcentral_paths.installed_package_dir().path / "meshcentral.js").read_text(encoding="utf-8")
 patched = deployment.align_proxy_certificate_sni(deployment.version_meshcentral_module_loader(source))
 assert deployment.version_meshcentral_module_loader(patched) == patched
 older_versioned = re.sub(r"(?m)^\s*const preferredModule = moduleName[^\n]+\n\s*if \(modulesDir\[i\] !== preferredModule[^\n]+\n", "", patched, count=1)

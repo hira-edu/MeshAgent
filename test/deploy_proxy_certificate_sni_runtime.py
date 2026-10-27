@@ -3,7 +3,9 @@ import pathlib,sys,subprocess,tempfile
 root=pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(root))
 import deploy
-source=(root.parent/'MeshCentral/node_modules/meshcentral/meshcentral.js').read_text(encoding='utf-8')
+sys.path.insert(0,str(root/'test'/'lib'))
+import meshcentral_paths
+source=(meshcentral_paths.installed_package_dir().path/'meshcentral.js').read_text(encoding='utf-8')
 fixed=deploy.align_proxy_certificate_sni(source)
 assert deploy.align_proxy_certificate_sni(fixed)==fixed
 assert deploy.align_proxy_certificate_sni(fixed.replace('\n','\r\n'))==fixed.replace('\n','\r\n')
