@@ -30,6 +30,7 @@ if os.name == 'nt':
     sys.modules.setdefault('fcntl', types.SimpleNamespace())
     sys.modules.setdefault('pwd', types.SimpleNamespace())
 MANAGER = load('release_manager_fork_safety', 'tools/deployment/release_manager.py')
+SHADOW = load('meshcentral_shadow_check_fork_safety', 'tools/deployment/meshcentral_shadow_check.py')
 INSTALLER = load('install_controller_fork_safety', 'tools/deployment/install_controller.py')
 DIGEST = 'sha256:' + 'a' * 64
 PREVIOUS = 'sha256:' + 'b' * 64
@@ -355,7 +356,9 @@ class ControllerUpgradeTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('installed before upgrade\n')
         self.config.write_text(json.dumps(SCHEMA1_CONFIG))
-        installed = {INSTALLER.CONTROLLER: paths['CONTROLLER'], INSTALLER.CI_ENTRY: paths['CI_ENTRY']}
+        self.shadow_check = self.root / 'libexec/meshcentral_shadow_check.py'
+        installed = {INSTALLER.CONTROLLER: paths['CONTROLLER'], INSTALLER.CI_ENTRY: paths['CI_ENTRY'],
+                     INSTALLER.SHADOW_CHECK: self.shadow_check}
         code = tuple((name, installed[destination], mode) for name, destination, mode in INSTALLER.CODE)
         lock = types.SimpleNamespace(flock=mock.Mock(), LOCK_EX=2, LOCK_NB=4)
         patches = [mock.patch.object(INSTALLER, name, value) for name, value in paths.items()]
@@ -376,6 +379,8 @@ class ControllerUpgradeTests(unittest.TestCase):
         self.assertEqual([path.read_bytes() for path in backups], [original])
         expected = (DEPLOYMENT / 'release_manager.py').read_text(encoding='utf-8')
         self.assertEqual(self.paths['CONTROLLER'].read_text(encoding='utf-8'), expected)
+        self.assertEqual(self.shadow_check.read_text(encoding='utf-8'),
+                         (DEPLOYMENT / 'meshcentral_shadow_check.py').read_text(encoding='utf-8'))
         INSTALLER.fcntl.flock.assert_called_once()
         # A second upgrade leaves the already-current configuration alone.
         INSTALLER.upgrade()
@@ -402,6 +407,172 @@ class ControllerUpgradeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'operation is running'):
             INSTALLER.upgrade()
         self.assertEqual(json.loads(self.config.read_text()), SCHEMA1_CONFIG)
+
+
+def write(path, data=b'x'):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+class ShadowCheckTests(unittest.TestCase):
+    """G4: the importable check names every unlisted or changed shadow copy."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        for folder in ('meshcentral-data', 'meshcentral-web'):
+            (self.root / folder).mkdir()
+
+    def problems(self, allowlist=None, **options):
+        return SHADOW.find_shadow_files(self.root, allowlist or {}, **options)
+
+    def test_every_governed_location_is_reported(self):
+        data, web = self.root / 'meshcentral-data', self.root / 'meshcentral-web'
+        for path in (data / 'meshcore.js', data / 'meshcore.min.js', data / 'modules_meshcore/win-dispatcher.js',
+                     data / 'agents/meshagent_osx-arm-64', data / 'signedagents/svchost_payload.dll',
+                     data / 'plugins/stfdeploy/stfdeploy.js', web / 'views/default3.handlebars',
+                     web / 'public/scripts/r0-umair-reconnect-canary.js'):
+            write(path)
+        (data / 'modules_meshcore_min').mkdir()
+        (web / 'emails').mkdir()
+        with self.assertRaises(SHADOW.ShadowCopyError) as raised:
+            SHADOW.check(self.root, {})
+        message = str(raised.exception)
+        for name in ('meshcentral-data/meshcore.js: not in the release shadow allowlist',
+                     'meshcentral-data/meshcore.min.js:', 'meshcentral-data/modules_meshcore/win-dispatcher.js:',
+                     'meshcentral-data/agents/meshagent_osx-arm-64:', 'meshcentral-data/signedagents/svchost_payload.dll:',
+                     'meshcentral-data/plugins/stfdeploy/stfdeploy.js:', 'meshcentral-web/views/default3.handlebars:',
+                     'meshcentral-web/public/scripts/r0-umair-reconnect-canary.js:',
+                     'meshcentral-data/modules_meshcore_min/: empty folder still hides the package copy',
+                     'meshcentral-web/emails/: empty folder'):
+            self.assertIn(name, message)
+        self.assertIn('shadowAllowlist', message)
+
+    def test_listed_file_passes_and_a_changed_one_reports_both_digests(self):
+        custom = write(self.root / 'meshcentral-web/public/scripts/custom.js', b'custom')
+        allowlist = {'meshcentral-web/public/scripts/custom.js': sha256(b'custom')}
+        SHADOW.check(self.root, allowlist)
+        custom.write_bytes(b'edited')
+        self.assertEqual(self.problems(allowlist), [
+            'meshcentral-web/public/scripts/custom.js: sha256 ' + sha256(b'edited') +
+            ' differs from the allowlisted ' + sha256(b'custom')])
+
+    def test_files_outside_governed_locations_are_not_shadows(self):
+        for relative in ('meshcentral-data/config.json', 'meshcentral-data/agenterrorlogs.txt',
+                         'meshcentral-data/meshcentral.db', 'meshcentral-data/public/old.js',
+                         'meshcentral-web/translations.json'):
+            write(self.root / relative)
+        (self.root / 'meshcentral-data/agents').mkdir()
+        self.assertEqual(self.problems(), [])
+
+    def test_symbolic_links_are_reported(self):
+        target = write(self.root / 'elsewhere.js')
+        link = self.root / 'meshcentral-data/meshcore.js'
+        try:
+            link.symlink_to(target)
+        except OSError as error:
+            self.skipTest('Symlinks are unavailable: ' + str(error))
+        self.assertEqual(self.problems({'meshcentral-data/meshcore.js': sha256(b'x')}),
+                         ['meshcentral-data/meshcore.js: symbolic link'])
+
+    def test_mounted_paths_are_hidden_and_overlays_replace_host_folders(self):
+        write(self.root / 'meshcentral-data/meshcore.js', b'')  # Docker's mount-point placeholder
+        write(self.root / 'meshcentral-data/signedagents/stale.exe')  # hidden by the runtime mount
+        runtime = self.root / 'runtime/signed'
+        write(runtime / 'MeshService64.exe', b'exe')
+        overlays = {'meshcentral-data/signedagents': runtime}
+        self.assertEqual(self.problems(hidden=['meshcentral-data/meshcore.js'], overlays=overlays),
+                         ['meshcentral-data/signedagents/MeshService64.exe: not in the release shadow allowlist'])
+        self.assertEqual(self.problems({'meshcentral-data/signedagents/MeshService64.exe': sha256(b'exe')},
+                                       hidden=['meshcentral-data/meshcore.js'], overlays=overlays), [])
+
+    def test_missing_install_folder_fails_loudly(self):
+        (self.root / 'meshcentral-web').rmdir()
+        with self.assertRaisesRegex(SHADOW.ShadowCopyError, 'meshcentral-web is not a directory'):
+            SHADOW.check(self.root, {})
+
+    def test_malformed_allowlists_are_refused(self):
+        digest = sha256(b'x')
+        SHADOW.parse_allowlist([{'path': 'meshcentral-web/public/scripts/custom.js', 'sha256': digest}])
+        for entries in ({'path': 'x'}, [{'path': '/opt/meshcentral/meshcentral-data/meshcore.js', 'sha256': digest}],
+                        [{'path': 'meshcentral-web/public/../../etc/passwd', 'sha256': digest}],
+                        [{'path': 'meshcentral-web\\public\\x.js', 'sha256': digest}],
+                        [{'path': 'meshcentral-data/config.json', 'sha256': digest}],
+                        [{'path': 'meshcentral-data/meshcore.js', 'sha256': digest.upper()}],
+                        [{'path': 'meshcentral-data/meshcore.js', 'sha256': digest, 'note': 'x'}],
+                        [{'path': 'meshcentral-data/meshcore.js', 'sha256': digest}] * 2):
+            with self.subTest(entries=entries), self.assertRaises(ValueError):
+                SHADOW.parse_allowlist(entries)
+
+    def test_command_line_reports_violations_and_exit_status(self):
+        manifest = self.root / 'manifest.json'
+        manifest.write_text(json.dumps({'shadowAllowlist': []}))
+        self.assertEqual(SHADOW.main(['--root', str(self.root), '--manifest', str(manifest)]), 0)
+        write(self.root / 'meshcentral-data/meshcore.js')
+        with mock.patch('sys.stderr', new_callable=lambda: __import__('io').StringIO()) as stderr:
+            self.assertEqual(SHADOW.main(['--root', str(self.root), '--manifest', str(manifest)]), 1)
+        self.assertIn('meshcentral-data/meshcore.js: not in the release shadow allowlist', stderr.getvalue())
+
+
+class StartShadowCheckTests(FixtureCase):
+    """G4 runs in start and recover, against the folders as the container sees them."""
+
+    def setUp(self):
+        super().setUp()
+        self.docker_runs = []
+        for patch in (mock.patch.object(MANAGER, 'run', side_effect=lambda *args, **kw: self.docker_runs.append(args)),
+                      mock.patch.object(MANAGER, 'remove_container')):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def release(self, digest=DIGEST, **extra):
+        directory = make_release(self.release_dir(digest), {'data/MeshService64.exe': b'exe'}, **extra)
+        return {'digest': digest, 'directory': str(directory), 'runtime': str(MANAGER.seed_agents(directory))}
+
+    def test_start_refuses_unlisted_shadow_copies_before_running_the_container(self):
+        write(self.base / 'meshcentral-data/meshcore.js', b'')
+        write(self.base / 'meshcentral-web/views/default3.handlebars')
+        with self.assertRaises(MANAGER.meshcentral_shadow_check.ShadowCopyError) as raised:
+            MANAGER.start(self.config, self.release())
+        self.assertIn('meshcentral-data/meshcore.js: not in the release shadow allowlist', str(raised.exception))
+        self.assertIn('meshcentral-web/views/default3.handlebars:', str(raised.exception))
+        self.assertEqual(self.docker_runs, [])
+
+    def test_start_accepts_allowlisted_files_and_paths_covered_by_its_mounts(self):
+        write(self.base / 'meshcentral-web/public/scripts/custom.js', b'custom')
+        write(self.base / 'meshcentral-data/meshcore.js', b'')  # covered by this release's mount
+        directory = make_release(
+            self.release_dir(DIGEST), {'data/MeshService64.exe': b'exe', 'data-core/meshcore.js': b'core'},
+            mounts=[{'source': 'data-core/meshcore.js', 'target': str(self.base / 'meshcentral-data') + '/meshcore.js'}],
+            shadowAllowlist=[{'path': 'meshcentral-web/public/scripts/custom.js', 'sha256': sha256(b'custom')}])
+        release = {'digest': DIGEST, 'directory': str(directory), 'runtime': str(MANAGER.seed_agents(directory))}
+        MANAGER.start(self.config, release)
+        self.assertEqual(len(self.docker_runs), 1)
+
+    def test_recover_runs_the_check_for_the_previous_release(self):
+        previous = self.release(PREVIOUS)
+        write(self.base / 'meshcentral-data/modules_meshcore/win-dispatcher.js')
+        transaction = {'previous': previous, 'candidate': None,
+                       'config_backup': str(write(self.state / 'config-backup.json', self.config_path.read_bytes())),
+                       'config_metadata': {'uid': 0, 'gid': 0, 'mode': 0o600}}
+        with self.assertRaisesRegex(MANAGER.meshcentral_shadow_check.ShadowCopyError,
+                                    'meshcentral-data/modules_meshcore/win-dispatcher.js'):
+            MANAGER.recover(self.config, transaction)
+        self.assertEqual(self.docker_runs, [])
+
+    def test_allowlist_cannot_contradict_the_release_agent_files(self):
+        release = self.release(shadowAllowlist=[{'path': 'meshcentral-data/agents/MeshService64.exe',
+                                                 'sha256': sha256(b'other')}])
+        with self.assertRaisesRegex(ValueError, 'disagree on meshcentral-data/agents/MeshService64.exe'):
+            MANAGER.start(self.config, release)
+
+    def test_malformed_allowlist_is_refused_at_preparation(self):
+        directory = make_release(self.release_dir(DIGEST), {'data/MeshService64.exe': b'exe'},
+                                 shadowAllowlist=[{'path': 'meshcentral-data/config.json', 'sha256': sha256(b'x')}])
+        with self.assertRaisesRegex(ValueError, 'governed folder'):
+            MANAGER.validate_manifest(directory / 'overrides', self.config['reviewed_versions'])
 
 
 if __name__ == '__main__':

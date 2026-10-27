@@ -14,10 +14,15 @@ import pwd
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
 import uuid
+
+# The shadow-copy check is installed beside the controller (install_controller.CODE).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import meshcentral_shadow_check  # noqa: E402
 
 BASE = Path('/opt/meshcentral')
 STATE = Path('/var/lib/meshcentral-deploy')
@@ -132,6 +137,11 @@ def release_identity(manifest):
     return version, reviewed, revision
 
 
+# Release mount role -> folder under BASE that its members are mounted into.
+MOUNT_ROOTS = {'data-core': 'meshcentral-data', 'data-plugin': 'meshcentral-data/plugins',
+               'web-public': 'meshcentral-web/public'}
+
+
 def validate_manifest(directory, reviewed_versions):
     manifest = json.loads((directory / 'manifest.json').read_text())
     if manifest['schema'] != 1:
@@ -157,15 +167,15 @@ def validate_manifest(directory, reviewed_versions):
             actual = hashlib.file_digest(stream, 'sha256').hexdigest()
         if actual != expected:
             raise ValueError('Release content digest mismatch')
+    # Fail at preparation, not at start, when the release's shadow allowlist is malformed.
+    meshcentral_shadow_check.parse_allowlist(manifest.get('shadowAllowlist', []))
     targets = set()
     for mount in manifest['mounts']:
         source, target = mount['source'], mount['target']
         if source not in manifest['files'] or target in targets:
             raise ValueError('Invalid or duplicate release mount')
         role, relative = source.split('/', 1)
-        roots = {'data-core': str(BASE / 'meshcentral-data'),
-                 'data-plugin': str(BASE / 'meshcentral-data/plugins'),
-                 'web-public': str(BASE / 'meshcentral-web/public')}
+        roots = {name: str(BASE / folder) for name, folder in MOUNT_ROOTS.items()}
         if role not in roots or target != roots[role] + '/' + relative:
             raise ValueError('Release mount outside approved roots')
         if role == 'data-core' and not (relative in ('meshcore.js', 'meshcore.min.js', 'recoverycore.js') or
@@ -346,10 +356,33 @@ def verify_agent_runtime(directory, runtime):
                          '\n  '.join(problems))
 
 
+def check_shadow_copies(manifest, runtime):
+    """G4: fail unless every file that would shadow the package is allowlisted by this release.
+
+    Checks the folders as the container will see them: release mounts hide the host files they
+    cover (their content is verified by the manifest), and the agent folders are the release runtime.
+    """
+    allowlist = meshcentral_shadow_check.parse_allowlist(manifest.get('shadowAllowlist', []))
+    for role, files in agent_seed(manifest).items():
+        folder = 'meshcentral-data/' + dict(AGENT_ROLES)[role]
+        for name, digest in files.items():
+            if allowlist.setdefault(folder + '/' + name, digest) != digest:
+                raise ValueError('shadowAllowlist and the release agent files disagree on ' + folder + '/' + name)
+    hidden = []
+    for mount in manifest['mounts']:
+        role, relative = mount['source'].split('/', 1)
+        hidden.append(MOUNT_ROOTS[role] + '/' + relative)
+    overlays = {'meshcentral-data/' + folder: Path(runtime) / role for role, folder in AGENT_ROLES}
+    meshcentral_shadow_check.check(BASE, allowlist, hidden, overlays)
+
+
 def start(config, release):
     directory = Path(release['directory'])
     manifest = validate_manifest(directory / 'overrides', config['reviewed_versions'])
     verify_agent_runtime(directory, release['runtime'])
+    # Runs at every start, including recovery and rollback: an older release re-mounts only its own
+    # overrides, so stale data/web copies must be refused here rather than trusted.
+    check_shadow_copies(manifest, release['runtime'])
     user = pwd.getpwnam('meshcentral')
     args = ['docker', 'run', '--detach', '--name', CONTAINER, '--restart', 'unless-stopped',
             '--network', 'host', '--read-only', '--cap-drop', 'ALL',
@@ -424,6 +457,9 @@ def recover(config, transaction):
         seed_agents(Path(previous['directory']), Path(previous['runtime']))
         start(config, previous)
     else:
+        # The retained host installation has no release manifest, so it has no shadow allowlist.
+        print('Restoring the retained host MeshCentral service; the shadow-copy check (G4) applies only '
+              'to image releases and does not cover it')
         run('systemctl', 'enable', '--now', 'meshcentral')
     if not healthy(config, previous['digest'] if previous else None):
         raise RuntimeError('Recovery health failed; transaction retained for operator recovery')

@@ -24,8 +24,11 @@ SUDOERS = Path('/etc/sudoers.d/meshcentral-deploy')
 CONTROLLER = Path('/usr/local/libexec/meshcentral-release')
 CI_ENTRY = Path('/usr/local/sbin/meshcentral-ci-entry')
 PACKAGE = Path('/opt/meshcentral/node_modules/meshcentral/package.json')
+# The controller imports this module from its own directory.
+SHADOW_CHECK = CONTROLLER.parent / 'meshcentral_shadow_check.py'
 # Repository file -> installed path and mode, for every file the controller runs.
-CODE = (('release_manager.py', CONTROLLER, 0o755), ('ci_entry.py', CI_ENTRY, 0o755))
+CODE = (('release_manager.py', CONTROLLER, 0o755), ('ci_entry.py', CI_ENTRY, 0o755),
+        ('meshcentral_shadow_check.py', SHADOW_CHECK, 0o644))
 
 
 def install(source, destination, mode):
@@ -132,7 +135,7 @@ def fresh_install(args):
         account = None
     if account is not None:
         raise ValueError('meshdeploy already exists; inspect its ownership and access before installation')
-    for destination in (SUDOERS, CONTROLLER, CI_ENTRY):
+    for destination in (SUDOERS, CONTROLLER, CI_ENTRY, SHADOW_CHECK):
         if destination.exists():
             raise ValueError('Existing controller file requires operator review: ' + str(destination))
     require_sources()
