@@ -12,14 +12,25 @@ promotion/rollback fault tests, input validation, stale sibling-commit rejection
 and real disposable Git synchronization tests. The tests do not call Docker,
 systemd, SSH, or production endpoints. Linux is needed to exercise real POSIX
 permissions and directory fsync; Windows fixtures stub only POSIX-only APIs.
+`ci_release_fork_safety_test.py` covers the controller behaviour described in
+`docs/DEPLOYMENT.md`: the `reviewed_versions` policy and the
+`install_controller.py --upgrade` migration, manifest-only agent seeding across
+promotion and recovery, the shadow-copy check and the host recovery snapshot,
+installation and start-time checks of the image-size mitigation, the smoke
+assertions against fixture pages, and the Docker build-context rules. Its
+`MitigationShimTests` run `harden-image-size.js` under `node` against stand-in
+`image-size` packages and are skipped when `node` is absent. Two symlink cases
+are skipped on Windows hosts that cannot create symlinks.
 
 Validate hook/coordinated-release.yml and the public repository dispatch workflows with
 `actionlint`. The release workflow also aggregates the Windows matrix and runs
 both release bundle gates, including the configured branding signing policy,
 before building its container. Its image smoke gate
 boots and restarts the exact published digest using disposable configuration,
-an isolated local listener, and a read-only image filesystem. This integration
-gate requires Docker and does not use the production database or certificates.
+an isolated local listener, and a read-only image filesystem, then runs the
+identity assertions described under "Image smoke test" in `docs/DEPLOYMENT.md`.
+This integration gate requires Docker and does not use the production database
+or certificates.
 Production promotion additionally verifies the selected image is running and
 the configured public HTTPS `health.ashx` response is exactly `ok`.
 
@@ -37,6 +48,100 @@ MeshCentral `agents/modules_meshcore*` copy with an agent counterpart to match
 `modules/` exactly. The server's undated copies replace modules that an agent
 build does not embed or embeds undated. Clipboard is the listed exception: its
 server copy must not use `MeshClipboardBridgeW`, which those builds lack.
+
+The host power-action policy is checked in two parts.
+`node test/power_action_policy_contract.js` reads only tracked sources: the
+MeshAgent policy code under `meshcore/`, `tools/`, and `schema/`, and the sibling
+MeshCentral `meshctrl.js` and `agents/meshcore.js`.
+`node test/power_action_policy_lab_runtime.js` checks the current lab
+configuration: `branding_config.local.json` must set
+`advanced.allowHostPowerActions` to `true`, and the generated
+`meshcore/generated/meshagent_branding.h` must define
+`MESH_AGENT_ALLOW_HOST_POWER_ACTIONS 1`. Both files are local and untracked, so
+the runtime test passes only in a configured, built checkout and otherwise fails
+with `required lab input missing`. Both accept `--evidence <dir>`. Run both from
+the MeshAgent root.
+
+### MeshCentral checkout location
+
+MeshCentral contracts and runtime tests read the sibling `../MeshCentral`
+checkout beside the MeshAgent root. Every input they declare is required: a
+missing or empty file fails with `required input missing` or `is empty` and names
+the path, rather than skipping the check. A few declared optional inputs, such as
+untracked `meshcentral-data` core and module copies, are checked when present and
+reported on stderr when absent.
+
+The three contracts below also accept `MESHCENTRAL_ROOT`, which overrides the
+sibling path. A MeshAgent worktree under `.claude/worktrees/` has no sibling
+`MeshCentral`, so set it there:
+
+```powershell
+$env:MESHCENTRAL_ROOT = "C:\path\to\MeshCentral"
+node test/meshcentral_upstream_base_contract.js
+node test/meshcentral_generated_assets_contract.js
+node test/meshcentral_custom_js_script_refs_contract.js
+```
+
+The other MeshCentral contracts do not read `MESHCENTRAL_ROOT`. From such a
+worktree they fail on the missing sibling path.
+
+### MeshCentral fork contracts
+
+`test/meshcentral_upstream_base_contract.js` checks every MeshCentral file that
+replaces an upstream file. The root must be a git top level holding the upstream
+tag named by `defaultUpstreamTag` in
+`test/fixtures/meshcentral-fork-hunks/upstream-base.json` (currently `1.2.5`), and
+the tag's `package.json` must be upstream `meshcentral` at that version. Fetch the
+upstream tags if it is missing. Each listed file has a state:
+
+- `enforced`: the line-ending-normalised diff against the tag must equal the
+  reviewed diff saved as `upstream-base/<path>.diff` beside the JSON. Any other
+  hunk fails (`PASS enforced`).
+- `pending-rebase`: the file still starts from an older upstream base
+  (`forkBase`). It is reported as `PENDING` with its diff counts, the upstream
+  lines it lacks, and its `flipStage`; it does not fail.
+- `excluded`, with a reason, for wrapper metadata and `public/scripts/custom.js`,
+  which this contract never opens.
+
+Every tracked file that also exists at the tag must be listed or excluded, and a
+listed file that is no longer tracked fails. A pending file flips to `enforced`
+in the fixture once it is rebased: review its diff with
+`--print-diff <path>` (prints only, writes nothing), save it as its `.diff`
+fixture, and change the state. `--full` prints every missing upstream line of
+pending files instead of the first twelve. `--evidence <dir>` writes the full
+report as JSON into `<dir>`.
+
+`test/meshcentral_generated_assets_contract.js` requires every generated or
+minified MeshCentral file under `agents/` or `public/` (`*.min.js`, `*-min.js`,
+and `agents/modules_meshcore_min/**`) to be listed in
+`test/fixtures/meshcentral-fork-hunks/generated-assets.json`. Each listed file is
+in one of these sections or states:
+
+- `builders`: each reproducible builder runs with `--check` and must report no
+  drift.
+- `built`: the file is produced entirely by one of those builders.
+- `no-builder-yet`: nothing regenerates the file. It is reported as `PENDING`
+  with its size and line count next to its source and the `workPackage` that adds
+  a builder. A `copy-of-source` file must still equal its source.
+- `knownDrift`: a recorded deviation of a `copy-of-source` file, saved as a diff
+  under `generated-assets/` and reported as `DRIFT`.
+- `vendored`: third-party build output with no source in the repository.
+
+An unlisted generated file, a listed file that is not tracked, or an
+unrecorded drift fails. When a known drift disappears, the contract fails until
+its `knownDrift` record is removed. A file flips from `no-builder-yet` to
+`built` when a builder entry covers it. `--print-drift <path>` prints the
+current diff from a file's source to it. `--evidence <dir>` writes the report as
+JSON.
+
+`test/meshcentral_custom_js_script_refs_contract.js` reads only the string
+literals in `public/scripts/custom.js` that name a `.js`, `.css`, or `.wasm`
+file. It requires each one to resolve to a tracked MeshCentral file:
+`public/scripts/<name>` for bare or `scripts/` references, and
+`plugins/<p>/<f>` for plugin references. A `plugin/<p>/<f>` URL also needs a
+file in `plugins/<p>/` that registers that route. Query strings are ignored. An
+unsupported reference form, or finding no references at all, fails. It has no
+fixture or options.
 
 ### Runtime probes
 
@@ -362,6 +467,76 @@ files, signed PE32/PE32+ images, appended provisioning, malformed offsets,
 header lengths, and normalized versus historical whole-file transfer hashes.
 It requires Clang and OpenSSL development headers/libraries
 (Homebrew OpenSSL 3 is detected on Apple Silicon) and uses ASan/UBSan.
+
+### deploy.py against a fake remote
+
+`test/deploy_fake_remote.py` replaces `deploy.run_remote_process`, the single
+function every `ssh` and `scp` call goes through. Remote shell commands run in a
+local POSIX shell (Git's `bash.exe` on Windows, never WSL) against a temporary
+directory that stands in for `/opt/meshcentral`. Shims for `systemctl`, `cp`, and
+`python3` record calls and inject failures. Any command that is not `ssh` or
+`scp` to the fake host fails the test, and no branding file is read. These tests
+use it:
+
+```powershell
+python test/deploy_rollback_runtime.py
+python test/deploy_artifact_selection_runtime.py
+python test/deploy_config_edit_runtime.py
+python test/deploy_meshctrl_runtime.py
+```
+
+- `deploy_rollback_runtime.py`: the backup manifest records present and absent
+  targets and refuses an existing backup directory; restore returns every path
+  to its recorded state, reports a tampered copy while restoring the rest, and
+  fails loudly without a manifest; rollback removes files a release added,
+  reports drift, and does not restart when the restore fails; a partial publish
+  is restored automatically, and a failed restart is restored and restarted,
+  including the case where the restored release also stays down.
+- `deploy_artifact_selection_runtime.py`: the publish-state helpers take
+  explicit artifact lists and report declared or tracked files missing locally;
+  rollback restores a file since dropped from the map; `deploy` still refuses
+  missing required artifacts.
+- `deploy_config_edit_runtime.py`: `config edit` uploads nothing for an
+  unchanged file or invalid JSON (and leaves no local copy), stops the upload
+  when the remote backup fails, and backs up before uploading a valid edit.
+- `deploy_meshctrl_runtime.py`: missing local `meshctrl` prerequisites fail
+  before the server is contacted, and `meshctrl` and the update helper run
+  locally with a local key file.
+
+`python test/deploy_transport_health_runtime.py` and
+`node test/deploy_publish_paths_contract.js` pin the recovery helper and the
+backup call signature in `deploy.py`.
+
+### Duplicate MeshCentral server
+
+`tools/duplicate_server/` runs a local copy of the production MeshCentral server
+under `C:\mc-dup` (override with `MC_DUP_ROOT`) with fresh keys and no production
+data or access. Layout A reproduces the current production layout; layout B
+installs a MeshCentral tarball with no overrides. Setup, the known differences
+from production, and the test-agent build are in
+[`tools/duplicate_server/README.md`](../../tools/duplicate_server/README.md).
+
+```powershell
+python tools\duplicate_server\dupserver.py setup
+python tools\duplicate_server\dupserver.py start
+python tools\duplicate_server\dupserver.py checklist
+python tools\duplicate_server\dupserver.py layout-b --tarball <tgz>
+python tools\duplicate_server\dupserver.py start --layout B
+python tools\duplicate_server\dupserver.py checklist --layout B --label <name>
+python tools\duplicate_server\dupserver.py status
+python tools\duplicate_server\dupserver.py stop --layout all
+python tools\duplicate_server\dupserver.py teardown
+```
+
+`setup` downloads pinned Node and MongoDB builds, verifies their checksums, and
+needs network access to their publishers and the npm registry. `checklist` writes
+`C:\mc-dup\reports\checklist-<layout>-<label>-<time>.json`, with every item
+marked `PASS`, `FAIL`, `INFO`, or `PENDING-VM` (items that need a test agent). It
+reads core composition, agent binary selection, and plugin state through
+MeshCentral's own objects, reads view selection over HTTPS from the running
+server, and checks that the image-size preload printed its success line.
+`python test\duplicate_server_tools_contract.py` checks the tooling itself
+without starting a server.
 
 ### Grouped regression
 

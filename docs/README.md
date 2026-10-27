@@ -7,9 +7,10 @@ validation contracts.
 - [Configuration](CONFIGURATION.md): branding, provisioning, runtime policy,
   service recovery, and update transport.
 - [Deployment](DEPLOYMENT.md): package staging, publishing, backups, rollback,
-  and Windows lifecycle operations.
+  the VPS release controller, and Windows lifecycle operations.
 - [Testing](testing/README.md): build prerequisites, source contracts, runtime
-  probes, local lifecycle regression, and release gates.
+  probes, deployment and duplicate-server checks, local lifecycle regression,
+  and release gates.
 
 The Windows service uses the system svchost executable with a dedicated group
 containing only the configured agent service. Approved helper and compatibility
