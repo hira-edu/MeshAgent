@@ -56,21 +56,91 @@ def validate_digest(value):
     return value
 
 
-def load_config():
-    config = json.loads(CONFIG.read_text())
+# Controller configuration schema 2 replaced the single 'meshcentral_version' value with an
+# allowlist of reviewed MeshCentral versions ('reviewed_versions').
+CONFIG_SCHEMA = 2
+VERSION_PATTERN = r'[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?'
+FORK_REVISION_PATTERN = r'[0-9a-f]{40}'
+
+
+def validate_reviewed_versions(versions):
+    if (not isinstance(versions, list) or not versions or
+            not all(isinstance(version, str) and re.fullmatch(VERSION_PATTERN, version) for version in versions)):
+        raise ValueError('reviewed_versions must be a non-empty list of exact MeshCentral versions, e.g. ["1.2.5"]')
+    if len(set(versions)) != len(versions):
+        raise ValueError('reviewed_versions lists a version more than once')
+    return versions
+
+
+def validate_config(config):
+    if 'meshcentral_version' in config:
+        raise ValueError(str(CONFIG) + ' uses the retired single meshcentral_version policy; '
+                         'migrate it with "install_controller.py --upgrade" before deploying')
+    if config.get('schema') != CONFIG_SCHEMA:
+        raise ValueError('Unsupported release controller configuration schema: ' + repr(config.get('schema')))
     if not re.fullmatch(r'ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+', config['image']):
         raise ValueError('Only the configured GHCR image repository is accepted')
     if not config['health_url'].startswith('https://') or not config['health_url'].endswith('/health.ashx'):
         raise ValueError('health_url must be an HTTPS MeshCentral health.ashx endpoint')
     if not isinstance(config.get('enable_fleet_update'), bool):
         raise ValueError('Explicit enable_fleet_update policy is required')
+    validate_reviewed_versions(config.get('reviewed_versions'))
     return config
 
 
-def validate_manifest(directory, expected_version):
+def new_config(image, health_url, reviewed_version, enable_fleet_update):
+    return validate_config({'schema': CONFIG_SCHEMA, 'image': image, 'health_url': health_url,
+                            'reviewed_versions': [reviewed_version],
+                            'enable_fleet_update': enable_fleet_update})
+
+
+def migrate_config(config):
+    """Return the schema-2 form of a controller configuration; schema-2 input is returned unchanged.
+
+    The single reviewed value of a schema-1 configuration becomes the first allowlist entry,
+    so every release that the old configuration accepted is still accepted.
+    """
+    config = dict(config)
+    if 'meshcentral_version' in config:
+        if 'schema' in config or 'reviewed_versions' in config:
+            raise ValueError('Configuration mixes meshcentral_version with schema 2 fields; resolve it by hand')
+        config['reviewed_versions'] = [config.pop('meshcentral_version')]
+        config['schema'] = CONFIG_SCHEMA
+    return validate_config(config)
+
+
+def load_config():
+    return validate_config(json.loads(CONFIG.read_text()))
+
+
+def release_identity(manifest):
+    """Return (packaged version, reviewed upstream version, fork revision or None).
+
+    Manifests written before the fork carry neither identity field: their reviewed version is
+    the version they recorded, and they have no fork revision.
+    """
+    version = manifest['meshcentral_version']
+    reviewed = manifest.get('reviewedUpstreamVersion', version)
+    revision = manifest.get('forkRevision')
+    if not isinstance(version, str) or not re.fullmatch(VERSION_PATTERN, version):
+        raise ValueError('Release manifest has an invalid meshcentral_version: ' + repr(version))
+    if reviewed != version:
+        raise ValueError('Release manifest was reviewed for MeshCentral ' + repr(reviewed) +
+                         ' but packages MeshCentral ' + version)
+    if revision is not None and (not isinstance(revision, str) or not re.fullmatch(FORK_REVISION_PATTERN, revision)):
+        raise ValueError('Release manifest forkRevision must be a full lowercase git commit sha: ' + repr(revision))
+    return version, reviewed, revision
+
+
+def validate_manifest(directory, reviewed_versions):
     manifest = json.loads((directory / 'manifest.json').read_text())
-    if manifest['schema'] != 1 or manifest['meshcentral_version'] != expected_version:
-        raise ValueError('Server version changes require a separately reviewed database migration')
+    if manifest['schema'] != 1:
+        raise ValueError('Unsupported release manifest schema: ' + repr(manifest['schema']))
+    _, reviewed, _ = release_identity(manifest)
+    if reviewed not in validate_reviewed_versions(reviewed_versions):
+        raise ValueError('MeshCentral ' + reviewed + ' is not a reviewed version (reviewed_versions: ' +
+                         ', '.join(reviewed_versions) + '). Server version changes require a separately '
+                         'reviewed database migration; add the version to reviewed_versions only after that review.')
     for relative, expected in manifest['files'].items():
         path = PurePosixPath(relative)
         if path.is_absolute() or '..' in path.parts or ',' in relative:
@@ -157,7 +227,7 @@ def prepare(config, digest):
             run('docker', '--config', directory, 'pull', image)
     directory = STATE / 'releases' / digest.split(':')[1]
     if directory.exists():
-        validate_manifest(directory / 'overrides', config['meshcentral_version'])
+        validate_manifest(directory / 'overrides', config['reviewed_versions'])
         return directory
     temporary = directory.with_name(directory.name + '.preparing')
     if temporary.exists():
@@ -167,7 +237,7 @@ def prepare(config, digest):
     try:
         run('docker', 'create', '--name', extraction, image)
         run('docker', 'cp', extraction + ':/opt/meshcentral/release-overrides', str(temporary / 'overrides'))
-        validate_manifest(temporary / 'overrides', config['meshcentral_version'])
+        validate_manifest(temporary / 'overrides', config['reviewed_versions'])
         os.replace(temporary, directory)
     finally:
         subprocess.run(['docker', 'rm', '-f', extraction], check=False, stdout=subprocess.DEVNULL)
@@ -278,7 +348,7 @@ def verify_agent_runtime(directory, runtime):
 
 def start(config, release):
     directory = Path(release['directory'])
-    manifest = validate_manifest(directory / 'overrides', config['meshcentral_version'])
+    manifest = validate_manifest(directory / 'overrides', config['reviewed_versions'])
     verify_agent_runtime(directory, release['runtime'])
     user = pwd.getpwnam('meshcentral')
     args = ['docker', 'run', '--detach', '--name', CONTAINER, '--restart', 'unless-stopped',
