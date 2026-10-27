@@ -90,20 +90,27 @@ def validate_config(config):
     if not isinstance(config.get('enable_fleet_update'), bool):
         raise ValueError('Explicit enable_fleet_update policy is required')
     validate_reviewed_versions(config.get('reviewed_versions'))
+    digest = config.get('image_size_mitigation_sha256')
+    if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
+        raise ValueError('image_size_mitigation_sha256 is missing; install the tracked mitigation with '
+                         '"install_controller.py --upgrade"')
     return config
 
 
-def new_config(image, health_url, reviewed_version, enable_fleet_update):
+def new_config(image, health_url, reviewed_version, enable_fleet_update, mitigation_sha256):
     return validate_config({'schema': CONFIG_SCHEMA, 'image': image, 'health_url': health_url,
                             'reviewed_versions': [reviewed_version],
-                            'enable_fleet_update': enable_fleet_update})
+                            'enable_fleet_update': enable_fleet_update,
+                            'image_size_mitigation_sha256': mitigation_sha256})
 
 
-def migrate_config(config):
-    """Return the schema-2 form of a controller configuration; schema-2 input is returned unchanged.
+def migrate_config(config, mitigation_sha256):
+    """Return the schema-2 form of a controller configuration.
 
     The single reviewed value of a schema-1 configuration becomes the first allowlist entry,
-    so every release that the old configuration accepted is still accepted.
+    so every release that the old configuration accepted is still accepted. The sha256 of the
+    image-size mitigation that install_controller installed from the repository is recorded.
+    Other settings are kept unchanged.
     """
     config = dict(config)
     if 'meshcentral_version' in config:
@@ -111,6 +118,7 @@ def migrate_config(config):
             raise ValueError('Configuration mixes meshcentral_version with schema 2 fields; resolve it by hand')
         config['reviewed_versions'] = [config.pop('meshcentral_version')]
         config['schema'] = CONFIG_SCHEMA
+    config['image_size_mitigation_sha256'] = mitigation_sha256
     return validate_config(config)
 
 
@@ -398,10 +406,15 @@ def start(config, release):
         mount(Path(release['runtime']) / role, BASE / 'meshcentral-data' / name, role == 'data')
     for item in manifest['mounts']:
         mount(directory / 'overrides' / item['source'], item['target'], True)
-    # Preserve the existing production image-size mitigation across the migration.
+    # Preserve the production image-size mitigation, tracked as tools/deployment/harden-image-size.js
+    # and installed by install_controller.py, which records its sha256 in the configuration.
     mitigation = BASE / 'bin/harden-image-size.js'
-    if not mitigation.is_file():
-        raise ValueError('Required production image-size mitigation is missing')
+    if mitigation.is_symlink() or not mitigation.is_file():
+        raise ValueError('The image-size mitigation ' + str(mitigation) + ' is missing; reinstall it with '
+                         '"install_controller.py --upgrade"')
+    if file_sha256(mitigation) != config['image_size_mitigation_sha256']:
+        raise ValueError('The image-size mitigation ' + str(mitigation) + ' differs from the copy '
+                         'install_controller.py installed; review it and reinstall with "install_controller.py --upgrade"')
     mount(mitigation, mitigation, True)
     args.extend(['--env', 'NODE_OPTIONS=--require=' + str(mitigation)])
     args.append(config['image'] + '@' + release['digest'])
