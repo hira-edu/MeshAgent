@@ -1633,17 +1633,13 @@ def validate_local_service_bundle_artifacts(local_artifacts):
     return report
 
 
-def get_agent_publish_artifacts(local_artifacts=None):
+def get_agent_publish_artifacts(local_artifacts):
     """Return artifacts that belong in MeshCentral's agent publish directories."""
-    if local_artifacts is None:
-        local_artifacts = get_present_local_artifacts()
     return [entry for entry in local_artifacts if entry["name"] != "MasterService.exe"]
 
 
-def get_public_download_artifacts(local_artifacts=None):
+def get_public_download_artifacts(local_artifacts):
     """Return artifacts that are published through MeshCentral userfiles."""
-    if local_artifacts is None:
-        local_artifacts = get_present_local_artifacts()
     if not USERFILES_DIR:
         return []
     return [entry for entry in local_artifacts if entry["name"] == "MasterService.exe"]
@@ -1661,10 +1657,8 @@ def validate_required_core_artifacts(core_artifacts):
     return sorted(set(CORE_ARTIFACTS.keys()) - local_names)
 
 
-def get_hashagents_tracked_artifacts(local_artifacts=None):
+def get_hashagents_tracked_artifacts(local_artifacts):
     """Return local artifacts that are represented in hashagents.json."""
-    if local_artifacts is None:
-        local_artifacts = get_present_local_artifacts()
     return [
         entry for entry in get_agent_publish_artifacts(local_artifacts)
         if entry["remote_filename"] in HASHAGENTS_TRACKED_FILENAMES
@@ -1912,10 +1906,9 @@ def verify_remote_publish(local_artifacts, signed_runtime_mode=False):
     return errors
 
 
-def verify_remote_core_publish(core_artifacts=None):
-    """Validate MeshCentral core/module override files against local source copies."""
+def verify_remote_core_publish(core_artifacts):
+    """Validate MeshCentral core/module override files against the given (published) entries."""
     errors = []
-    core_artifacts = core_artifacts or get_present_local_core_artifacts()
     remote_paths = []
     for entry in core_artifacts:
         for role in get_artifact_publish_targets(entry):
@@ -1938,8 +1931,13 @@ def is_remote_publish_verification_transport_error(errors):
 
 
 def get_core_publish_state(core_artifacts=None):
-    """Return publish parity for MeshCentral-served core/module files."""
-    core_artifacts = core_artifacts or get_present_local_core_artifacts()
+    """Return publish parity for MeshCentral-served core/module files.
+
+    With no baseline, every declared core artifact is reported; one missing from the local
+    tree is reported as unverifiable rather than left out.
+    """
+    if not core_artifacts:
+        core_artifacts = build_local_core_artifact_entries()
     remote_paths = []
     for entry in core_artifacts:
         for role in get_artifact_publish_targets(entry):
@@ -1954,7 +1952,7 @@ def get_core_publish_state(core_artifacts=None):
             remote_path = get_core_publish_path(role, entry["remote_relative_path"])
             metadata = metadata_cache.get(remote_path)
             matches_local = (
-                None if metadata is None
+                None if metadata is None or entry.get("present") is False
                 else metadata["hash"] == entry["sha384"].upper() and metadata["size"] == entry["size_bytes"]
             )
             role_state.append({
@@ -1967,6 +1965,7 @@ def get_core_publish_state(core_artifacts=None):
         state.append({
             "name": entry["name"],
             "remote_relative_path": entry["remote_relative_path"],
+            "local_present": entry.get("present") is not False,
             "roles": role_state,
         })
     return state
@@ -1978,6 +1977,9 @@ def get_core_publish_state_errors(core_state):
         return [REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR]
     errors = []
     for entry in core_state:
+        if entry.get("local_present") is False:
+            errors.append(f"{entry['name']}: local source missing; cannot verify the published copies")
+            continue
         for role in entry.get("roles", []):
             if role["present"] is False:
                 errors.append(f"{entry['name']}: missing from {role['path']}")
@@ -2003,10 +2005,17 @@ def summarize_core_publish_state(core_state):
 
 
 def get_publish_runtime_state(local_artifacts=None):
-    """Return runtime publish state for tracked agent binaries across data/signed/module tiers."""
-    local_artifacts = local_artifacts or get_present_local_artifacts()
+    """Return runtime publish state for tracked agent binaries across data/signed/module tiers.
+
+    With no baseline, the declared artifact map is the baseline; a tracked binary missing from
+    it or from the local tree is reported as having no baseline rather than left out.
+    """
+    if not local_artifacts:
+        local_artifacts = build_local_artifact_entries()
     local_by_filename = {
-        entry["remote_filename"]: entry for entry in get_hashagents_tracked_artifacts(local_artifacts)
+        entry["remote_filename"]: entry
+        for entry in get_hashagents_tracked_artifacts(local_artifacts)
+        if entry.get("present") is not False
     }
     tracked_artifacts = [
         {"remote_filename": filename, "publish_targets": ("data", "signed", "module")}
@@ -2053,6 +2062,7 @@ def get_publish_runtime_state(local_artifacts=None):
             relation = "module-only"
         state.append({
             "filename": filename,
+            "local_present": local_entry is not None,
             "data_present": data_metadata is not None,
             "module_present": module_metadata is not None,
             "signed_present": signed_metadata is not None,
@@ -2078,6 +2088,8 @@ def get_publish_state_errors(publish_state):
         return [REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR]
     errors = []
     for entry in publish_state:
+        if entry.get("local_present") is False:
+            errors.append(f"{entry['filename']}: no local baseline to compare with the server")
         if entry["data_present"] is False:
             errors.append(f"{entry['filename']}: missing from {DATA_AGENTS}")
         if entry["module_present"] is False:
