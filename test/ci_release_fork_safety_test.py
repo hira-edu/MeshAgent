@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import types
@@ -31,6 +32,8 @@ if os.name == 'nt':
     sys.modules.setdefault('pwd', types.SimpleNamespace())
 MANAGER = load('release_manager_fork_safety', 'tools/deployment/release_manager.py')
 SHADOW = load('meshcentral_shadow_check_fork_safety', 'tools/deployment/meshcentral_shadow_check.py')
+SMOKE = load('smoke_checks_fork_safety', 'tools/deployment/smoke_checks.py')
+SMOKE_IMAGE = load('smoke_image_fork_safety', 'tools/deployment/smoke_image.py')
 INSTALLER = load('install_controller_fork_safety', 'tools/deployment/install_controller.py')
 DIGEST = 'sha256:' + 'a' * 64
 PREVIOUS = 'sha256:' + 'b' * 64
@@ -620,6 +623,7 @@ class TrackedMitigationTests(unittest.TestCase):
         shim = TRACKED_MITIGATION.read_text(encoding='utf-8')
         self.assertIn("var DISABLE = ['icns', 'jxl', 'jxl-stream', 'heif'];", shim)
         self.assertIn("'harden-image-size: disabled unpatched parsers: '", shim)
+        self.assertEqual(SMOKE.HARDEN_MARKER, 'harden-image-size: disabled unpatched parsers: icns, jxl, jxl-stream, heif')
 
 
 class MitigationInstallerTests(unittest.TestCase):
@@ -693,6 +697,203 @@ class StartMitigationTests(FixtureCase):
         with self.assertRaisesRegex(ValueError, 'mitigation .* is missing.*--upgrade'):
             MANAGER.start(self.config, self.release)
         self.assertEqual(self.docker_runs, [])
+
+
+CORE_HASH = 'd' * 96
+
+
+def smoke_manifest(**changes):
+    manifest = {'schema': 1, 'meshcentral_version': '1.2.5', 'reviewedUpstreamVersion': '1.2.5',
+                'forkRevision': FORK_REVISION, 'agentCoreHashes': {'windows-amd64': CORE_HASH},
+                'agentBinaries': {'4': {'localname': 'MeshService64.exe', 'unsigned': True,
+                                        'path': 'node_modules/meshcentral/agents/MeshService64.exe',
+                                        'sha256': sha256(b'agent')}},
+                'files': {}, 'mounts': []}
+    manifest.update(changes)
+    return manifest
+
+
+def cores_page(rows):
+    """The /meshagents?cores=1 page as webserver.js 1.2.5:6550-6555 renders it."""
+    page = ('<html><head><title>Mesh Agents Cores</title><style>table,th,td { border:1px solid black;'
+            'border-collapse:collapse;padding:3px; }</style></head><body style=overflow:auto><table>'
+            '<tr style="background-color:lightgray"><th>Name</th><th>Size</th><th>Comp</th>'
+            '<th>Decompressed Hash SHA384</th></tr>')
+    for name, digest in rows:
+        page += ('<tr><td>' + name.replace(' ', '&nbsp;') + '</td><td style="text-align:right"><a download '
+                 'href="/meshagents?dlcore=' + name + '">1234</a></td><td style="text-align:right"><a download '
+                 'href="/meshagents?dlccore=' + name + '">567</a></td><td>' + digest + '</td></tr>')
+    return page + '</table><a href="/meshagents">Mesh Agents</a></body></html>'
+
+
+class FakeServer:
+    def __init__(self, version='MeshCentral v1.2.5', cores=None):
+        self.version, self.cores, self.logins = version, cores or {'windows-amd64': CORE_HASH}, []
+
+    def get(self, path):
+        assert path == SMOKE.VERSION_PATH, path
+        return self.version
+
+    def login(self, username, password):
+        self.logins.append((username, password))
+
+    def core_hashes(self):
+        return self.cores
+
+
+class SmokeExpectationTests(unittest.TestCase):
+    """T22: the smoke test needs the fork identity in the manifest and refuses images without it."""
+
+    def test_fork_manifest_yields_the_identity_to_prove(self):
+        expected = SMOKE.expectations(smoke_manifest())
+        self.assertEqual((expected['version'], expected['forkRevision']), ('1.2.5', FORK_REVISION))
+
+    def test_pre_fork_or_incomplete_manifests_are_refused_naming_each_field(self):
+        manifest = smoke_manifest()
+        for field in ('forkRevision', 'agentCoreHashes', 'agentBinaries'):
+            del manifest[field]
+        with self.assertRaises(SMOKE.SmokeFailure) as raised:
+            SMOKE.expectations(manifest)
+        for text in ('forkRevision is missing', 'images built before the fork', 'agentCoreHashes', 'agentBinaries'):
+            self.assertIn(text, str(raised.exception))
+
+    def test_malformed_agent_entries_are_refused(self):
+        good = smoke_manifest()['agentBinaries']['4']
+        for entry in (dict(good, path='/opt/meshcentral/node_modules/meshcentral/agents/MeshService64.exe'),
+                      dict(good, path='node_modules/meshcentral/agents/MeshService.exe'),
+                      dict(good, path='node_modules/../agents/MeshService64.exe'),
+                      dict(good, unsigned='yes'), dict(good, sha256='A' * 64),
+                      {key: value for key, value in good.items() if key != 'localname'}):
+            with self.subTest(entry=entry), self.assertRaisesRegex(SMOKE.SmokeFailure, r"agentBinaries\['4'\]"):
+                SMOKE.expectations(smoke_manifest(agentBinaries={'4': entry}))
+        with self.assertRaisesRegex(SMOKE.SmokeFailure, 'reviewedUpstreamVersion'):
+            SMOKE.expectations(smoke_manifest(reviewedUpstreamVersion='1.2.4'))
+
+
+class SmokeAssertionTests(unittest.TestCase):
+    """T22: version, fork revision, served core hash, selected on-disk agent file, preload."""
+
+    def setUp(self):
+        self.expected = SMOKE.expectations(smoke_manifest())
+        self.files = {'node_modules/meshcentral/agents/MeshService64.exe': b'agent'}
+
+    def exists(self, relative):
+        return relative in self.files
+
+    def digest(self, relative):
+        return sha256(self.files[relative])
+
+    def test_agent_selection_mirrors_meshcentral_precedence(self):
+        entry = {'localname': 'MeshService64.exe', 'unsigned': False}
+        package = 'node_modules/meshcentral/agents/MeshService64.exe'
+        signed = 'meshcentral-data/signedagents/MeshService64.exe'
+        data = 'meshcentral-data/agents/MeshService64.exe'
+        for present, selected in (({package}, package), ({package, signed}, signed),
+                                  ({package, signed, data}, data), ({package, data}, data)):
+            with self.subTest(present=present):
+                self.assertEqual(SMOKE.selected_agent_path(entry, present.__contains__), selected)
+        unsigned = dict(entry, unsigned=True)
+        self.assertEqual(SMOKE.selected_agent_path(unsigned, {package, signed, data}.__contains__), package)
+
+    def test_on_disk_agent_file_must_be_the_manifest_file(self):
+        self.assertEqual(SMOKE.check_agent_binaries(self.expected, self.exists, self.digest), [])
+        self.files['node_modules/meshcentral/agents/MeshService64.exe'] = b'other build'
+        self.assertEqual(SMOKE.check_agent_binaries(self.expected, self.exists, self.digest), [
+            'agent 4: node_modules/meshcentral/agents/MeshService64.exe has sha256 ' + sha256(b'other build') +
+            ', manifest expects ' + sha256(b'agent')])
+        self.files.clear()
+        self.assertIn('does not exist', SMOKE.check_agent_binaries(self.expected, self.exists, self.digest)[0])
+
+    def test_a_data_folder_copy_that_wins_selection_is_reported(self):
+        expected = SMOKE.expectations(smoke_manifest(agentBinaries={'4': dict(
+            smoke_manifest()['agentBinaries']['4'], unsigned=False)}))
+        self.files['meshcentral-data/agents/MeshService64.exe'] = b'stale'
+        self.assertEqual(SMOKE.check_agent_binaries(expected, self.exists, self.digest), [
+            'agent 4: MeshCentral selects meshcentral-data/agents/MeshService64.exe, manifest expects '
+            'node_modules/meshcentral/agents/MeshService64.exe'])
+
+    def test_core_table_is_parsed_and_compared(self):
+        served = SMOKE.parse_core_hashes(cores_page([('windows-amd64', CORE_HASH), ('linux noamt', 'e' * 96)]))
+        self.assertEqual(served, {'windows-amd64': CORE_HASH, 'linux noamt': 'e' * 96})
+        self.assertEqual(SMOKE.check_core_hashes(served, self.expected), [])
+        self.assertEqual(SMOKE.check_core_hashes({'windows-amd64': 'f' * 96}, self.expected), [
+            "agent core 'windows-amd64' is served with SHA-384 " + 'f' * 96 + ', manifest expects ' + CORE_HASH])
+        self.assertEqual(SMOKE.check_core_hashes({}, self.expected), ["agent core 'windows-amd64' is not served"])
+        with self.assertRaisesRegex(SMOKE.SmokeFailure, 'listed no agent cores'):
+            SMOKE.parse_core_hashes(cores_page([]))
+        with self.assertRaisesRegex(SMOKE.SmokeFailure, 'Unexpected agent core table row'):
+            SMOKE.parse_core_hashes(cores_page([('windows-amd64', 'not-a-hash')]))
+
+    def test_version_revision_and_preload_checks(self):
+        self.assertEqual(SMOKE.check_served_version('MeshCentral v1.2.5', self.expected), [])
+        self.assertEqual(SMOKE.check_served_version('MeshCentral v1.2.6', self.expected),
+                         ["served version 'MeshCentral v1.2.6' is not MeshCentral v1.2.5"])
+        self.assertEqual(SMOKE.check_fork_revision(json.dumps({'version': '1.2.5', 'forkRevision': FORK_REVISION}),
+                                                   self.expected), [])
+        self.assertIn('forkRevision None', SMOKE.check_fork_revision('{"version": "1.2.5"}', self.expected)[0])
+        shim = TRACKED_MITIGATION.read_text(encoding='utf-8')
+        logged = 'harden-image-size: disabled unpatched parsers: ' + ', '.join(
+            re.search(r"var DISABLE = \[([^]]*)\]", shim).group(1).replace("'", '').split(', '))
+        self.assertEqual(SMOKE.check_preload('MeshCentral HTTP server running\n' + logged + '\n'), [])
+        self.assertIn('preload did not run', SMOKE.check_preload(
+            'harden-image-size: WARNING - could not harden image-size: Cannot find module')[0])
+
+    def test_run_checks_reports_every_failure_together(self):
+        server = FakeServer(version='MeshCentral v1.2.6', cores={'windows-amd64': 'f' * 96})
+        self.files.clear()
+        with self.assertRaises(SMOKE.SmokeFailure) as raised:
+            SMOKE.run_checks(smoke_manifest(), server, ('smoke', 'secret'), 'no marker', '{}', self.exists, self.digest)
+        message = str(raised.exception)
+        for text in ('preload did not run', 'served version', 'forkRevision', "agent core 'windows-amd64'",
+                     'agent 4:'):
+            self.assertIn(text, message)
+        self.assertEqual(server.logins, [('smoke', 'secret')])
+        passing = FakeServer()
+        self.files['node_modules/meshcentral/agents/MeshService64.exe'] = b'agent'
+        SMOKE.run_checks(smoke_manifest(), passing, ('smoke', 'secret'), SMOKE.HARDEN_MARKER,
+                         json.dumps({'forkRevision': FORK_REVISION}), self.exists, self.digest)
+
+
+class SmokeCommandTests(unittest.TestCase):
+    """T22: the smoke runs against a local duplicate server with the same assertions."""
+
+    def test_duplicate_server_mode_reads_the_local_install(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(root / 'node_modules/meshcentral/agents/MeshService64.exe', b'agent')
+            write(root / 'node_modules/meshcentral/package.json',
+                  json.dumps({'version': '1.2.5', 'forkRevision': FORK_REVISION}).encode())
+            manifest = write(root / 'manifest.json', json.dumps(smoke_manifest()).encode())
+            log = write(root / 'server.log', (SMOKE.HARDEN_MARKER + '\n').encode())
+            server = FakeServer()
+            with mock.patch.dict(os.environ, {'SMOKE_USERNAME': 'smoke', 'SMOKE_PASSWORD': 'secret'}), \
+                    mock.patch.object(SMOKE_IMAGE.smoke_checks, 'Server', return_value=server):
+                SMOKE_IMAGE.main(['--server-url', 'http://127.0.0.1:4430', '--install-root', str(root),
+                                  '--manifest', str(manifest), '--server-log', str(log)])
+            self.assertEqual(server.logins, [('smoke', 'secret')])
+            write(root / 'node_modules/meshcentral/agents/MeshService64.exe', b'changed')
+            with mock.patch.dict(os.environ, {'SMOKE_USERNAME': 'smoke', 'SMOKE_PASSWORD': 'secret'}), \
+                    mock.patch.object(SMOKE_IMAGE.smoke_checks, 'Server', return_value=FakeServer()), \
+                    self.assertRaisesRegex(SMOKE_IMAGE.smoke_checks.SmokeFailure, 'agent 4: .* has sha256'):
+                SMOKE_IMAGE.main(['--server-url', 'http://127.0.0.1:4430', '--install-root', str(root),
+                                  '--manifest', str(manifest), '--server-log', str(log)])
+
+    def test_partial_duplicate_server_options_and_missing_credentials_are_refused(self):
+        with mock.patch('sys.stderr'), self.assertRaises(SystemExit):
+            SMOKE_IMAGE.main(['--server-url', 'http://127.0.0.1:4430'])
+        with mock.patch.dict(os.environ, {'SMOKE_USERNAME': '', 'SMOKE_PASSWORD': ''}), \
+                self.assertRaisesRegex(ValueError, 'SMOKE_USERNAME and SMOKE_PASSWORD'):
+            SMOKE_IMAGE.smoke_server('http://127.0.0.1:4430', '.', 'manifest.json', 'server.log')
+
+    def test_image_mode_refuses_mutable_references_before_docker(self):
+        with mock.patch.object(SMOKE_IMAGE, 'run') as run, \
+                self.assertRaisesRegex(ValueError, 'immutable registry digest'):
+            SMOKE_IMAGE.smoke_image('ghcr.io/fixture/release:latest')
+        run.assert_not_called()
+
+    def test_image_mode_preloads_the_tracked_mitigation(self):
+        self.assertEqual(SMOKE_IMAGE.MITIGATION_SOURCE, TRACKED_MITIGATION)
+        self.assertEqual(SMOKE_IMAGE.MITIGATION_TARGET, INSTALLER.MITIGATION.as_posix())
 
 
 if __name__ == '__main__':
