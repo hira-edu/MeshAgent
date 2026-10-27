@@ -207,7 +207,7 @@ assert(stageBody.includes('verify_remote_staged_artifacts(staged_entries)'), 'st
 
 const deployBody = extractFunction('cmd_deploy');
 const preBackupVerification = deployBody.indexOf('verify_remote_staged_artifacts(staged_entries)');
-const backupCall = deployBody.indexOf('backup_current_agents(backup_path)');
+const backupCall = deployBody.indexOf('backup_current_agents(backup_path,');
 assert(preBackupVerification >= 0 && backupCall > preBackupVerification, 'deploy must verify staged bytes before backup and publication');
 
 const retryBody = extractFunction('should_retry_remote_result');

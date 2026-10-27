@@ -75,6 +75,9 @@ BACKUP_DIR = f"{MESHCENTRAL_BASE}/backups"
 SERVICE_NAME = "meshcentral"
 STAGING_MANIFEST_FILENAME = ".meshagent-stage-manifest.json"
 STAGING_MANIFEST_SCHEMA = 1
+BACKUP_MANIFEST_FILENAME = "backup-manifest.json"
+BACKUP_MANIFEST_SCHEMA = 1
+BACKUP_FILES_DIRNAME = "files"
 SERVICE_HOST_EMBEDDED_RESOURCE_ID = 101
 SERVICE_HOST_EMBEDDED_RESOURCE_TYPE = 10
 
@@ -82,11 +85,6 @@ PUBLISH_ROLE_DIRS = {
     "data": DATA_AGENTS,
     "signed": SIGNED_AGENTS,
     "module": MODULE_AGENTS,
-}
-PUBLISH_ROLE_BACKUP_DIRS = {
-    "data": "dataagents",
-    "signed": "signedagents",
-    "module": "moduleagents",
 }
 HASHAGENTS_MANIFEST_ROLES = ("module", "signed")
 CORE_PUBLISH_ROLE_DIRS = {
@@ -96,14 +94,6 @@ CORE_PUBLISH_ROLE_DIRS = {
     "module-root": f"{MESHCENTRAL_BASE}/node_modules/meshcentral",
     "module-public": f"{MESHCENTRAL_BASE}/node_modules/meshcentral/public",
     "web-public": f"{MESHCENTRAL_BASE}/meshcentral-web/public",
-}
-CORE_PUBLISH_ROLE_BACKUP_DIRS = {
-    "data-core": "datacore",
-    "data-plugin": "dataplugins",
-    "module-core": "modulecore",
-    "module-root": "moduleroot",
-    "module-public": "modulepublic",
-    "web-public": "webpublic",
 }
 
 # Local build artifacts to deploy
@@ -1420,18 +1410,6 @@ PY"""
     return True
 
 
-def get_backup_path(backup_root, role, filename=None):
-    """Return the backup location for a publish role and optional filename."""
-    base = f"{backup_root}/{PUBLISH_ROLE_BACKUP_DIRS[role]}"
-    return f"{base}/{filename}" if filename else base
-
-
-def get_core_backup_path(backup_root, role, relative_path=None):
-    """Return the backup location for a MeshCentral core/module file."""
-    base = f"{backup_root}/{CORE_PUBLISH_ROLE_BACKUP_DIRS[role]}"
-    return f"{base}/{relative_path}" if relative_path else base
-
-
 def build_local_artifact_entries():
     """Collect local artifact metadata for release manifesting."""
     entries = []
@@ -2145,34 +2123,134 @@ def copy_staged_artifacts(remote_dir, artifacts):
     return run_remote_script(commands) is not None
 
 
-def backup_current_agents(backup_path):
-    """Create a remote backup of the current agent payloads and MeshCentral core overrides."""
-    commands = []
-    local_artifacts = get_present_local_artifacts()
-    core_artifacts = get_present_local_core_artifacts()
-    agent_artifacts = get_agent_publish_artifacts(local_artifacts)
-    for role in PUBLISH_ROLE_DIRS:
-        commands.append(f"mkdir -p {remote_quote(get_backup_path(backup_path, role))}")
-    for role in CORE_PUBLISH_ROLE_DIRS:
-        commands.append(f"mkdir -p {remote_quote(get_core_backup_path(backup_path, role))}")
+def get_stray_agent_payload_paths():
+    """Return the non-agent payload paths every publish removes from the agent directories."""
+    return [
+        f"{SIGNED_AGENTS}/MasterService.exe",
+        f"{DATA_AGENTS}/MasterService.exe",
+        f"{MODULE_AGENTS}/MasterService.exe",
+    ]
+
+
+def get_release_target_paths(agent_artifacts, public_artifacts, core_artifacts):
+    """Return every remote path that publishing these artifacts writes or removes."""
+    paths = []
+    seen = set()
+
+    def add(path):
+        if path not in seen:
+            seen.add(path)
+            paths.append(path)
+
     for entry in agent_artifacts:
         for role in get_artifact_publish_targets(entry):
-            source = remote_quote(get_publish_path(role, entry["remote_filename"]))
-            destination = remote_quote(get_backup_path(backup_path, role, entry["remote_filename"]))
-            commands.append(f"if [ -e {source} ]; then cp -f {source} {destination}; fi")
+            add(get_publish_path(role, entry["remote_filename"]))
     for entry in core_artifacts:
         for role in get_artifact_publish_targets(entry):
-            source_path = get_core_publish_path(role, entry["remote_relative_path"])
-            destination_path = get_core_backup_path(backup_path, role, entry["remote_relative_path"])
-            source = remote_quote(source_path)
-            destination = remote_quote(destination_path)
-            commands.append(f"mkdir -p {remote_quote(remote_dirname(destination_path))}")
-            commands.append(f"if [ -e {source} ]; then cp -f {source} {destination}; fi")
+            add(get_core_publish_path(role, entry["remote_relative_path"]))
     for role in HASHAGENTS_MANIFEST_ROLES:
-        source = remote_quote(get_publish_path(role, "hashagents.json"))
-        destination = remote_quote(get_backup_path(backup_path, role, "hashagents.json"))
-        commands.append(f"if [ -e {source} ]; then cp -f {source} {destination}; fi")
-    return run_remote_script(commands) is not None
+        add(get_publish_path(role, "hashagents.json"))
+    for path in get_stray_agent_payload_paths():
+        add(path)
+    for entry in public_artifacts:
+        add(f"{USERFILES_DIR}/{entry['remote_filename']}")
+    return paths
+
+
+def get_backup_copy_relative_path(remote_path):
+    """Return where a target's copy lives inside a backup's files directory."""
+    prefix = MESHCENTRAL_BASE + "/"
+    if not remote_path.startswith(prefix) or "/../" in remote_path or remote_path.endswith("/.."):
+        raise RuntimeError(f"Backup target outside {MESHCENTRAL_BASE}: {remote_path}")
+    return remote_path[len(prefix):]
+
+
+def backup_current_agents(backup_path, agent_artifacts, public_artifacts, core_artifacts):
+    """Record the current state of every path the release touches, copying the present files.
+
+    The backup manifest lists each target path as "present" (with its digest, size and the
+    copy's location) or "absent", so a restore can return every path to its recorded state
+    without consulting the local build or today's artifact map.
+    """
+    targets = [
+        {"path": path, "copy": get_backup_copy_relative_path(path)}
+        for path in get_release_target_paths(agent_artifacts, public_artifacts, core_artifacts)
+    ]
+    payload = {
+        "backup": backup_path,
+        "files_dir": BACKUP_FILES_DIRNAME,
+        "manifest_name": BACKUP_MANIFEST_FILENAME,
+        "schema": BACKUP_MANIFEST_SCHEMA,
+        "base": MESHCENTRAL_BASE,
+        "targets": targets,
+    }
+    remote_script = f"""python3 - <<'PY'
+import datetime
+import hashlib
+import json
+import os
+import pathlib
+import shutil
+
+payload = json.loads({json.dumps(json.dumps(payload))})
+
+def sha384(path):
+    digest = hashlib.sha384()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().upper()
+
+backup_dir = pathlib.Path(payload["backup"])
+if os.path.lexists(payload["backup"]):
+    raise SystemExit("backup directory already exists: " + payload["backup"])
+files_dir = backup_dir / payload["files_dir"]
+files_dir.mkdir(parents=True)
+entries = []
+for target in payload["targets"]:
+    raw_path = target["path"]
+    path = pathlib.Path(raw_path)
+    if not os.path.lexists(raw_path):
+        entries.append({{"path": raw_path, "state": "absent"}})
+        continue
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit("backup target is not a regular file: " + raw_path)
+    copy = files_dir / target["copy"]
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, copy)
+    digest = sha384(path)
+    if sha384(copy) != digest:
+        raise SystemExit("backup copy does not match its source: " + raw_path)
+    entries.append({{
+        "path": raw_path,
+        "state": "present",
+        "copy": target["copy"],
+        "sha384": digest,
+        "size": path.stat().st_size,
+    }})
+manifest = {{
+    "schema": payload["schema"],
+    "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "base": payload["base"],
+    "entries": entries,
+}}
+manifest_path = backup_dir / payload["manifest_name"]
+temp_path = backup_dir / (payload["manifest_name"] + ".tmp")
+temp_path.write_text(json.dumps(manifest, indent=2) + "\\n", encoding="utf-8")
+os.replace(temp_path, manifest_path)
+present = sum(1 for entry in entries if entry["state"] == "present")
+print(json.dumps({{"present": present, "absent": len(entries) - present}}))
+PY"""
+    raw = ssh_cmd(remote_script)
+    if raw is None:
+        return None
+    try:
+        summary = json.loads(raw)
+    except json.JSONDecodeError:
+        print(f"[ERROR] Backup produced an unreadable summary: {raw!r}")
+        return None
+    print(f"    Recorded {summary['present']} present and {summary['absent']} absent target path(s).")
+    return summary
 
 
 def publish_staged_payloads(agent_artifacts, public_artifacts=None, core_artifacts=None):
@@ -2203,11 +2281,7 @@ def publish_staged_payloads(agent_artifacts, public_artifacts=None, core_artifac
             destination_path = get_core_publish_path(role, entry["remote_relative_path"])
             commands.append(f"mkdir -p {remote_quote(remote_dirname(destination_path))}")
             commands.append(f"cp -f {source} {remote_quote(destination_path)}")
-    commands.append("rm -f " + " ".join(remote_quote(path) for path in [
-        f"{SIGNED_AGENTS}/MasterService.exe",
-        f"{DATA_AGENTS}/MasterService.exe",
-        f"{MODULE_AGENTS}/MasterService.exe",
-    ]))
+    commands.append("rm -f " + " ".join(remote_quote(path) for path in get_stray_agent_payload_paths()))
     if public_artifacts:
         commands.append(f"mkdir -p {USERFILES_DIR}")
         for entry in public_artifacts:
@@ -2217,38 +2291,97 @@ def publish_staged_payloads(agent_artifacts, public_artifacts=None, core_artifac
     return run_remote_script(commands) is not None
 
 
-def restore_agents_from_backup(backup_path, check=True):
-    """Restore agent payloads and MeshCentral core overrides from a remote backup path."""
-    commands = [f"mkdir -p {remote_quote(path)}" for path in PUBLISH_ROLE_DIRS.values()]
-    local_artifacts = get_present_local_artifacts()
-    core_artifacts = get_present_local_core_artifacts()
-    agent_artifacts = get_agent_publish_artifacts(local_artifacts)
-    for entry in agent_artifacts:
-        for role in get_artifact_publish_targets(entry):
-            source = remote_quote(get_backup_path(backup_path, role, entry["remote_filename"]))
-            destination = remote_quote(get_publish_path(role, entry["remote_filename"]))
-            commands.append(f"if [ -e {source} ]; then cp -f {source} {destination}; fi")
-    for entry in core_artifacts:
-        for role in get_artifact_publish_targets(entry):
-            source = remote_quote(get_core_backup_path(backup_path, role, entry["remote_relative_path"]))
-            destination_path = get_core_publish_path(role, entry["remote_relative_path"])
-            commands.append(f"mkdir -p {remote_quote(remote_dirname(destination_path))}")
-            commands.append(f"if [ -e {source} ]; then cp -f {source} {remote_quote(destination_path)}; fi")
-    for role in HASHAGENTS_MANIFEST_ROLES:
-        source = remote_quote(get_backup_path(backup_path, role, "hashagents.json"))
-        destination = remote_quote(get_publish_path(role, "hashagents.json"))
-        commands.append(f"if [ -e {source} ]; then cp -f {source} {destination}; fi")
-    return run_remote_script(commands, check=check) is not None
+def restore_agents_from_backup(backup_path):
+    """Return every path in a backup manifest to its recorded state.
+
+    "present" paths get their backed-up bytes (and mode/mtime) back; "absent" paths are
+    removed. The manifest is the only input, so files a release added are removed and files
+    since dropped from the artifact map or the local tree are still restored. Every entry is
+    attempted; any failure is reported and the call returns None.
+    """
+    payload = {
+        "backup": backup_path,
+        "files_dir": BACKUP_FILES_DIRNAME,
+        "manifest_name": BACKUP_MANIFEST_FILENAME,
+        "schema": BACKUP_MANIFEST_SCHEMA,
+    }
+    remote_script = f"""python3 - <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import shutil
+import sys
+
+payload = json.loads({json.dumps(json.dumps(payload))})
+
+def sha384(path):
+    digest = hashlib.sha384()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().upper()
+
+backup_dir = pathlib.Path(payload["backup"])
+manifest_path = backup_dir / payload["manifest_name"]
+try:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+except FileNotFoundError:
+    raise SystemExit("backup has no " + payload["manifest_name"] + "; it predates manifest-driven restore and must be restored by hand: " + payload["backup"])
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit("unreadable backup manifest " + str(manifest_path) + ": " + str(exc))
+if manifest.get("schema") != payload["schema"] or not isinstance(manifest.get("entries"), list):
+    raise SystemExit("unsupported backup manifest schema in " + str(manifest_path))
+files_dir = backup_dir / payload["files_dir"]
+summary = {{"restored": 0, "removed": 0, "already_absent": 0, "errors": []}}
+for entry in manifest["entries"]:
+    raw_path = entry.get("path")
+    state = entry.get("state")
+    try:
+        if not isinstance(raw_path, str) or not raw_path:
+            raise RuntimeError("manifest entry without a path: " + json.dumps(entry))
+        path = pathlib.Path(raw_path)
+        if state == "absent":
+            if not os.path.lexists(raw_path):
+                summary["already_absent"] += 1
+                continue
+            if path.is_dir() and not path.is_symlink():
+                raise RuntimeError("expected absent, found a directory")
+            os.remove(raw_path)
+            summary["removed"] += 1
+        elif state == "present":
+            copy = files_dir / entry["copy"]
+            if sha384(copy) != entry["sha384"]:
+                raise RuntimeError("backup copy digest does not match the manifest")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(copy, path)
+            shutil.copystat(copy, path)
+            if sha384(path) != entry["sha384"] or path.stat().st_size != entry["size"]:
+                raise RuntimeError("restored file does not match the manifest")
+            summary["restored"] += 1
+        else:
+            raise RuntimeError("unknown recorded state " + repr(state))
+    except Exception as exc:
+        summary["errors"].append(str(raw_path) + ": " + str(exc))
+print(json.dumps(summary))
+for error in summary["errors"]:
+    print("restore failed: " + error, file=sys.stderr)
+sys.exit(1 if summary["errors"] else 0)
+PY"""
+    raw = ssh_cmd(remote_script)
+    if raw is None:
+        print(f"[ERROR] Restore from {backup_path} did not complete; the server may be partially restored.")
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        print(f"[ERROR] Restore from {backup_path} produced an unreadable summary: {raw!r}")
+        return None
 
 
 def remove_stray_agent_payloads():
     """Remove known non-agent payloads from agent publish directories."""
-    stray_paths = [
-        f"{SIGNED_AGENTS}/MasterService.exe",
-        f"{DATA_AGENTS}/MasterService.exe",
-        f"{MODULE_AGENTS}/MasterService.exe",
-    ]
-    return ssh_cmd("rm -f " + " ".join(remote_quote(path) for path in stray_paths)) is not None
+    return ssh_cmd("rm -f " + " ".join(remote_quote(path) for path in get_stray_agent_payload_paths())) is not None
 
 
 def create_temp_login_key_file():
@@ -3245,7 +3378,8 @@ def cmd_deploy(args):
     # Platform-tagged so a Windows rollback never selects a macOS-only backup by accident.
     backup_path = f"{BACKUP_DIR}/{ts}" if DEPLOY_PLATFORM == "windows" else f"{BACKUP_DIR}/{ts}-{DEPLOY_PLATFORM}"
     print(f"\n  [1/6] Backing up current agents → {backup_path}")
-    if backup_current_agents(backup_path) is False:
+    if backup_current_agents(backup_path, agent_artifacts, public_artifacts, core_artifacts) is None:
+        print("[ERROR] Backup failed; nothing was published.")
         return False
     print("    Done.")
 
@@ -3275,7 +3409,7 @@ def cmd_deploy(args):
         for error in verification_errors:
             print(f"      - {error}")
         print("    Restoring backup before restart.")
-        if restore_agents_from_backup(backup_path, check=False) is False:
+        if restore_agents_from_backup(backup_path) is None:
             print("    [ERROR] Backup restoration failed; hash refresh and restart were not attempted.")
             return False
         if refresh_remote_hashagents() is False:
@@ -3313,7 +3447,7 @@ def cmd_deploy(args):
             for error in runtime_errors:
                 print(f"  - {error}")
             print("  Restoring backup and restarting MeshCentral.")
-            if restore_agents_from_backup(backup_path, check=False) is False:
+            if restore_agents_from_backup(backup_path) is None:
                 print("  [ERROR] Backup restoration failed; hash refresh and recovery restart were not attempted.")
                 return False
             if refresh_remote_hashagents() is False:
@@ -3360,11 +3494,20 @@ def cmd_rollback(args):
     print("\n  Available backups:")
     for i, b in enumerate(backup_list[:10]):
         bname = b.split("/")[-1]
-        count = ssh_cmd(
-            f"find {b}/dataagents {b}/signedagents {b}/moduleagents -maxdepth 1 -type f 2>/dev/null | wc -l",
+        manifest_path = remote_quote(f"{b}/{BACKUP_MANIFEST_FILENAME}")
+        recorded = ssh_cmd(
+            f"if [ -f {manifest_path} ]; then python3 -c "
+            + remote_quote("import json,sys; print(len(json.load(open(sys.argv[1]))['entries']))")
+            + f" {manifest_path}; else echo none; fi",
             check=False,
-        ) or "?"
-        print(f"    [{i}] {bname}  ({count.strip()} files)")
+        )
+        if recorded is None:
+            description = "manifest unreadable"
+        elif recorded.strip() == "none":
+            description = "no backup manifest; restore by hand"
+        else:
+            description = f"{recorded.strip()} recorded paths"
+        print(f"    [{i}] {bname}  ({description})")
 
     # Select backup
     if args.index is not None:
@@ -3388,8 +3531,13 @@ def cmd_rollback(args):
             return False
 
     # Restore
-    if restore_agents_from_backup(selected) is False:
+    restore_summary = restore_agents_from_backup(selected)
+    if restore_summary is None:
         return False
+    print(
+        f"  Restored {restore_summary['restored']} file(s) and removed {restore_summary['removed']} "
+        f"file(s) the backed-up release did not have."
+    )
 
     # Rehash
     rehash_ok = refresh_remote_hashagents() is not False

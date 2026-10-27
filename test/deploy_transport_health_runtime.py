@@ -91,7 +91,7 @@ def main():
     assert run_ssh_cmd_with_result(completed([], 0, " fixture-output \n", ""), check=False) == "fixture-output"
 
     deploy_source = (ROOT / "deploy.py").read_text(encoding="utf-8")
-    assert deploy_source.count("if restore_agents_from_backup(backup_path, check=False) is False:") == 2
+    assert deploy_source.count("if restore_agents_from_backup(backup_path) is None:") == 2
     assert deploy_source.count("if refresh_remote_hashagents() is False:") >= 2
     assert "if ssh_cmd(f\"systemctl restart {SERVICE_NAME}\", check=False) is None:" in deploy_source
 
@@ -103,7 +103,7 @@ def main():
         deploy.run_remote_process = lambda *args, **kwargs: (failed_results[0], None)
         with contextlib.redirect_stdout(io.StringIO()):
             assert deploy.refresh_remote_hashagents() is False
-            assert deploy.restore_agents_from_backup("/fixture", check=False) is False
+            assert deploy.restore_agents_from_backup("/fixture") is None
             assert deploy.cmd_ssh(type("Args", (), {"command": ["false"]})()) is False
     finally:
         deploy.run_remote_process = original_runner
