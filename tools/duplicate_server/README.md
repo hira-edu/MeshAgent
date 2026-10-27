@@ -79,7 +79,7 @@ The served page is matched to the template that produced it. Items that need an 
 |---|---|---|
 | OS, service manager | Windows 11, user processes | Ubuntu 24.04, systemd |
 | TLS | MeshCentral terminates TLS itself on 4431/4432 | Caddy and cloudflared in front, `tlsOffload`, `certurl`, `aliasPort 443` |
-| `harden-image-size.js` | copied byte for byte, but its `require('/opt/meshcentral/...')` cannot resolve on Windows, so the parsers stay enabled (checklist 2c FAILs) | parsers disabled |
+| `harden-image-size.js` | copied byte for byte from the production capture, but its `require('/opt/meshcentral/...')` cannot resolve on Windows, so the parsers stay enabled. Checklist 2c fails on purpose until A4's path fix in `tools/deployment/harden-image-size.js` is merged and copied instead; nothing stubs or bypasses it | parsers disabled |
 | Windows-only modules | `node-windows@0.1.14` and `loadavg-windows@1.1.1` installed with `--no-save`, because MeshCentral's `mainStart` requires them on win32 | not needed |
 | `.msh` files | not copied (production identity, D8; MeshCentral does not serve them) | in `agents`, `signedagents`, `meshcentral-data/agents` |
 | `signedagents/*.exe`, `hashagents.json` | re-signed with the duplicate's code-signing certificate; hashagents not refreshed (SSH-only step, unused by 1.2.5) | server-signed with the production certificate |

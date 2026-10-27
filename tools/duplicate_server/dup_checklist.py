@@ -21,6 +21,13 @@ import dup_config
 import dup_layout
 
 LANGUAGES = ("en", "de", "fr")
+HARDEN_PENDING = (
+    "Expected to fail until work package A4's branch is merged. The duplicate runs the production capture "
+    "of bin/harden-image-size.js byte for byte, and that copy requires "
+    "'/opt/meshcentral/node_modules/image-size', which cannot resolve on Windows, so the ICNS/JXL/HEIF "
+    "parsers stay enabled. A4 fixes path resolution in its tracked copy, tools/deployment/harden-image-size.js. "
+    "Once that is merged, dup_layout.install_bin should copy the tracked file; the duplicate does not stub or "
+    "bypass the preload.")
 PENDING_VM = [
     ("3", "Agent online with the expected core hash"),
     ("4", "Desktop and KVM via test/run_umh_playwright.js (desktop and mobile; no input on Connect), plus the coupling contracts"),
@@ -290,7 +297,10 @@ def run_checklist(layout, label=None):
                 {"log": str(log_path), "lines": error_lines[:40], "warnings": warning_lines[:40]})
     harden = [l for l in log_text.splitlines() if l.startswith("harden-image-size:")]
     hardened = any("disabled unpatched parsers" in l for l in harden)
-    results.add("2c", "harden-image-size preload took effect", "PASS" if hardened else "FAIL", harden)
+    detail = {"log": harden}
+    if not hardened:
+        detail["why"] = (HARDEN_PENDING if harden else "no harden-image-size output in this start's log; the preload did not run")
+    results.add("2c", "harden-image-size preload took effect", "PASS" if hardened else "FAIL", detail)
 
     status, body, _ = request(layout, "GET", "/")
     results.add("2d", "GET / returns 200", "PASS" if status == 200 else "FAIL", f"HTTP {status}, {len(body)} bytes")
