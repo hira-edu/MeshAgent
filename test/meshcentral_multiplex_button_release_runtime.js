@@ -5,8 +5,9 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { forkFile } = require('./lib/meshcentral_paths');
 
-const sourcePath = path.resolve(process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : path.join(__dirname, '..', '..', 'MeshCentral', 'meshdesktopmultiplex.js'));
+const sourcePath = path.resolve(process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : forkFile('meshdesktopmultiplex.js'));
 const sandbox = { require, module: { exports: {} }, Buffer, console, setTimeout, clearTimeout, setInterval, clearInterval };
 sandbox.require = name => name === 'image-size' ? { imageSize() { return { width: 16, height: 16 }; } } : require(name);
 vm.createContext(sandbox);

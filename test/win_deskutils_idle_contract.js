@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const { forkFile } = require('./lib/meshcentral_paths');
 
 function parseArgs(argv) {
     const args = {};
@@ -50,7 +51,7 @@ function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const modulePath = path.resolve('modules', 'win-deskutils.js');
     const polyfillsPath = path.resolve('microscript', 'ILibDuktape_Polyfills.c');
-    const meshcorePath = path.resolve('..', 'MeshCentral', 'agents', 'meshcore.js');
+    const meshcorePath = forkFile('agents/meshcore.js');
 
     const moduleSource = readSource(modulePath);
     const polyfillsSource = readSource(polyfillsPath);

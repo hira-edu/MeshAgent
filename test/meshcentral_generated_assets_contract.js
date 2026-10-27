@@ -11,7 +11,8 @@
 //   vendored        third-party build output with no source here.
 // An unlisted generated file, or a listed file that is not tracked, fails.
 //
-// MeshCentral is read from MESHCENTRAL_ROOT, or the sibling ../MeshCentral checkout.
+// MeshCentral is located by test/lib/meshcentral_paths.js (MESHCENTRAL_ROOT, or the sibling
+// ../MeshCentral checkout).
 // Options:
 //   --print-drift <path>  print the current normalised diff from a file's source to it
 //                         (to review and record a known drift); nothing is written

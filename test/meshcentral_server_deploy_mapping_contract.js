@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const meshcentralPaths = require('./lib/meshcentral_paths');
 
 function parseArgs(argv) {
     const args = {};
@@ -51,8 +52,8 @@ function extractFileMapBlock(source) {
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const meshcentralRoot = path.resolve('..', 'MeshCentral');
-    const deployPath = path.resolve('..', 'MeshCentral', 'deploy-server.py');
+    const meshcentralRoot = meshcentralPaths.meshcentralRoot();
+    const deployPath = meshcentralPaths.forkFile('deploy-server.py');
     const meshagentDeployPath = path.resolve('deploy.py');
     const deploymentDocPath = path.resolve('docs', 'DEPLOYMENT.md');
     const requiredEntries = [

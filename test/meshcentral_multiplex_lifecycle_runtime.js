@@ -7,8 +7,9 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const EventEmitter = require('events');
+const { forkFile } = require('./lib/meshcentral_paths');
 
-const sourcePath = path.resolve(process.argv[2] || path.join(__dirname, '..', '..', 'MeshCentral', 'meshdesktopmultiplex.js'));
+const sourcePath = path.resolve(process.argv[2] || forkFile('meshdesktopmultiplex.js'));
 let now = 1000000;
 const timers = [];
 const sandbox = {

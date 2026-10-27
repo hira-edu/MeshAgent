@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { forkFile } = require('./lib/meshcentral_paths');
 
 function parseArgs(argv) {
     const args = {};
@@ -43,7 +44,7 @@ function assert(condition, message) {
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const meshagentPath = path.resolve('..', 'MeshCentral', 'meshagent.js');
+    const meshagentPath = forkFile('meshagent.js');
     const source = fs.readFileSync(meshagentPath, 'utf8');
     const startMarker = '    function ChangeAgentLocationInfo(command) {';
     const endMarker = '        // Check that the mesh exists';

@@ -6,9 +6,10 @@
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const { meshcentralRoot } = require('./lib/meshcentral_paths');
 
 const root = path.resolve(__dirname, '..');
-const meshcentral = path.resolve(root, '..', 'MeshCentral');
+const meshcentral = meshcentralRoot();
 
 function assert(condition, message) {
     if (!condition) {

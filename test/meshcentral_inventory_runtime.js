@@ -3,9 +3,10 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { forkFile } = require('./lib/meshcentral_paths');
 
 for (const filename of ['meshcore.js', 'meshcore.min.js']) {
-    const source = fs.readFileSync(path.resolve(__dirname, '../../MeshCentral/agents', filename), 'utf8');
+    const source = fs.readFileSync(forkFile(path.join('agents', filename)), 'utf8');
     function cases(first, last) {
         const begin = source.indexOf("case '" + first + "':");
         const end = source.indexOf("case '" + last + "':", begin);
@@ -67,7 +68,7 @@ console.log('MeshCentral inventory requests return valid replies, isolate access
 if (process.argv.includes('--native')) {
     assert.equal(process.platform, 'win32');
     const root = path.resolve(__dirname, '..');
-    const source = fs.readFileSync(path.resolve(root, '../MeshCentral/agents/meshcore.js'), 'utf8');
+    const source = fs.readFileSync(forkFile('agents/meshcore.js'), 'utf8');
     const begin = source.indexOf("case 'service': {"), end = source.indexOf("case 'services': {", begin);
     assert(begin >= 0 && end > begin);
     const code = ['global._noMessagePump=true;'];

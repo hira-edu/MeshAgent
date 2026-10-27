@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
+const { forkFile } = require('./lib/meshcentral_paths');
 
 function read(filePath) {
     return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
@@ -26,11 +27,11 @@ function extractFunction(source, signature) {
 }
 
 const repo = path.resolve(__dirname, '..');
-const serverPath = path.resolve(repo, '..', 'MeshCentral', 'meshagent.js');
+const serverPath = forkFile('meshagent.js');
 const corePaths = [
-    path.resolve(repo, '..', 'MeshCentral', 'agents', 'meshcore.js'),
-    path.resolve(repo, '..', 'MeshCentral', 'agents', 'meshcore.min.js'),
-    path.resolve(repo, '..', 'MeshCentral', 'agents', 'recoverycore.js')
+    forkFile('agents/meshcore.js'),
+    forkFile('agents/meshcore.min.js'),
+    forkFile('agents/recoverycore.js')
 ];
 const agentcorePath = path.resolve(repo, 'meshcore', 'agentcore.c');
 const installerPath = path.resolve(repo, 'meshservice', 'service_deployment.c');

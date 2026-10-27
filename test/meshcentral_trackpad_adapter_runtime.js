@@ -8,10 +8,11 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { meshcentralRoot, installedPackageDir } = require('./lib/meshcentral_paths');
 
-const meshcentral = path.resolve(__dirname, '../../MeshCentral');
+const meshcentral = meshcentralRoot();
 const scripts = path.join(meshcentral, 'public/scripts');
-const views = path.join(meshcentral, 'node_modules/meshcentral/views');
+const views = path.join(installedPackageDir().dir, 'views');
 
 function view(name) { return fs.readFileSync(path.join(views, name), 'utf8').replace(/\r\n/g, '\n'); }
 function slice(source, start, end, name) {

@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { forkFile } = require('./lib/meshcentral_paths');
 
 function parseArgs(argv) {
     const args = {};
@@ -63,10 +64,10 @@ function evaluateDesktopSource(source) {
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const redirPath = path.resolve('..', 'MeshCentral', 'public', 'scripts', 'agent-redir-ws-0.1.1.js');
-    const redirMinPath = path.resolve('..', 'MeshCentral', 'public', 'scripts', 'agent-redir-ws-0.1.1-min.js');
-    const desktopPath = path.resolve('..', 'MeshCentral', 'public', 'scripts', 'agent-desktop-0.0.2.js');
-    const desktopMinPath = path.resolve('..', 'MeshCentral', 'public', 'scripts', 'agent-desktop-0.0.2-min.js');
+    const redirPath = forkFile('public/scripts/agent-redir-ws-0.1.1.js');
+    const redirMinPath = forkFile('public/scripts/agent-redir-ws-0.1.1-min.js');
+    const desktopPath = forkFile('public/scripts/agent-desktop-0.0.2.js');
+    const desktopMinPath = forkFile('public/scripts/agent-desktop-0.0.2-min.js');
     const source = fs.readFileSync(redirPath, 'utf8');
     const sourceMin = fs.readFileSync(redirMinPath, 'utf8');
     const desktopSource = fs.readFileSync(desktopPath, 'utf8');

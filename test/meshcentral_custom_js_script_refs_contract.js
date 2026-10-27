@@ -12,24 +12,16 @@
 // A query string (?v=...) is ignored. Any other form fails, and finding no reference at
 // all fails, so a format change cannot pass silently.
 //
-// MeshCentral is read from MESHCENTRAL_ROOT, or the sibling ../MeshCentral checkout.
+// MeshCentral is located by test/lib/meshcentral_paths.js (MESHCENTRAL_ROOT, or the sibling
+// ../MeshCentral checkout).
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { meshcentralRoot } = require('./lib/meshcentral_paths');
 
 const CUSTOM = 'public/scripts/custom.js';
 const LITERAL = /(['"`])([^'"`\s]*?\.(?:js|css|wasm)(?:\?[^'"`\s]*)?)\1/g;
-
-function meshcentralRoot() {
-    const root = path.resolve(process.env.MESHCENTRAL_ROOT || path.join(__dirname, '..', '..', 'MeshCentral'));
-    let stat;
-    try { stat = fs.statSync(root); } catch (error) {
-        throw new Error('MeshCentral checkout not found at ' + root + ' (set MESHCENTRAL_ROOT): ' + error.message);
-    }
-    assert(stat.isDirectory(), 'MeshCentral path is not a directory: ' + root);
-    return root;
-}
 
 function trackedFiles(root) {
     const result = spawnSync('git', ['-C', root, 'ls-files', '-z'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true });

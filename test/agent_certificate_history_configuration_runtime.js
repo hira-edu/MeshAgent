@@ -8,7 +8,9 @@ const crypto = require('crypto');
 const vm = require('vm');
 const {EventEmitter} = require('events');
 const {spawnSync} = require('child_process');
-const forge = require('../../MeshCentral/node_modules/node-forge');
+const {createRequire} = require('module');
+const {installedPackageDir} = require('./lib/meshcentral_paths');
+const forge = createRequire(path.join(installedPackageDir().dir, 'package.json'))('node-forge');
 const {certificateHashes, endpointCertificate} = require('../tools/configure_agent_certificate_history');
 
 async function main() {

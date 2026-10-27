@@ -3,6 +3,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { forkFile } = require('./lib/meshcentral_paths');
 
 async function exerciseViewer(createViewer, canvas) {
     const viewer = createViewer(canvas, null);
@@ -156,7 +157,7 @@ async function main() {
     const assets = ['agent-desktop-0.0.2.js', 'agent-desktop-0.0.2-min.js'];
     const report = [];
     for (const asset of assets) {
-        const source = fs.readFileSync(path.resolve(__dirname, '../../MeshCentral/public/scripts', asset), 'utf8');
+        const source = fs.readFileSync(forkFile(path.join('public', 'scripts', asset)), 'utf8');
         const canvas = { width: 800, height: 600, clientWidth: 800, clientHeight: 600, style: {}, offsetLeft: 0, offsetTop: 0 };
         canvas.getContext = () => ({ canvas, setTransform() {}, clearRect() {}, rotate() {}, fillRect() {} });
         const context = vm.createContext({ navigator: { platform: 'Win32' }, window: {}, document: {}, desktop: { State: 3 }, urlargs: {}, ShortToStr: x => String.fromCharCode(x >> 8, x & 255), console, Uint8Array, setTimeout, clearTimeout });
@@ -186,7 +187,7 @@ async function main() {
                             window.desktop = { State: 3 };
                             window.ShortToStr = x => String.fromCharCode(x >> 8, x & 255);
                         });
-                        await page.addScriptTag({ path: path.resolve(__dirname, '../../MeshCentral/public/scripts', asset) });
+                        await page.addScriptTag({ path: forkFile(path.join('public', 'scripts', asset)) });
                         const phases = await page.evaluate(`(${exerciseViewer.toString()})(CreateAgentRemoteDesktop, document.querySelector('canvas'))`);
                         report.push({ engine, asset, phases, errors: validate(phases).concat(pageErrors) });
                     } finally {

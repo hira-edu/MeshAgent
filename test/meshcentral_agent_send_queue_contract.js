@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { forkFile } = require('./lib/meshcentral_paths');
 
 function parseArgs(argv) {
     const args = {};
@@ -43,7 +44,7 @@ function assert(condition, message) {
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const multiplexPath = path.resolve('..', 'MeshCentral', 'meshdesktopmultiplex.js');
+    const multiplexPath = forkFile('meshdesktopmultiplex.js');
     const source = fs.readFileSync(multiplexPath, 'utf8');
     const sendToAgentStart = source.indexOf('    obj.sendToAgent = function (data) {');
     const sendToAgentEnd = sendToAgentStart >= 0 ? source.indexOf('    // Send more data to the agent', sendToAgentStart) : -1;

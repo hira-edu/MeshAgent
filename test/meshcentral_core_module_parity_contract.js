@@ -7,9 +7,10 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { forkFile } = require('./lib/meshcentral_paths');
 
 const root = path.resolve(__dirname, '..');
-const agents = path.resolve(root, '..', 'MeshCentral', 'agents');
+const agents = forkFile('agents');
 const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n?/g, '\n');
 // Deliberate exceptions, each with the reason the server copy must differ.
 const retained = {

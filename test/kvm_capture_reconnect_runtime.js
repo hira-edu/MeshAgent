@@ -5,13 +5,14 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { createRequire } = require('module');
+const { installedPackageDir } = require('./lib/meshcentral_paths');
 
 if (process.platform !== 'win32' || !process.argv[2] || !process.argv[3]) {
     throw new Error('Requires Windows, an explicit MeshConsole executable, and an evidence directory');
 }
 const runner = path.resolve(process.argv[2]);
 const evidence = path.resolve(process.argv[3]);
-const WebSocket = createRequire(path.resolve(__dirname, '../../MeshCentral/package.json'))('ws');
+const WebSocket = createRequire(path.join(installedPackageDir().dir, 'package.json'))('ws');
 fs.mkdirSync(evidence, { recursive: true });
 const started = Date.now();
 const report = { runner, connections: 0, closed: 0, pictures: 0, bytes: 0, lastPictureMs: 0, errors: [] };

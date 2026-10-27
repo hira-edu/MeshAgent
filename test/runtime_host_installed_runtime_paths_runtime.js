@@ -4,6 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { forkFile } = require('./lib/meshcentral_paths');
 const root = path.resolve(__dirname, '..');
 const system = 'D:\\Windows\\System32';
 const dll = 'C:\\ProgramData\\Agent Space\\主机.dll';
@@ -138,7 +139,7 @@ for (const name of ['win-system-paths', 'agent-installer', 'win-userconsent']) {
 // against the same registry fixture; a stale server parser must fail this gate.
 const canonical = fs.readFileSync(path.join(root, 'modules/win-system-paths.js'), 'utf8').replace(/\r\n?/g, '\n');
 for (const variant of ['modules_meshcore/win-system-paths.js', 'modules_meshcore_min/win-system-paths.js', 'modules_meshcore_min/win-system-paths.min.js']) {
-    const serverSource = fs.readFileSync(path.join(root, '../MeshCentral/agents', variant), 'utf8').replace(/\r\n?/g, '\n');
+    const serverSource = fs.readFileSync(forkFile(path.join('agents', variant)), 'utf8').replace(/\r\n?/g, '\n');
     assert.equal(serverSource, canonical, 'server/embedded parser parity: ' + variant);
     const serverContext = {...context, module: {exports: {}}};
     vm.runInNewContext(serverSource, serverContext);
