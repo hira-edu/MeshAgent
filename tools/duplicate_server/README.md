@@ -40,8 +40,10 @@ probe output and checklist results.
      `get_publish_path`, `get_core_publish_path` and `validate_local_service_bundle_artifacts` are used
      as they are. Sources resolve against the main MeshAgent checkout and its sibling `MeshCentral`,
      where production was deployed from;
-   - `evidence/production-layout-a/layout-a.tar` extracted over the tree with its mtimes, which are
-     the module versions;
+   - `evidence/production-layout-a/layout-a.tar` extracted over the tree with its mtimes;
+   - then `layout-a-modules-posix.tar` (posix format) applied to `meshcentral-data/meshcore*.js` and
+     `modules_meshcore*`, which sets their nanosecond mtimes. Those mtimes are the module versions
+     agents compare. Its bytes must equal the first tar's;
    - `bin/harden-image-size.js` and `bin/refresh-signed-hashagents.py`, copied byte for byte from the
      production capture;
    - a manifest (path, sha256, mtime) and a file-by-file comparison with `evidence/live/hashes.tsv`.
@@ -81,7 +83,7 @@ The served page is matched to the template that produced it. Items that need an 
 | Windows-only modules | `node-windows@0.1.14` and `loadavg-windows@1.1.1` installed with `--no-save`, because MeshCentral's `mainStart` requires them on win32 | not needed |
 | `.msh` files | not copied (production identity, D8; MeshCentral does not serve them) | in `agents`, `signedagents`, `meshcentral-data/agents` |
 | `signedagents/*.exe`, `hashagents.json` | re-signed with the duplicate's code-signing certificate; hashagents not refreshed (SSH-only step, unused by 1.2.5) | server-signed with the production certificate |
-| Data-dir module versions | captured mtimes, to the second (the tar has no sub-second times) | sub-second mtimes |
+| Data-dir module versions | captured nanosecond mtimes; checklist 7d compares every served version to the millisecond | same |
 | Autobackup | configured, but there is no `mongodump`, so it logs a warning | runs |
 | Production identifiers | `cert`, `url`, `certurl`, `agentAliasDNS` and the cert hash/URL lists stay local or are left out, and stay on the denylist | production hosts |
 | Not captured | favicons, unmanaged extras (`diaghost.exe`, `diagsvc.dll`, `upgrade.bat`, `install-*.ps1`, `svchost_payload.dll`, `meshagent_osx-arm-64`) | present |

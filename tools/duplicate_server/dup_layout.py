@@ -265,6 +265,66 @@ def extract_production_capture(name):
     return {"tar": str(LAYOUT_A_TAR), "tar_sha256": sha256_file(LAYOUT_A_TAR), "files": len(extracted)}
 
 
+MODULE_TAR_PREFIXES = ("meshcentral-data/meshcore", "meshcentral-data/modules_meshcore")
+
+
+def pax_mtime_ns(member):
+    """Exact mtime in nanoseconds from a posix (pax) member; the float tarfile exposes is not exact."""
+    text = member.pax_headers.get("mtime")
+    if text is None:
+        raise DupError(f"{member.name} has no pax mtime; the module capture must be a posix-format tar")
+    seconds, _, fraction = text.partition(".")
+    return int(seconds) * 1_000_000_000 + int((fraction + "000000000")[:9])
+
+
+def module_timestamps(tar_path=None):
+    """{relative path: mtime ns} for every member of the posix module capture."""
+    from dup_common import LAYOUT_A_MODULES_TAR
+    tar_path = tar_path or LAYOUT_A_MODULES_TAR
+    if not Path(tar_path).is_file():
+        raise DupError(f"Module capture missing: {tar_path}")
+    with tarfile.open(tar_path) as archive:
+        return {m.name.rstrip("/"): pax_mtime_ns(m) for m in archive.getmembers()}
+
+
+def overlay_module_timestamps(name, tar_path=None):
+    """Apply the posix capture's nanosecond mtimes to meshcore*.js and modules_meshcore* after layout-a.tar.
+
+    The capture holds the same bytes as layout-a.tar; it exists for the sub-second mtimes, which are the
+    module versions agents compare. Content that disagrees with the first capture is an error."""
+    import hashlib
+    from dup_common import LAYOUT_A_MODULES_TAR
+    tar_path = Path(tar_path or LAYOUT_A_MODULES_TAR)
+    root = layout_root(name)
+    applied = {}
+    with tarfile.open(tar_path) as archive:
+        members = archive.getmembers()
+        for member in members:
+            if not member.name.startswith(MODULE_TAR_PREFIXES) or ".." in member.name.split("/"):
+                raise DupError(f"Unexpected member in {tar_path}: {member.name}")
+            if not (member.isfile() or member.isdir()):
+                raise DupError(f"Unsupported member type in {tar_path}: {member.name}")
+            path = root / member.name
+            if member.isfile():
+                if not path.is_file():
+                    raise DupError(f"{member.name} is in the module capture but not in the layout")
+                expected = hashlib.sha256(archive.extractfile(member).read()).hexdigest()
+                if sha256_file(path) != expected:
+                    raise DupError(f"{member.name} differs between layout-a.tar and {tar_path.name}")
+        # Files first, then folders, so setting a file time cannot disturb its folder's time.
+        for member in sorted(members, key=lambda m: m.isdir()):
+            path = root / member.name
+            mtime_ns = pax_mtime_ns(member)
+            os.utime(path, ns=(path.stat().st_atime_ns, mtime_ns))
+            actual = path.stat().st_mtime_ns
+            # NTFS keeps 100 ns ticks; module versions use milliseconds.
+            if actual // 1_000_000 != mtime_ns // 1_000_000 or abs(actual - mtime_ns) >= 100:
+                raise DupError(f"mtime not applied to {member.name}: {actual} != {mtime_ns}")
+            applied[member.name.rstrip("/")] = mtime_ns
+    log(f"  applied nanosecond mtimes to {len(applied)} module entries from {tar_path.name}")
+    return {"tar": str(tar_path), "tar_sha256": sha256_file(tar_path), "entries": len(applied)}
+
+
 def install_bin(name):
     """Production keeps harden-image-size.js and refresh-signed-hashagents.py in /opt/meshcentral/bin."""
     target = layout_root(name) / "bin"
@@ -358,6 +418,7 @@ def build_layout_a():
     record = {"wrapper": install_wrapper("A")}
     record["publish"] = publish_locally("A")
     record["capture"] = extract_production_capture("A")
+    record["module_timestamps"] = overlay_module_timestamps("A")
     record["bin"] = install_bin("A")
     record["manifest"] = str(write_manifest("A", "built"))
     record["vs_production"] = compare_with_production(record["manifest"])["summary"]

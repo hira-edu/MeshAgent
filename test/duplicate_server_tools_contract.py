@@ -229,6 +229,62 @@ def test_preflight(denylist_path, production_server_id):
     assert any("inside the repository" in e for e in preflight_agent.check(branding, inside, repo, denylist_path))
 
 
+def build_posix_tar(path, members, fmt=tarfile.PAX_FORMAT):
+    with tarfile.open(path, "w", format=fmt) as archive:
+        for name, data, mtime_text in members:
+            info = tarfile.TarInfo(name)
+            if data is None:
+                info.type = tarfile.DIRTYPE
+            else:
+                info.size = len(data)
+            info.mtime = float(mtime_text)
+            if fmt == tarfile.PAX_FORMAT:
+                info.pax_headers = {"mtime": mtime_text}
+            archive.addfile(info, io.BytesIO(data) if data is not None else None)
+
+
+def test_module_timestamp_overlay():
+    root = dup_common.layout_root("A")
+    modules = root / "meshcentral-data" / "modules_meshcore"
+    modules.mkdir(parents=True, exist_ok=True)
+    (modules / "umhctl.js").write_bytes(b"module.exports=1;")
+    (root / "meshcentral-data" / "meshcore.js").write_bytes(b"// core")
+    members = [("meshcentral-data/modules_meshcore", None, "1792048028.123810555"),
+               ("meshcentral-data/modules_meshcore/umhctl.js", b"module.exports=1;", "1792956226.818945076"),
+               ("meshcentral-data/meshcore.js", b"// core", "1792956226.796945068")]
+    tar = TEMP_ROOT / "modules-posix.tar"
+    build_posix_tar(tar, members)
+    record = dup_layout.overlay_module_timestamps("A", tar)
+    assert record["entries"] == 3
+    assert (modules / "umhctl.js").stat().st_mtime_ns // 100 == 1792956226818945076 // 100
+    assert modules.stat().st_mtime_ns // 1_000_000 == 1792048028123
+    stamps = dup_layout.module_timestamps(tar)
+    assert stamps["meshcentral-data/modules_meshcore/umhctl.js"] == 1792956226818945076
+    build_posix_tar(tar, [("meshcentral-data/modules_meshcore/umhctl.js", b"changed", "1792956226.818945076")])
+    expect_error(lambda: dup_layout.overlay_module_timestamps("A", tar), "differs between")
+    build_posix_tar(tar, [("meshcentral-web/views/x.handlebars", b"x", "1.5")])
+    expect_error(lambda: dup_layout.overlay_module_timestamps("A", tar), "Unexpected member")
+    build_posix_tar(tar, members[1:2], fmt=tarfile.GNU_FORMAT)
+    expect_error(lambda: dup_layout.overlay_module_timestamps("A", tar), "posix-format")
+
+
+def test_millisecond_version_comparison():
+    assert dup_checklist.iso_millis(1792956227002945151) == "2026-10-25T19:23:47.002Z"
+    assert dup_checklist.iso_millis(1790937236531453752) == "2026-10-02T10:33:56.531Z"
+    stamps = {"meshcentral-data/modules_meshcore/a.js": 1792956227002945151}
+    probe = {"args": {"minifycore": False}, "cores": {"windows-amt": {"modules": [
+        {"name": "a", "kind": "js", "version": "2026-10-25T19:23:47.002Z"},
+        {"name": "coretranslations", "kind": "json", "version": None}]}}}
+    assert dup_checklist.compare_versions_to_capture(probe, stamps)[0] == "PASS"
+    probe["cores"]["windows-amt"]["modules"][0]["version"] = "2026-10-25T19:23:47.000Z"
+    status, detail = dup_checklist.compare_versions_to_capture(probe, stamps)
+    assert status == "FAIL" and "capture 2026-10-25T19:23:47.002Z" in detail[0]
+    probe["cores"]["windows-amt"]["modules"].append({"name": "b", "kind": "js", "version": "x"})
+    assert any("not in the module capture" in p for p in dup_checklist.compare_versions_to_capture(probe, stamps)[1])
+    probe["args"]["minifycore"] = True
+    assert dup_checklist.compare_versions_to_capture(probe, stamps)[0] == "FAIL"
+
+
 def test_view_identification():
     folder = TEMP_ROOT / "views"
     folder.mkdir()
@@ -258,6 +314,8 @@ def main():
     test_denylist_helpers()
     test_preflight(denylist_path, production_server_id)
     test_view_identification()
+    test_module_timestamp_overlay()
+    test_millisecond_version_comparison()
     print("duplicate_server tools contract: OK")
 
 

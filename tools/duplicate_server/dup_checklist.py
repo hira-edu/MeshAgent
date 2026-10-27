@@ -218,6 +218,39 @@ def version_epoch(version):
     return int(datetime.fromisoformat(version.replace("Z", "+00:00")).timestamp())
 
 
+def iso_millis(mtime_ns):
+    """What fs.statSync(path).mtime.toISOString() gives for an mtime: milliseconds, truncated."""
+    millis = mtime_ns // 1_000_000
+    seconds = datetime.fromtimestamp(millis // 1000, tz=timezone.utc)
+    return seconds.strftime("%Y-%m-%dT%H:%M:%S.") + f"{millis % 1000:03d}Z"
+
+
+def compare_versions_to_capture(probe, timestamps=None):
+    """Every module version in every served core must equal the capture's mtime for the file served.
+
+    The versioned loader picks <name>.js from modules_meshcore when minifycore is false (deploy.py
+    version_meshcentral_module_loader), which is production's setting."""
+    timestamps = timestamps if timestamps is not None else dup_layout.module_timestamps()
+    if probe["args"]["minifycore"] is not False:
+        return "FAIL", [f"minifycore is {probe['args']['minifycore']!r}; production serves modules_meshcore (false)"]
+    problems, checked = [], 0
+    for core_name, core in sorted(probe["cores"].items()):
+        for module in core["modules"]:
+            if module["kind"] != "js":
+                continue
+            path = f"meshcentral-data/modules_meshcore/{module['name']}.js"
+            if path not in timestamps:
+                problems.append(f"{core_name}/{module['name']}: {path} is not in the module capture")
+                continue
+            expected = iso_millis(timestamps[path])
+            checked += 1
+            if module["version"] != expected:
+                problems.append(f"{core_name}/{module['name']}: served {module['version']}, capture {expected}")
+    if checked == 0:
+        problems.append("no module versions were compared")
+    return ("PASS" if not problems else "FAIL"), (problems or f"{checked} module entries match")
+
+
 def run_checklist(layout, label=None):
     results = Results(layout)
     root = layout_root(layout)
@@ -303,6 +336,8 @@ def run_checklist(layout, label=None):
             problems.append(f"core text sha256 {core['coreTextSha256']} != production meshcore.js {prod_core}")
         results.add("7b", "Windows core = production (data-dir modules and versions, win-dispatcher present, sysinfo/win-info absent, meshcore.js text)",
                     "PASS" if not problems else "FAIL", problems or "matches production 2.6")
+        status, detail = compare_versions_to_capture(probe)
+        results.add("7d", "served module versions = posix capture mtimes, to the millisecond", status, detail)
     else:
         results.add("7b", "Windows core comes from the package (no data-dir shadow core)",
                     "PASS" if probe["coreSource"] == str(root / "node_modules" / "meshcentral" / "agents") else "FAIL",
