@@ -43,7 +43,7 @@ class ControllerTests(unittest.TestCase):
         self.config_path = self.base / 'meshcentral-data/config.json'
         self.original_config = {'settings': {'noagentupdate': True, 'keep': 'private-fixture'}}
         self.config_path.write_text(json.dumps(self.original_config))
-        self.config = {'image': 'ghcr.io/fixture/release', 'meshcentral_version': '1.2.5',
+        self.config = {'image': 'ghcr.io/fixture/release', 'schema': 2, 'reviewed_versions': ['1.2.5'],
                        'health_url': 'https://fixture.invalid/health.ashx', 'enable_fleet_update': True}
         self.release = self.root / 'release'
         self.release.mkdir()
@@ -166,17 +166,17 @@ class InputTests(unittest.TestCase):
                         'mounts': [{'source': 'data-core/meshcore.js', 'target': str(MANAGER.BASE / 'meshcentral-data') + '/meshcore.js'}]}
             path = root / 'manifest.json'
             path.write_text(json.dumps(manifest))
-            MANAGER.validate_manifest(root, '1.2.5')
+            MANAGER.validate_manifest(root, ['1.2.5'])
             with self.assertRaises(ValueError):
-                MANAGER.validate_manifest(root, '1.2.6')
+                MANAGER.validate_manifest(root, ['1.2.6'])
             source.write_bytes(b'tampered')
             with self.assertRaisesRegex(ValueError, 'digest'):
-                MANAGER.validate_manifest(root, '1.2.5')
+                MANAGER.validate_manifest(root, ['1.2.5'])
             source.write_bytes(b'code')
             manifest['mounts'][0]['target'] = str(MANAGER.BASE / 'meshcentral-data/config.json')
             path.write_text(json.dumps(manifest))
             with self.assertRaises(ValueError):
-                MANAGER.validate_manifest(root, '1.2.5')
+                MANAGER.validate_manifest(root, ['1.2.5'])
 
     def test_manifest_rejects_symlinks_inside_release_not_host_ancestors(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -200,7 +200,7 @@ class InputTests(unittest.TestCase):
             }
             (root / 'manifest.json').write_text(json.dumps(manifest))
             with self.assertRaisesRegex(ValueError, 'regular files'):
-                MANAGER.validate_manifest(root, '1.2.5')
+                MANAGER.validate_manifest(root, ['1.2.5'])
 
 
 if __name__ == '__main__':

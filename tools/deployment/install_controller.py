@@ -1,32 +1,166 @@
 #!/usr/bin/env python3
-"""Install the release controller and restricted SSH account without switching services."""
+"""Install the release controller and restricted SSH account without switching services.
+
+Controller code and the image-size mitigation (harden-image-size.js and its systemd drop-in) are
+installed from this checkout; an installed mitigation that differs from the tracked one is refused.
+
+--upgrade replaces the installed controller code of an existing installation from this checkout,
+installs any missing mitigation file and migrates the configuration to the current schema (see
+release_manager.migrate_config).
+"""
 import argparse
+from datetime import datetime, timezone
+import fcntl
 import json
 import os
 from pathlib import Path
 import pwd
 import re
-import shutil
 import subprocess
+import sys
+
+SOURCE = Path(__file__).resolve().parent
+sys.path.insert(0, str(SOURCE))
+import release_manager  # noqa: E402  (configuration schema and migration live with the controller)
+
+CONFIG = Path('/etc/meshcentral-deploy.json')
+SUDOERS = Path('/etc/sudoers.d/meshcentral-deploy')
+CONTROLLER = Path('/usr/local/libexec/meshcentral-release')
+CI_ENTRY = Path('/usr/local/sbin/meshcentral-ci-entry')
+PACKAGE = Path('/opt/meshcentral/node_modules/meshcentral/package.json')
+# The controller imports this module from its own directory.
+SHADOW_CHECK = CONTROLLER.parent / 'meshcentral_shadow_check.py'
+# Repository file -> installed path and mode, for every file the controller runs.
+CODE = (('release_manager.py', CONTROLLER, 0o755), ('ci_entry.py', CI_ENTRY, 0o755),
+        ('meshcentral_shadow_check.py', SHADOW_CHECK, 0o644))
+# The image-size mitigation preloaded through NODE_OPTIONS, by the host service (systemd drop-in)
+# and by release containers (release_manager.start). Repository file -> installed path, and
+# whether systemd must reload its unit files after installing it.
+MITIGATION = Path('/opt/meshcentral/bin/harden-image-size.js')
+MITIGATION_FILES = (('harden-image-size.js', MITIGATION, False),
+                    ('30-harden-image-size.conf',
+                     Path('/etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf'), True))
+
+
+def normalized_text(source):
+    # Normalize source checkout line endings; installed files always use LF.
+    return source.read_text(encoding='utf-8').encode('utf-8')
 
 
 def install(source, destination, mode):
     destination.parent.mkdir(parents=True, exist_ok=True)
-    # Normalize source checkout line endings before installing executable scripts.
-    destination.write_text(source.read_text(encoding='utf-8'), encoding='utf-8', newline='\n')
+    destination.write_bytes(normalized_text(source))
     os.chown(destination, 0, 0)
     destination.chmod(mode)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--public-key', type=Path, required=True)
-    parser.add_argument('--image', required=True)
-    parser.add_argument('--health-url', required=True)
-    parser.add_argument('--enable-fleet-update', action='store_true')
-    args = parser.parse_args()
-    if os.geteuid() != 0:
-        raise SystemExit('Administrator installation is required')
+def pending_mitigation_files():
+    """Return the tracked mitigation files that are not installed yet.
+
+    An installed copy that differs from the tracked one is refused, never overwritten: production
+    ran these files before they were tracked, so a difference needs an operator's review.
+    """
+    pending = []
+    for name, destination, reload_units in MITIGATION_FILES:
+        source = SOURCE / name
+        if not source.is_file():
+            raise ValueError('Missing tracked mitigation source: ' + str(source))
+        if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+            raise ValueError('Installed mitigation is not a regular file; inspect it: ' + str(destination))
+        if not destination.exists():
+            pending.append((source, destination, reload_units))
+        elif destination.read_bytes() != normalized_text(source):
+            raise ValueError(str(destination) + ' differs from the tracked ' + str(source) +
+                             '; review the difference and reconcile it before installing')
+    return pending
+
+
+def install_mitigation():
+    """Install missing mitigation files from the repository and return the mitigation's sha256."""
+    pending = pending_mitigation_files()
+    for source, destination, _ in pending:
+        install(source, destination, 0o644)
+        print('Installed ' + str(destination) + ' from ' + str(source))
+    if any(reload_units for _, _, reload_units in pending):
+        subprocess.run(['systemctl', 'daemon-reload'], check=True)
+        print('systemd reloaded; the host meshcentral service loads the mitigation at its next restart')
+    return release_manager.file_sha256(MITIGATION)
+
+
+def write_private_json(path, data):
+    """Write JSON readable by root only, replacing ``path`` atomically."""
+    temporary = path.with_name(path.name + '.tmp')
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+        json.dump(data, stream, indent=2)
+        stream.write('\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    release_manager.sync_directory(path.parent)
+
+
+def require_sources():
+    for name, _, _ in CODE:
+        if not (SOURCE / name).is_file():
+            raise ValueError('Missing controller source: ' + str(SOURCE / name))
+
+
+def install_code():
+    for name, destination, mode in CODE:
+        install(SOURCE / name, destination, mode)
+
+
+def migrate_config_file(mitigation_sha256):
+    """Migrate the installed configuration in place, keeping the original beside it.
+
+    Returns the backup path, or None when the configuration was already current.
+    """
+    original = CONFIG.read_bytes()
+    current = json.loads(original)
+    migrated = release_manager.migrate_config(current, mitigation_sha256)
+    if migrated == current:
+        return None
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    backup = CONFIG.with_name(CONFIG.name + '.pre-upgrade-' + stamp)
+    descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, 'wb') as stream:
+        stream.write(original)
+        stream.flush()
+        os.fsync(stream.fileno())
+    write_private_json(CONFIG, migrated)
+    return backup
+
+
+def upgrade():
+    """Replace the controller code, install the tracked mitigation and migrate the configuration."""
+    if not CONFIG.is_file():
+        raise ValueError('No controller configuration at ' + str(CONFIG) + '; run a fresh installation instead')
+    for path in (CONTROLLER, CI_ENTRY, SUDOERS):
+        if not path.is_file():
+            raise ValueError('Existing installation is incomplete; inspect it before upgrading: ' + str(path))
+    require_sources()
+    pending_mitigation_files()  # refuse a differing installed mitigation before changing anything
+    release_manager.STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (release_manager.STATE / 'lock').open('w') as lock:
+        # The same lock serializes promotions, so no deployment runs during the upgrade.
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('A release controller operation is running; retry the upgrade after it ends')
+        if (release_manager.STATE / 'transaction.json').exists():
+            raise RuntimeError('An interrupted transaction exists. Run recover before upgrading the controller.')
+        install_code()
+        backup = migrate_config_file(install_mitigation())
+    config = release_manager.load_config()
+    print('Controller code upgraded from ' + str(SOURCE) + '.')
+    if backup:
+        print('Configuration migrated to schema ' + str(release_manager.CONFIG_SCHEMA) +
+              '; previous file kept at ' + str(backup) + '.')
+    print('Reviewed MeshCentral versions: ' + ', '.join(config['reviewed_versions']))
+
+
+def fresh_install(args):
     if not re.fullmatch(r'ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+', args.image):
         raise ValueError('Invalid GHCR repository')
     if not args.health_url.startswith('https://') or not args.health_url.endswith('/health.ashx'):
@@ -36,29 +170,22 @@ def main():
         raise ValueError('Provide one dedicated Ed25519 public key')
     subprocess.run(['docker', 'info'], check=True, stdout=subprocess.DEVNULL)
     subprocess.run(['systemctl', 'is-active', '--quiet', 'meshcentral'], check=True)
-    package = Path('/opt/meshcentral/node_modules/meshcentral/package.json')
-    version = json.loads(package.read_text())['version']
+    # The running host installation is the version reviewed at installation time.
+    version = json.loads(PACKAGE.read_text())['version']
     service_account = pwd.getpwnam('meshcentral')
-    mitigation = Path('/opt/meshcentral/bin/harden-image-size.js')
-    if not mitigation.is_file():
-        raise ValueError('Inspect the existing production mitigation before installing')
-    config = Path('/etc/meshcentral-deploy.json')
-    if config.exists():
-        raise ValueError('Controller already configured; review changes in place instead of overwriting policy')
+    if CONFIG.exists():
+        raise ValueError('Controller already configured; use --upgrade or review changes in place instead of overwriting policy')
     try:
         account = pwd.getpwnam('meshdeploy')
     except KeyError:
         account = None
     if account is not None:
         raise ValueError('meshdeploy already exists; inspect its ownership and access before installation')
-    for destination in ('/etc/sudoers.d/meshcentral-deploy', '/usr/local/libexec/meshcentral-release',
-                        '/usr/local/sbin/meshcentral-ci-entry'):
-        if Path(destination).exists():
-            raise ValueError('Existing controller file requires operator review: ' + destination)
-    source = Path(__file__).resolve().parent
-    for name in ('release_manager.py', 'ci_entry.py'):
-        if not (source / name).is_file():
-            raise ValueError('Missing controller source: ' + name)
+    for destination in (SUDOERS, CONTROLLER, CI_ENTRY, SHADOW_CHECK):
+        if destination.exists():
+            raise ValueError('Existing controller file requires operator review: ' + str(destination))
+    require_sources()
+    pending_mitigation_files()  # refuse a differing installed mitigation before changing anything
     for name in ('meshcentral-files', 'meshcentral-web', 'meshcentral-recordings', 'meshcentral-backups'):
         directory = Path('/opt/meshcentral') / name
         if not directory.exists():
@@ -66,12 +193,12 @@ def main():
             os.chown(directory, service_account.pw_uid, service_account.pw_gid)
     subprocess.run(['useradd', '--system', '--create-home', '--shell', '/bin/sh', 'meshdeploy'], check=True)
     account = pwd.getpwnam('meshdeploy')
-    install(source / 'release_manager.py', Path('/usr/local/libexec/meshcentral-release'), 0o755)
-    install(source / 'ci_entry.py', Path('/usr/local/sbin/meshcentral-ci-entry'), 0o755)
-    sudoers = Path('/etc/sudoers.d/meshcentral-deploy')
-    sudoers.write_text('meshdeploy ALL=(root) NOPASSWD: /usr/local/sbin/meshcentral-ci-entry\n')
-    sudoers.chmod(0o440)
-    subprocess.run(['visudo', '-cf', str(sudoers)], check=True)
+    install_code()
+    config = release_manager.new_config(args.image, args.health_url, version, args.enable_fleet_update,
+                                        install_mitigation())
+    SUDOERS.write_text('meshdeploy ALL=(root) NOPASSWD: ' + str(CI_ENTRY) + '\n')
+    SUDOERS.chmod(0o440)
+    subprocess.run(['visudo', '-cf', str(SUDOERS)], check=True)
     ssh = Path(account.pw_dir) / '.ssh'
     ssh.mkdir(mode=0o700, exist_ok=True)
     authorized = ssh / 'authorized_keys'
@@ -81,12 +208,31 @@ def main():
     authorized.chmod(0o600)
     for path in (ssh, authorized):
         os.chown(path, account.pw_uid, account.pw_gid)
-    config.write_text(json.dumps({'image': args.image, 'health_url': args.health_url,
-                                 'meshcentral_version': version,
-                                 'enable_fleet_update': args.enable_fleet_update}, indent=2) + '\n')
-    config.chmod(0o600)
+    write_private_json(CONFIG, config)
     print('Controller installed. Existing MeshCentral is still running under systemd.')
+    print('Reviewed MeshCentral versions: ' + ', '.join(config['reviewed_versions']))
     print('Review GitHub environment/registry access before the first digest promotion.')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--upgrade', action='store_true',
+                        help='upgrade the controller code and configuration of an existing installation')
+    parser.add_argument('--public-key', type=Path)
+    parser.add_argument('--image')
+    parser.add_argument('--health-url')
+    parser.add_argument('--enable-fleet-update', action='store_true')
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        raise SystemExit('Administrator installation is required')
+    if args.upgrade:
+        if args.public_key or args.image or args.health_url or args.enable_fleet_update:
+            parser.error('--upgrade keeps the installed policy; edit it in place instead of passing installation options')
+        upgrade()
+    else:
+        if not (args.public_key and args.image and args.health_url):
+            parser.error('a fresh installation requires --public-key, --image and --health-url')
+        fresh_install(args)
 
 
 if __name__ == '__main__':
