@@ -10,6 +10,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import types
@@ -375,7 +377,7 @@ class ControllerUpgradeTests(unittest.TestCase):
                      INSTALLER.SHADOW_CHECK: self.shadow_check}
         code = tuple((name, installed[destination], mode) for name, destination, mode in INSTALLER.CODE)
         lock = types.SimpleNamespace(flock=mock.Mock(), LOCK_EX=2, LOCK_NB=4)
-        # Production already runs the mitigation, byte-identical to the tracked files.
+        # An installed mitigation identical to the tracked files (production must be reconciled first).
         self.mitigation = self.root / 'opt/meshcentral/bin/harden-image-size.js'
         self.dropin = self.root / 'etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf'
         for source, destination in ((TRACKED_MITIGATION, self.mitigation), (TRACKED_DROPIN, self.dropin)):
@@ -962,6 +964,97 @@ class DockerContextTests(unittest.TestCase):
         rules = [(False, re.compile(r'[^/]*\Z')), (True, re.compile(r'a/b\Z'))]
         self.assertFalse(docker_excludes(rules, 'a/b'))
         self.assertTrue(docker_excludes(rules, 'a/c'))
+
+
+# A stand-in for image-size 2.0.2's public surface (types, disableTypes, imageSize and its
+# "disabled file type" refusal), with variants for a changed or broken package.
+FAKE_IMAGE_SIZE = r"""
+var mode = require('./mode.json').mode;
+var types = ['bmp', 'heif', 'icns', 'jpg', 'jxl', 'jxl-stream', 'png'];
+if (mode === 'renamed') { types = types.map(function (t) { return t === 'jxl-stream' ? 'jxl-codestream' : t; }); }
+var disabled = [];
+function detect(b) {
+    if (b.slice(0, 4).toString() === 'icns') { return 'icns'; }
+    if (b[0] === 0xff && b[1] === 0x0a) { return 'jxl-stream'; }
+    var box = b.slice(4, 8).toString();
+    if (box === 'JXL ') { return 'jxl'; }
+    if (box === 'ftyp') { return 'heif'; }
+}
+exports.types = types;
+exports.imageSize = function (b) {
+    var t = detect(b);
+    if (disabled.indexOf(t) >= 0) { throw new TypeError('disabled file type: ' + t); }
+    return { width: 1, height: 1, type: t };
+};
+if (mode !== 'no-disable') { exports.disableTypes = function (list) { if (mode !== 'noop') { disabled = list; } }; }
+"""
+
+
+@unittest.skipUnless(shutil.which('node'), 'Node.js is required to run the preload shim')
+class MitigationShimTests(unittest.TestCase):
+    """T24 follow-up: the shim resolves image-size like MeshCentral does and fails closed."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        # A non-/opt install layout: <root>/srv/node_modules/{meshcentral,image-size}.
+        self.main = write(self.root / 'srv/node_modules/meshcentral/meshcentral.js',
+                          b"console.log('meshcentral main ran');\n")
+        self.elsewhere = self.root / 'elsewhere'
+        self.elsewhere.mkdir()
+
+    def install_image_size(self, folder, mode='ok'):
+        package = folder / 'node_modules/image-size'
+        write(package / 'package.json', json.dumps({'name': 'image-size', 'version': '2.0.2',
+                                                    'main': 'index.js'}).encode())
+        write(package / 'index.js', FAKE_IMAGE_SIZE.encode())
+        write(package / 'mode.json', json.dumps({'mode': mode}).encode())
+
+    def start(self, main=None, cwd=None):
+        environment = {key: value for key, value in os.environ.items() if key != 'NODE_OPTIONS'}
+        return subprocess.run(['node', '--require', str(TRACKED_MITIGATION), str(main or self.main)],
+                              cwd=str(cwd or self.elsewhere), env=environment, capture_output=True,
+                              text=True, timeout=60)
+
+    def assert_refused(self, result, reason):
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('meshcentral main ran', result.stdout)
+        self.assertIn('refusing to start MeshCentral with the unpatched image-size parsers enabled', result.stderr)
+        self.assertIn(reason, result.stderr)
+        self.assertNotEqual(SMOKE.check_preload(result.stdout + result.stderr), [])
+
+    def test_no_install_path_is_hardcoded(self):
+        self.assertNotIn('/opt/', TRACKED_MITIGATION.read_text(encoding='utf-8'))
+
+    def test_resolves_from_the_started_script_in_a_non_opt_layout(self):
+        self.install_image_size(self.root / 'srv')
+        result = self.start()  # working directory has no node_modules
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [SMOKE.HARDEN_MARKER, 'meshcentral main ran'])
+        self.assertEqual(SMOKE.check_preload(result.stdout), [])
+
+    def test_falls_back_to_the_working_directory(self):
+        self.install_image_size(self.elsewhere)
+        main = write(self.root / 'bare/meshcentral.js', b"console.log('meshcentral main ran');\n")
+        result = self.start(main=main)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(SMOKE.HARDEN_MARKER, result.stdout)
+
+    def test_missing_image_size_stops_the_process(self):
+        self.assert_refused(self.start(), 'image-size cannot be resolved from')
+
+    def test_missing_disable_api_stops_the_process(self):
+        self.install_image_size(self.root / 'srv', 'no-disable')
+        self.assert_refused(self.start(), 'does not provide disableTypes()')
+
+    def test_changed_parser_layout_stops_the_process(self):
+        self.install_image_size(self.root / 'srv', 'renamed')
+        self.assert_refused(self.start(), 'no longer lists the parser(s) jxl-stream')
+
+    def test_a_parser_that_stays_enabled_stops_the_process(self):
+        self.install_image_size(self.root / 'srv', 'noop')
+        self.assert_refused(self.start(), 'the icns probe was parsed')
 
 
 if __name__ == '__main__':
