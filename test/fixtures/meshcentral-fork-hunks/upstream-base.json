@@ -1,0 +1,80 @@
+{
+  "description": "MeshCentral files that replace an upstream file, checked by test/meshcentral_upstream_base_contract.js against the upstream git tag. enforced: the CRLF-normalised diff must equal upstream-base/<path>.diff exactly. pending-rebase: the file starts from forkBase, not the tag, and still lacks upstream changes; it is reported until flipStage rebases it. Seeded from the three-way comparison forkBase -> 1.2.5 -> fork.",
+  "defaultUpstreamTag": "1.2.5",
+  "files": {
+    "agents/hashagents.js": {
+      "state": "enforced",
+      "reviewed": "Identical to 1.2.5 (empty diff)."
+    },
+    "agents/meshcore_diagnostic.js": {
+      "state": "enforced",
+      "reviewed": "Two additions only: a server command handler and console helpers (sendConsoleText, splitArgs, umhctl console command). Upstream did not change the file between 587973e8c and 1.2.5. D9 reverts these edits; the reviewed diff then becomes empty."
+    },
+    "agents/modules_meshcore/win-terminal.js": {
+      "state": "enforced",
+      "reviewed": "Fork rewrite: terminal I/O is hosted by rundll32 <ServiceDll>,MeshConsoleBridgeW with an explicit session id; the upstream in-process console implementation is removed. Upstream did not change the file between 587973e8c and 1.2.5, so every removed line is a fork deletion, not a lost upstream fix."
+    },
+    "agents/modules_meshcore/win-virtual-terminal.js": {
+      "state": "enforced",
+      "reviewed": "Fork replaces the upstream PseudoConsole implementation with module.exports = require('win-terminal') and a new copyright line. Upstream did not change the file between 587973e8c and 1.2.5."
+    },
+    "agents/recoverycore.js": {
+      "state": "enforced",
+      "reviewed": "Fork work only: native file actions (nativeFileAction), Windows JavaScript self-update disabled, SHA-384 required, agentupdatefailed reporting, staged-update error handling, transfer cleanup, recovery run commands. The only upstream change between 587973e8c and 1.2.5 (a comment typo, formated -> formatted) is already present."
+    },
+    "agents/tinycore.js": {
+      "state": "enforced",
+      "reviewed": "Adds the umhctl console command and lists it in help. Upstream did not change the file between 587973e8c and 1.2.5. D9 reverts this edit; the reviewed diff then becomes empty."
+    },
+    "macosinstaller.js": {
+      "state": "enforced",
+      "reviewed": "1.2.5 plus 18 added lines: the installer asks for the Screen Sharing VNC password and stores it in vncrelay.secret (root-only), and the uninstaller removes that file. No upstream line is removed."
+    },
+    "public/scripts/agent-redir-ws-0.1.1.js": {
+      "state": "enforced",
+      "reviewed": "Protocol-2 connect deferral (xxStateChange(3) skipped for desktop) and the generated desktop audio control block appended by scripts/build-desktop-audio-control.js. Upstream did not change the file between 587973e8c and 1.2.5."
+    },
+    "agents/meshcore.js": {
+      "state": "pending-rebase",
+      "forkBase": "587973e8c",
+      "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
+      "reviewed": "Not reviewed hunk by hunk yet. Fork areas: native file actions, clipboard rewrite, service/process error reporting, Windows run commands via MeshConsoleBridgeW, win-terminal terminals, upload/download cleanup, desktop audio protocol 20, self-update hardening. Lacks upstream registry tunnel/consent and module split (#8072, #7690), Windows updates, software/printers (#7939), linux-info hang (#7904) and more."
+    },
+    "meshagent.js": {
+      "state": "pending-rebase",
+      "forkBase": "587973e8c",
+      "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
+      "reviewed": "Not reviewed hunk by hunk yet. Lacks #8052, #8002, #8016, #8064, #8015, #7799, #7854, #7690, #7934, #7887, #7986 and #7735."
+    },
+    "meshctrl.js": {
+      "state": "pending-rebase",
+      "forkBase": "1.2.1",
+      "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
+      "reviewed": "Identical to 1.2.1; no fork content. Lacks ServerVersion, --noregistry/--nosoftware, Defender and pending-reboot output, #8046, #8031, #7741, #7735, #7724."
+    },
+    "meshdesktopmultiplex.js": {
+      "state": "pending-rebase",
+      "forkBase": "587973e8c",
+      "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
+      "reviewed": "Not reviewed hunk by hunk yet. Lacks #8006 and #7671; the consentAautoAccept typo is back and the terminaluservariable line is missing."
+    },
+    "meshrelay.js": {
+      "state": "pending-rebase",
+      "forkBase": "1.2.1",
+      "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
+      "reviewed": "1.2.1 plus one line (2747ad90d). Lacks #8006 rcookie null guard, 1.2.2 isProtocolAllowedByRights and #7671."
+    },
+    "public/scripts/agent-desktop-0.0.2.js": {
+      "state": "pending-rebase",
+      "forkBase": "1.2.1",
+      "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
+      "reviewed": "Not reviewed hunk by hunk yet. Lacks #8040 (_altGrDeferredDown; ControlLeftKc in pressedKeys on an array)."
+    }
+  },
+  "excluded": {
+    "public/scripts/custom.js": "Out of scope by operator decision (SSOT rule 8): carried byte for byte, never audited or edited, so it is not opened by this contract.",
+    ".gitignore": "Wrapper repository metadata, not part of the served package. Stage 1 replaces it with the fork root's own file.",
+    "package.json": "Wrapper manifest (meshcentral-deploy) that installs meshcentral@1.2.5 as a dependency; it is not copied over the package. Moves under deploy/ at Stage 1 (D1).",
+    "package-lock.json": "Wrapper lockfile for package.json above. Moves under deploy/ at Stage 1 (D1)."
+  }
+}
