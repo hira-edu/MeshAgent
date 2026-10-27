@@ -91,9 +91,10 @@ def main():
     assert run_ssh_cmd_with_result(completed([], 0, " fixture-output \n", ""), check=False) == "fixture-output"
 
     deploy_source = (ROOT / "deploy.py").read_text(encoding="utf-8")
-    assert deploy_source.count("if restore_agents_from_backup(backup_path, check=False) is False:") == 2
-    assert deploy_source.count("if refresh_remote_hashagents() is False:") >= 2
-    assert "if ssh_cmd(f\"systemctl restart {SERVICE_NAME}\", check=False) is None:" in deploy_source
+    # Every failure after the backup (partial publish, pre-restart verification, failed restart,
+    # post-restart verification) restores the backup; test/deploy_rollback_runtime.py runs them.
+    deploy_body = deploy_source[deploy_source.index("def cmd_deploy("):deploy_source.index("def cmd_rollback(")]
+    assert deploy_body.count("recover_deploy_from_backup(") == 4
 
     original_runner = deploy.run_remote_process
     original_mapping = deploy.load_hashagents_mapping
@@ -103,7 +104,7 @@ def main():
         deploy.run_remote_process = lambda *args, **kwargs: (failed_results[0], None)
         with contextlib.redirect_stdout(io.StringIO()):
             assert deploy.refresh_remote_hashagents() is False
-            assert deploy.restore_agents_from_backup("/fixture", check=False) is False
+            assert deploy.restore_agents_from_backup("/fixture") is None
             assert deploy.cmd_ssh(type("Args", (), {"command": ["false"]})()) is False
     finally:
         deploy.run_remote_process = original_runner
