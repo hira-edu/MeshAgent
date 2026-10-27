@@ -56,7 +56,7 @@ case "$1" in
 esac
 """
 
-# Fails a cp whose destination ends with one of the newline-separated suffixes in
+# Fails a cp whose destination contains one of the newline-separated patterns in
 # $FAKE_STATE/cp-fail (used to break a publish part-way through).
 CP_SHIM = r"""#!/bin/sh
 if [ -f "$FAKE_STATE/cp-fail" ]; then
@@ -64,7 +64,7 @@ if [ -f "$FAKE_STATE/cp-fail" ]; then
   while IFS= read -r suffix; do
     [ -n "$suffix" ] || continue
     case "$last" in
-      *"$suffix") echo "fake cp: injected failure for $last" >&2; exit 1 ;;
+      *"$suffix"*) echo "fake cp: injected failure for $last" >&2; exit 1 ;;
     esac
   done < "$FAKE_STATE/cp-fail"
 fi
@@ -150,8 +150,8 @@ class FakeRemote:
     def plan_restarts(self, outcomes):
         (self.state / "restart-plan").write_text("\n".join(outcomes) + "\n", encoding="utf-8", newline="\n")
 
-    def fail_cp_to(self, *suffixes):
-        (self.state / "cp-fail").write_text("\n".join(suffixes) + "\n", encoding="utf-8", newline="\n")
+    def fail_cp_to(self, *patterns):
+        (self.state / "cp-fail").write_text("\n".join(patterns) + "\n", encoding="utf-8", newline="\n")
 
     def clear_cp_failures(self):
         with contextlib.suppress(FileNotFoundError):

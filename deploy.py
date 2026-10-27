@@ -3665,62 +3665,59 @@ def cmd_rollback(args):
     return True
 
 
+def edit_remote_config(local_copy):
+    """Download the server config to local_copy, edit it, back up the remote copy and upload."""
+    print(f"Downloading config from {SERVER}...")
+    if not scp_download(CONFIG_FILE, local_copy):
+        return False
+
+    orig_hash = hashlib.sha256(local_copy.read_bytes()).hexdigest()
+
+    editor = os.environ.get("EDITOR", "notepad" if sys.platform == "win32" else "nano")
+    print(f"Opening in {editor}...")
+    subprocess.run([editor, str(local_copy)])
+
+    if hashlib.sha256(local_copy.read_bytes()).hexdigest() == orig_hash:
+        print("No changes made. Skipping upload.")
+        return True
+
+    try:
+        json.loads(local_copy.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        print(f"[ERROR] Invalid JSON: {error}")
+        print("  Nothing was uploaded and the edited copy was discarded.")
+        return False
+
+    ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    remote_backup = f"{CONFIG_FILE}.bak.{ts}"
+    if ssh_cmd(f"cp -p {remote_quote(CONFIG_FILE)} {remote_quote(remote_backup)}") is None:
+        print("[ERROR] Could not back up the server config; nothing was uploaded.")
+        return False
+    print(f"Server config backed up to {remote_backup}")
+
+    print("Uploading updated config...")
+    if not scp_upload(local_copy, CONFIG_FILE):
+        print(f"[ERROR] Upload failed. The previous config is at {remote_backup} on the server.")
+        return False
+
+    resp = input("Restart MeshCentral to apply? [y/N] ")
+    if resp.lower() == "y":
+        ssh_cmd(f"systemctl restart {SERVICE_NAME}")
+        time.sleep(3)
+        status = ssh_cmd(f"systemctl is-active {SERVICE_NAME}", check=False)
+        print(f"Service status: {status}")
+
+    print("[SUCCESS] Config updated.")
+    return True
+
+
 def cmd_config(args):
     """View or edit MeshCentral config.json."""
     if args.action == "edit":
-        # Download config
-        tmp = LOCAL_REPO / ".tmp_config.json"
-        print(f"Downloading config from {SERVER}...")
-        if not scp_download(CONFIG_FILE, tmp):
-            return False
-
-        # Get original hash
-        with open(tmp, "rb") as f:
-            orig_hash = hashlib.sha256(f.read()).hexdigest()
-
-        # Open in editor
-        editor = os.environ.get("EDITOR", "notepad" if sys.platform == "win32" else "nano")
-        print(f"Opening in {editor}...")
-        subprocess.run([editor, str(tmp)])
-
-        # Check if changed
-        with open(tmp, "rb") as f:
-            new_hash = hashlib.sha256(f.read()).hexdigest()
-
-        if orig_hash == new_hash:
-            print("No changes made. Skipping upload.")
-            tmp.unlink()
-            return True
-
-        # Validate JSON
-        try:
-            with open(tmp) as f:
-                json.load(f)
-        except json.JSONDecodeError as e:
-            print(f"[ERROR] Invalid JSON: {e}")
-            print(f"  Config saved at: {tmp}")
-            return False
-
-        # Backup remote config first
-        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-        ssh_cmd(f"cp {CONFIG_FILE} {CONFIG_FILE}.bak.{ts}")
-
-        # Upload
-        print("Uploading updated config...")
-        if not scp_upload(tmp, CONFIG_FILE):
-            return False
-
-        tmp.unlink()
-
-        # Restart
-        resp = input("Restart MeshCentral to apply? [y/N] ")
-        if resp.lower() == "y":
-            ssh_cmd(f"systemctl restart {SERVICE_NAME}")
-            time.sleep(3)
-            status = ssh_cmd(f"systemctl is-active {SERVICE_NAME}", check=False)
-            print(f"Service status: {status}")
-
-        print("[SUCCESS] Config updated.")
+        # The server config holds secrets: edit it in a private temp directory outside the
+        # repository, removed on every path.
+        with tempfile.TemporaryDirectory(prefix="meshcentral-config-") as temp_dir:
+            return edit_remote_config(Path(temp_dir) / "config.json")
     else:
         # View config
         config = ssh_cmd(f"cat {CONFIG_FILE}")
