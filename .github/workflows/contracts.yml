@@ -49,7 +49,7 @@ env:
   EXCLUDED_TESTS: |
     test/meshcentral_agent_update_hash_contract.js | Checks node_modules/meshcentral/meshagent.js as deployed: deploy.py publishes the fork's meshagent.js over the installed package on the server. npm ci installs the pristine upstream meshcentral 1.2.5 package, which lacks the fork's agent-update hash change, so this fails here by construction until the fork itself is the installed package (Stage 4). Run it against the duplicate or production layout.
     test/service_bundle_embedding_contract.js | Needs built MeshServiceRuntime executables (meshservice/x64/MeshServiceRuntime/MeshService-2022.exe and the ARM64 one) to extract and compare the embedded service DLL. The coordinated release workflow runs it after building ("Validate embedded service DLL parity").
-    test/power_action_policy_lab_runtime.js |Lab runtime probe: needs an installed, running agent on an elevated Windows test host.
+    test/power_action_policy_lab_runtime.js | Lab-only: reads branding_config.local.json (local identities, never committed, and must not reach CI) and the gitignored meshcore/generated/meshagent_branding.h. Its tracked-source half, test/power_action_policy_contract.js, runs here.
     test/deploy_service_host_export_runtime.py | Needs built x64 and ARM64 MeshServiceBundle DLLs (meshservice/{x64,ARM64}/MeshServiceBundle/MeshService-2022.dll), which this workflow does not build.
 
 jobs:
@@ -282,7 +282,10 @@ jobs:
             echo
             echo "| Result | Group | Test | Detail |"
             echo "|---|---|---|---|"
-            sort -t$'\t' -k1,1r "$results" | awk -F'\t' '{ printf "| %s | %s | `%s` | %s |\n", $1, $2, $3, $4 }'
+            # Failures first, then exclusions, then passes; run order within each.
+            awk -F'\t' '{ rank = ($1 ~ /^FAIL/) ? 0 : ($1 == "EXCLUDED") ? 1 : 2; print rank "\t" $0 }' "$results" \
+              | sort -s -t$'\t' -k1,1n | cut -f2- \
+              | awk -F'\t' '{ printf "| %s | %s | `%s` | %s |\n", $1, $2, $3, $4 }'
           } >> "$GITHUB_STEP_SUMMARY"
           cut -f1 "$results" | sed 's/(.*//' | sort | uniq -c
 
