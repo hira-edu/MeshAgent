@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { forkFile, meshcentralRoot } = require('./lib/meshcentral_paths');
 
 function parseArgs(argv) {
     const args = {};
@@ -135,12 +136,12 @@ function main() {
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
     const runtimeHostContractPath = path.resolve('meshservice', 'runtime_host_contract.c');
     const serviceInstallerPath = path.resolve('meshservice', 'service_deployment.c');
-    const rootMeshcorePath = path.resolve('..', 'MeshCentral', 'meshcore.js');
-    const rootMeshcoreMinPath = path.resolve('..', 'MeshCentral', 'meshcore.min.js');
-    const meshcorePath = path.resolve('..', 'MeshCentral', 'agents', 'meshcore.js');
-    const meshcoreMinPath = path.resolve('..', 'MeshCentral', 'agents', 'meshcore.min.js');
-    const meshcentralDataMeshcorePath = path.resolve('..', 'MeshCentral', 'meshcentral-data', 'meshcore.js');
-    const recoverycorePath = path.resolve('..', 'MeshCentral', 'agents', 'recoverycore.js');
+    const rootMeshcorePath = forkFile('meshcore.js');
+    const rootMeshcoreMinPath = forkFile('meshcore.min.js');
+    const meshcorePath = forkFile('agents/meshcore.js');
+    const meshcoreMinPath = forkFile('agents/meshcore.min.js');
+    const meshcentralDataMeshcorePath = path.join(meshcentralRoot(), 'meshcentral-data', 'meshcore.js');
+    const recoverycorePath = forkFile('agents/recoverycore.js');
 
     const agentcoreSource = loadText(agentcorePath, 'agent core whose native self-update path is checked');
     const updateContractSource = loadText(updateContractPath, 'update constants header');

@@ -10,7 +10,8 @@
 // Every tracked file that also exists at the tag must be listed, either in files or
 // in excluded with a reason, so a new override cannot go unchecked.
 //
-// MeshCentral is read from MESHCENTRAL_ROOT, or the sibling ../MeshCentral checkout.
+// MeshCentral is located by test/lib/meshcentral_paths.js (MESHCENTRAL_ROOT, or the sibling
+// ../MeshCentral checkout).
 // Options:
 //   --print-diff <path>  print the current normalised diff of one file (to review it and
 //                        save it as its fixture); nothing is written
@@ -21,6 +22,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const meshcentralPaths = require('./lib/meshcentral_paths');
 
 const fixtureDir = path.join(__dirname, 'fixtures', 'meshcentral-fork-hunks');
 const manifestPath = path.join(fixtureDir, 'upstream-base.json');
@@ -40,14 +42,10 @@ function git(root, args, allowedStatus) {
     return result;
 }
 
-// Returns the validated MeshCentral checkout root, or throws with the reason.
+// Returns the MeshCentral checkout root from the shared helper, which must also be the git top
+// level, or throws with the reason.
 function meshcentralRoot() {
-    const root = path.resolve(process.env.MESHCENTRAL_ROOT || path.join(__dirname, '..', '..', 'MeshCentral'));
-    let stat;
-    try { stat = fs.statSync(root); } catch (error) {
-        throw new Error('MeshCentral checkout not found at ' + root + ' (set MESHCENTRAL_ROOT): ' + error.message);
-    }
-    assert(stat.isDirectory(), 'MeshCentral path is not a directory: ' + root);
+    const root = meshcentralPaths.meshcentralRoot();
     const top = path.resolve(git(root, ['rev-parse', '--show-toplevel']).stdout.trim());
     assert(samePath(top, root), 'MeshCentral path ' + root + ' is not a git checkout root (git reports ' + top + ')');
     return root;

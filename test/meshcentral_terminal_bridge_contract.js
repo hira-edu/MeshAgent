@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { forkFile, installedPackageDir, meshcentralRoot } = require('./lib/meshcentral_paths');
 
 function assert(condition, message) {
     if (!condition) {
@@ -458,65 +459,66 @@ function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const absentOptionalInputs = {};
+    const meshcentralData = path.join(meshcentralRoot(), 'meshcentral-data');
     const terminalInputs = declaredInputs('terminalModules', 'win-terminal copies whose system-only executable and callback contract is checked', {
         required: [
             'modules/win-terminal.js',
-            '../MeshCentral/agents/modules_meshcore/win-terminal.js',
-            '../MeshCentral/agents/modules_meshcore_min/win-terminal.js',
-            '../MeshCentral/agents/modules_meshcore_min/win-terminal.min.js'
+            forkFile('agents/modules_meshcore/win-terminal.js'),
+            forkFile('agents/modules_meshcore_min/win-terminal.js'),
+            forkFile('agents/modules_meshcore_min/win-terminal.min.js')
         ],
         localState: [
-            '../MeshCentral/meshcentral-data/modules_meshcore/win-terminal.js',
-            '../MeshCentral/meshcentral-data/modules_meshcore_min/win-terminal.js',
-            '../MeshCentral/meshcentral-data/modules_meshcore_min/win-terminal.min.js'
+            path.join(meshcentralData, 'modules_meshcore/win-terminal.js'),
+            path.join(meshcentralData, 'modules_meshcore_min/win-terminal.js'),
+            path.join(meshcentralData, 'modules_meshcore_min/win-terminal.min.js')
         ]
     }, absentOptionalInputs);
     const systemPathInputs = declaredInputs('systemPathModules', 'win-system-paths copies whose service runtime DLL resolution is checked', {
         required: [
             'modules/win-system-paths.js',
-            '../MeshCentral/agents/modules_meshcore/win-system-paths.js',
-            '../MeshCentral/agents/modules_meshcore_min/win-system-paths.js',
-            '../MeshCentral/agents/modules_meshcore_min/win-system-paths.min.js'
+            forkFile('agents/modules_meshcore/win-system-paths.js'),
+            forkFile('agents/modules_meshcore_min/win-system-paths.js'),
+            forkFile('agents/modules_meshcore_min/win-system-paths.min.js')
         ]
     }, absentOptionalInputs);
     const virtualTerminalInputs = declaredInputs('virtualTerminalModules', 'win-virtual-terminal copies whose terminal contract is checked', {
         required: [
             'modules/win-virtual-terminal.js',
-            '../MeshCentral/agents/modules_meshcore/win-virtual-terminal.js',
-            '../MeshCentral/agents/modules_meshcore_min/win-virtual-terminal.js',
-            '../MeshCentral/agents/modules_meshcore_min/win-virtual-terminal.min.js'
+            forkFile('agents/modules_meshcore/win-virtual-terminal.js'),
+            forkFile('agents/modules_meshcore_min/win-virtual-terminal.js'),
+            forkFile('agents/modules_meshcore_min/win-virtual-terminal.min.js')
         ]
     }, absentOptionalInputs);
     const dispatcherInputs = declaredInputs('dispatcherModules', 'win-dispatcher copies whose disabled-connect contract is checked', {
         required: [
             'modules/win-dispatcher.js',
-            '../MeshCentral/agents/modules_meshcore/win-dispatcher.js',
-            '../MeshCentral/agents/modules_meshcore_min/win-dispatcher.js',
-            '../MeshCentral/agents/modules_meshcore_min/win-dispatcher.min.js'
+            forkFile('agents/modules_meshcore/win-dispatcher.js'),
+            forkFile('agents/modules_meshcore_min/win-dispatcher.js'),
+            forkFile('agents/modules_meshcore_min/win-dispatcher.min.js')
         ]
     }, absentOptionalInputs);
     const coreInputs = declaredInputs('meshCores', 'MeshCentral agent cores whose run-command and consent handling is checked', {
         required: [
-            '../MeshCentral/agents/meshcore.js',
-            '../MeshCentral/agents/meshcore.min.js'
+            forkFile('agents/meshcore.js'),
+            forkFile('agents/meshcore.min.js')
         ],
         localState: [
-            '../MeshCentral/meshcentral-data/meshcore.js'
+            path.join(meshcentralData, 'meshcore.js')
         ],
         legacyLayout: [
-            '../MeshCentral/meshcore.js',
-            '../MeshCentral/meshcore.min.js'
+            forkFile('meshcore.js'),
+            forkFile('meshcore.min.js')
         ]
     }, absentOptionalInputs);
     const meshCtrlInputs = declaredInputs('meshCtrl', 'meshctrl copies whose run-command options are checked', {
         required: [
-            '../MeshCentral/meshctrl.js',
-            '../MeshCentral/node_modules/meshcentral/meshctrl.js'
+            forkFile('meshctrl.js'),
+            path.join(installedPackageDir().dir, 'meshctrl.js')
         ]
     }, absentOptionalInputs);
     const customOverlayInputs = declaredInputs('customRunCommandOverlays', 'custom.js run-command overlay whose download command is checked', {
         required: [
-            '../MeshCentral/public/scripts/custom.js'
+            forkFile('public/scripts/custom.js')
         ]
     }, absentOptionalInputs);
     const terminalPaths = terminalInputs.paths;

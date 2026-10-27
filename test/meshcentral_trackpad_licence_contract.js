@@ -2,6 +2,7 @@
 // attribution those licences require in the served file and in the repository notices.
 const fs = require('fs');
 const path = require('path');
+const { meshcentralRoot } = require('./lib/meshcentral_paths');
 
 // Every input is required: a missing or empty file fails the contract and says what it was for.
 function readRequired(file, purpose) {
@@ -16,7 +17,7 @@ function readRequired(file, purpose) {
     return text;
 }
 
-const meshcentral = path.resolve(__dirname, '../../MeshCentral');
+const meshcentral = meshcentralRoot();
 const engine = readRequired(path.join(meshcentral, 'public/scripts/agent-desktop-trackpad-0.0.1.js'), 'trackpad engine whose licence header is checked');
 const notices = readRequired(path.join(meshcentral, 'THIRD_PARTY_NOTICES.txt'), 'repository notices that must carry the trackpad engine attribution');
 const header = engine.startsWith('/*!') ? engine.slice(0, engine.indexOf('*/') + 2).replace(/^\s*\* ?/gm, '') : '';

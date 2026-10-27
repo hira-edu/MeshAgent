@@ -1,7 +1,8 @@
 const fs = require('fs');
 const assert = require('assert');
 const path = require('path');
-const source = fs.readFileSync(process.argv[2] || path.resolve('../MeshCentral/meshagent.js'), 'utf8');
+const { forkFile } = require('./lib/meshcentral_paths');
+const source = fs.readFileSync(process.argv[2] || forkFile('meshagent.js'), 'utf8');
 const start = source.indexOf('parent.parent.taskLimiter.launch(function (argument, taskid, taskLimiterQueue)', source.indexOf('else if (cmdid == 12)'));
 const end = source.indexOf('}, null, 1);', start);
 assert(start >= 0 && end > start);

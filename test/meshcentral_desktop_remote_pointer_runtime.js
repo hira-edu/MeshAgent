@@ -6,8 +6,9 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { meshcentralRoot } = require('./lib/meshcentral_paths');
 
-const scriptsDir = path.resolve(__dirname, '../../MeshCentral/public/scripts');
+const scriptsDir = path.join(meshcentralRoot(), 'public', 'scripts');
 
 function hex(packet) { return packet.map(b => b.toString(16).padStart(2, '0')).join(''); }
 

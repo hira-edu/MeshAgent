@@ -2,6 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const childProcess = require('child_process');
+const meshcentralPaths = require('./lib/meshcentral_paths');
 
 function parseArgs(argv) {
     const args = {};
@@ -280,9 +281,9 @@ function main() {
     assert(!winSystemPaths.includes("process.env['SystemRoot']"), 'win-system-paths must not trust SystemRoot environment for system executable resolution');
     assert(!winSystemPaths.includes('process.env.windir'), 'win-system-paths must not trust windir environment for system executable resolution');
 
-    // The sibling MeshCentral checkout is a required input: its agent module copies are what the
-    // server sends to agents, so a missing checkout fails here instead of skipping these checks.
-    const meshCentralRoot = path.resolve(repoRoot, '..', 'MeshCentral');
+    // The MeshCentral checkout (test/lib/meshcentral_paths.js) is a required input: its agent module
+    // copies are what the server sends to agents, so a missing checkout fails here instead of skipping these checks.
+    const meshCentralRoot = meshcentralPaths.meshcentralRoot();
     assert(fs.existsSync(meshCentralRoot), `required input missing: ${meshCentralRoot} (MeshCentral checkout whose agents/modules_meshcore win-system-paths copies are checked)`);
     [
         'agents/modules_meshcore/win-system-paths.js',

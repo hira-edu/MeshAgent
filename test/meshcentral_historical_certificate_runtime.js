@@ -5,7 +5,8 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const crypto = require('crypto');
-const source = fs.readFileSync(path.resolve(__dirname, '../../MeshCentral/meshagent.js'), 'utf8');
+const { forkFile } = require('./lib/meshcentral_paths');
+const source = fs.readFileSync(forkFile('meshagent.js'), 'utf8');
 function extract(name) {
     const start = source.indexOf('    function ' + name + '(');
     const end = source.indexOf('\n    }', start);

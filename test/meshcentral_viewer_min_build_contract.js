@@ -2,8 +2,9 @@
 // from agent-desktop-0.0.2.js, so a source change cannot ship with a stale or hand-edited min file.
 const { execFileSync } = require('child_process');
 const path = require('path');
+const { meshcentralRoot } = require('./lib/meshcentral_paths');
 
-const meshcentral = path.resolve(__dirname, '../../MeshCentral');
+const meshcentral = meshcentralRoot();
 try {
     execFileSync(process.execPath, [path.join(meshcentral, 'scripts', 'build-viewer-min.js'), '--check'], { cwd: meshcentral, stdio: 'pipe' });
     console.log('PASS viewer min build');

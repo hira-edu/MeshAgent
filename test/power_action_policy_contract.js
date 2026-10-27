@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const meshcentralPaths = require('./lib/meshcentral_paths');
 
 function assert(condition, message) {
     if (!condition) {
@@ -59,7 +60,7 @@ function main() {
     const schema = JSON.parse(readRepoFile(repoRoot, path.join('schema', 'meshagent.schema.json'), 'configuration schema that allows the policy flag'));
     // Tracked sources only, so this contract passes on a clean clone. The checks on the lab's
     // branding_config.local.json and generated meshagent_branding.h are in power_action_policy_lab_runtime.js.
-    const meshCentralRoot = path.resolve(repoRoot, '..', 'MeshCentral');
+    const meshCentralRoot = meshcentralPaths.meshcentralRoot();
     // Stage 3 of the MeshCentral fork drops the meshctrl.js override for upstream's file (plan S5, G6);
     // retarget this read to the package's meshctrl.js then.
     const meshCtrl = readRepoFile(meshCentralRoot, 'meshctrl.js', 'MeshCentral meshctrl device power mapping');

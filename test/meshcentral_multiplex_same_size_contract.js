@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { forkFile } = require('./lib/meshcentral_paths');
 
 function parseArgs(argv) {
     const args = {};
@@ -43,7 +44,7 @@ function assert(condition, message) {
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const multiplexPath = path.resolve('..', 'MeshCentral', 'meshdesktopmultiplex.js');
+    const multiplexPath = forkFile('meshdesktopmultiplex.js');
     const source = fs.readFileSync(multiplexPath, 'utf8');
     const startMarker = '            case 7: // Screen Size, clear the screen state and compute the tile count';
     const endMarker = '            case 11: // GetDisplays';

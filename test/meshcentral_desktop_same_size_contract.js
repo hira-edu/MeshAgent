@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { forkFile } = require('./lib/meshcentral_paths');
 
 function parseArgs(argv) {
     const args = {};
@@ -83,8 +84,8 @@ function evaluateMinifiedAsset(source) {
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const desktopPath = path.resolve('..', 'MeshCentral', 'public', 'scripts', 'agent-desktop-0.0.2.js');
-    const desktopMinPath = path.resolve('..', 'MeshCentral', 'public', 'scripts', 'agent-desktop-0.0.2-min.js');
+    const desktopPath = forkFile('public/scripts/agent-desktop-0.0.2.js');
+    const desktopMinPath = forkFile('public/scripts/agent-desktop-0.0.2-min.js');
     const checks = {
         standard: evaluateStandardAsset(fs.readFileSync(desktopPath, 'utf8')),
         minified: evaluateMinifiedAsset(fs.readFileSync(desktopMinPath, 'utf8'))

@@ -6,8 +6,9 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { forkFile } = require('./lib/meshcentral_paths');
 
-const enginePath = path.resolve(__dirname, '../../MeshCentral/public/scripts/agent-desktop-trackpad-0.0.1.js');
+const enginePath = forkFile('public/scripts/agent-desktop-trackpad-0.0.1.js');
 
 function createClock() {
     const clock = { now: 1000000, timers: [], nextId: 1 };

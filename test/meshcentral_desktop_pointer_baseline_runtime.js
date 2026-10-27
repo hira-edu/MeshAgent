@@ -7,9 +7,10 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { meshcentralRoot, installedPackageDir } = require('./lib/meshcentral_paths');
 
-const scriptsDir = path.resolve(__dirname, '../../MeshCentral/public/scripts');
-const viewsDir = path.resolve(__dirname, '../../MeshCentral/node_modules/meshcentral/views');
+const scriptsDir = path.join(meshcentralRoot(), 'public', 'scripts');
+const viewsDir = path.join(installedPackageDir().dir, 'views');
 const PINNED_MESHCENTRAL = '1.2.5';
 
 function hex(packet) { return packet.map(b => b.toString(16).padStart(2, '0')).join(''); }

@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const { forkFile } = require('./lib/meshcentral_paths');
 
 function parseArgs(argv) {
     const args = {};
@@ -142,7 +143,7 @@ function main() {
         umhctl: 'modules/umhctl.js',
         recoveryCore: 'modules/RecoveryCore.js',
         winSystemPaths: 'modules/win-system-paths.js',
-        meshcentralCore: '../MeshCentral/agents/meshcore.js',
+        meshcentralCore: forkFile('agents/meshcore.js'),
         runtimeHostLifecycleHelper: 'test/lib/runtime_host_lifecycle.js',
         kvmBridgeSessionChangeRuntime: 'test/kvm_bridge_session_change_runtime.js',
         kvmTraceProbe: 'test/kvm_trace_probe.js',

@@ -1,11 +1,13 @@
-// Static contract for the agent core tunnel handlers in ../MeshCentral/agents/meshcore.js.
+// Static contract for the agent core tunnel handlers in MeshCentral agents/meshcore.js
+// (located by test/lib/meshcentral_paths.js unless passed as the first argument).
 // Pins fixes that have no runtime harness on the server side: the consent-accepted desktop toast
 // must target the viewer's session, and the forced guest disconnect log must not throw.
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { forkFile } = require('./lib/meshcentral_paths');
 
-const corePath = path.resolve(process.argv[2] || path.join(__dirname, '..', '..', 'MeshCentral', 'agents', 'meshcore.js'));
+const corePath = path.resolve(process.argv[2] || forkFile('agents/meshcore.js'));
 const source = fs.readFileSync(corePath, 'utf8');
 
 function count(text) { return source.split(text).length - 1; }

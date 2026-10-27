@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { forkFile } = require('./lib/meshcentral_paths');
 const vm = require('vm');
 
 function parseArgs(argv) {
@@ -116,7 +117,7 @@ function captureDesktopState(desktop) {
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const desktopPath = path.resolve('..', 'MeshCentral', 'public', 'scripts', 'agent-desktop-0.0.2.js');
+    const desktopPath = forkFile('public/scripts/agent-desktop-0.0.2.js');
     const source = fs.readFileSync(desktopPath, 'utf8');
     const { context, canvasElement } = createHarness();
     vm.createContext(context);

@@ -4,10 +4,11 @@
 // page both process the same touches.
 const fs = require('fs');
 const path = require('path');
+const { meshcentralRoot, installedPackageDir } = require('./lib/meshcentral_paths');
 
 const PINNED_MESHCENTRAL = '1.2.5';
-const moduleRoot = path.resolve(__dirname, '../../MeshCentral/node_modules/meshcentral');
-const scriptsDir = path.resolve(__dirname, '../../MeshCentral/public/scripts');
+const moduleRoot = installedPackageDir().dir;
+const scriptsDir = path.join(meshcentralRoot(), 'public', 'scripts');
 
 // Every input is required: a missing or empty file fails the contract and says what it was for.
 function read(file) {

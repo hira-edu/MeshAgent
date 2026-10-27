@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const meshcentralPaths = require('./lib/meshcentral_paths');
 const vm = require('vm');
 
 function assert(condition, message) {
@@ -122,7 +123,7 @@ function runOverlay(customSource, options) {
 }
 
 function main() {
-    const meshCentralRoot = path.resolve(process.argv[2] || path.join('..', 'MeshCentral'));
+    const meshCentralRoot = path.resolve(process.argv[2] || meshcentralPaths.meshcentralRoot());
     const customSource = fs.readFileSync(path.join(meshCentralRoot, 'public', 'scripts', 'custom.js'), 'utf8');
     const corePaths = ['agents/meshcore.js', 'agents/meshcore.min.js', 'agents/recoverycore.js'];
     const cores = corePaths.map((relativePath) => ({ relativePath, source: fs.readFileSync(path.join(meshCentralRoot, relativePath), 'utf8') }));

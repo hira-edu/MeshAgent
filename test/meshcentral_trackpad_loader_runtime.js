@@ -9,9 +9,10 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { meshcentralRoot } = require('./lib/meshcentral_paths');
 const { fixtures } = require('./meshcentral_trackpad_adapter_runtime.js');
 
-const meshcentral = path.resolve(__dirname, '../../MeshCentral');
+const meshcentral = meshcentralRoot();
 const scripts = path.join(meshcentral, 'public/scripts');
 const ORIGIN = 'https://mesh.test';
 

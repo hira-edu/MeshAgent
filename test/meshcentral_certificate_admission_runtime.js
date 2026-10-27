@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { createRequire } = require('module');
 const { parseKvText } = require('./lib/provisioning_identity');
+const { installedPackageDir } = require('./lib/meshcentral_paths');
 
 async function probe(policy, WebSocket, timeoutMs) {
     const endpoint = new URL(policy.MeshServer);
@@ -108,7 +109,7 @@ async function main(argv) {
     if (!args['--msh']) throw new Error('--msh is required');
     const timeoutMs = Number(args['--timeout-ms'] || 12000);
     if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60000) throw new Error('Invalid timeout');
-    const packagePath = path.resolve(args['--meshcentral-package'] || path.join(__dirname, '../../MeshCentral/node_modules/meshcentral/package.json'));
+    const packagePath = path.resolve(args['--meshcentral-package'] || path.join(installedPackageDir().dir, 'package.json'));
     const WebSocket = createRequire(packagePath)('ws');
     const policy = parseKvText(fs.readFileSync(path.resolve(args['--msh']), 'utf8'));
     const result = await probe(policy, WebSocket, timeoutMs);

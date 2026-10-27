@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { forkFile, installedPackageDir } = require('./lib/meshcentral_paths');
 
 function assert(condition, message) {
     if (!condition) {
@@ -24,8 +25,8 @@ function read(relPath, purpose) {
 }
 
 function main() {
-    const source = read('../MeshCentral/meshagent.js', 'tracked MeshCentral meshagent.js whose agent update hash handling is checked');
-    const packageSource = read('../MeshCentral/node_modules/meshcentral/meshagent.js', 'installed MeshCentral package copy of meshagent.js, which the server runs');
+    const source = read(forkFile('meshagent.js'), 'tracked MeshCentral meshagent.js whose agent update hash handling is checked');
+    const packageSource = read(path.join(installedPackageDir().dir, 'meshagent.js'), 'installed MeshCentral package copy of meshagent.js, which the server runs');
     const compareStart = source.indexOf('function compareAgentBinaryHash(agentExeInfo, agentHash)');
     assert(compareStart >= 0, 'compareAgentBinaryHash is missing');
     const compareEnd = source.indexOf('// Request that the core dump file', compareStart);

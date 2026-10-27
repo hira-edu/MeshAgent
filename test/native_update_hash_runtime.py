@@ -8,15 +8,19 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'test' / 'lib'))
+import meshcentral_paths  # noqa: E402
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--server-source', type=pathlib.Path, default=ROOT.parent / 'MeshCentral/meshagent.js')
+    parser.add_argument('--server-source', type=pathlib.Path, help='default: meshagent.js in the MeshCentral checkout (test/lib/meshcentral_paths.py)')
     parser.add_argument('--console', type=pathlib.Path, default=ROOT / 'meshconsole/Release/MeshConsole64.exe')
     parser.add_argument('--package', action='append', required=True, type=pathlib.Path)
     parser.add_argument('--evidence', required=True, type=pathlib.Path)
     args = parser.parse_args()
+    if args.server_source is None:
+        args.server_source = meshcentral_paths.fork_file('meshagent.js')
     evidence = args.evidence.resolve()
     evidence.mkdir(parents=True, exist_ok=True)
     # Read the production trailer identity; it is data, not an enrollment policy.
