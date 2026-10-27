@@ -1,0 +1,34 @@
+--- a/macosinstaller.js
++++ b/macosinstaller.js
+@@ -90,6 +90,23 @@
+     /bin/launchctl bootout "gui/\${CONSOLE_UID}" "/Library/LaunchAgents/\${SERVICENAME}-launchagent.plist" >/dev/null 2>&1 || true
+     /bin/launchctl bootstrap "gui/\${CONSOLE_UID}" "/Library/LaunchAgents/\${SERVICENAME}-launchagent.plist" >/dev/null 2>&1 || true
+ fi
++
++# Remote desktop relays Screen Sharing and needs its VNC password. Ask the installing
++# administrator unless a valid password is already stored, so a reinstall keeps it. Skipping leaves remote desktop
++# disabled until the password is stored. The password never appears in a command line.
++SECRET="\${INSTALLDIR}/vncrelay.secret"
++if ! LC_ALL=C grep -q -x -E '[ -~]{1,8}' "\${SECRET}" 2>/dev/null && [ -n "\${CONSOLE_UID}" ] && [ "\${CONSOLE_UID}" != "0" ]; then
++    MESSAGE="Remote desktop uses Screen Sharing. Enter the password set under System Settings > General > Sharing > Screen Sharing > VNC viewers may control screen with password (up to 8 characters)."
++    for ATTEMPT in 1 2 3; do
++        VNCPASSWORD=$(/bin/launchctl asuser "\${CONSOLE_UID}" /usr/bin/osascript -e 'on run argv' -e 'text returned of (display dialog (item 1 of argv) default answer "" with hidden answer with title "Mesh Agent" buttons {"Skip", "Save"} default button "Save" cancel button "Skip")' -e 'end run' "\${MESSAGE}" 2>/dev/null) || break
++        if printf '%s' "\${VNCPASSWORD}" | LC_ALL=C grep -q -x -E '[ -~]{1,8}'; then
++            if ( umask 077; printf '%s\\n' "\${VNCPASSWORD}" > "\${SECRET}.tmp" ) && chown root:wheel "\${SECRET}.tmp" && mv -f "\${SECRET}.tmp" "\${SECRET}"; then :; else rm -f "\${SECRET}.tmp"; fi
++            break
++        fi
++        MESSAGE="The password must be 1 to 8 letters, digits, spaces or symbols. Enter the Screen Sharing VNC password again."
++    done
++    VNCPASSWORD=""
++fi
+ `;
+ 
+ const UNINSTALL = `#!/bin/bash
+@@ -117,6 +134,7 @@
+ sudo rm "/usr/local/mesh_services/###COMPANYNAME###/###SERVICENAME###/###EXECUTABLENAME###" &> /dev/null
+ sudo rm "/usr/local/mesh_services/###COMPANYNAME###/###SERVICENAME###/###EXECUTABLENAME###.msh" &> /dev/null
+ sudo rm "/usr/local/mesh_services/###COMPANYNAME###/###SERVICENAME###/###EXECUTABLENAME###.db" &> /dev/null
++sudo rm "/usr/local/mesh_services/###COMPANYNAME###/###SERVICENAME###/vncrelay.secret" &> /dev/null
+ sudo rm "/usr/local/mesh_services/meshagentDiagnostic/meshagentDiagnostic" &> /dev/null
+ sudo rm "/Library/LaunchDaemons/###SERVICENAME###.plist" &> /dev/null
+ sudo rm "/Library/LaunchAgents/###SERVICENAME###-launchagent.plist" &> /dev/null

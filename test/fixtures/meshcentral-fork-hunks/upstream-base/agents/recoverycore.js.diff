@@ -1,0 +1,699 @@
+--- a/agents/recoverycore.js
++++ b/agents/recoverycore.js
+@@ -1,3 +1,29 @@
++// Windows Files actions execute inside the native agent; never a command shell.
++function nativeFileAction(socket, cmd) {
++    var request = socket.httprequest || {}, rights = request.rights;
++    var result = { ok: false, error: 'Access denied.' };
++    var deleting = cmd.action == 'delete';
++    if (typeof rights == 'number' && (rights == 0xFFFFFFFF ||
++        ((rights & 8) != 0 && (rights & 1024) == 0 && (deleting || (rights & 131072) != 0)))) {
++        if (process.platform != 'win32') { result.error = 'Native Windows file actions are unavailable.'; }
++        else if (typeof cmd.path != 'string' || cmd.path.length == 0 ||
++            (cmd.action == 'execute' && typeof cmd.privileged != 'boolean')) { result.error = 'Invalid file action.'; }
++        else {
++            try {
++                var agent = require('MeshAgent');
++                if (typeof agent.fileAction != 'function') { result.error = 'Update the agent to enable native file actions.'; }
++                else { result = agent.fileAction(cmd.action, cmd.path, deleting ? cmd.rec === true : cmd.action == 'execute' && cmd.privileged === true); }
++            } catch (ex) { result = { ok: false, error: String(ex) }; }
++        }
++    }
++    result.action = 'fileaction'; result.operation = cmd.action; result.reqid = cmd.reqid;
++    try { socket.write(Buffer.from(JSON.stringify(result))); } catch (ex) { }
++    var message = 'Native file ' + cmd.action + ': ' + cmd.path + ' ' + JSON.stringify(result);
++    try { sendConsoleText(message, request.sessionid); } catch (ex) { }
++    if (typeof MeshServerLogEx == 'function') { MeshServerLogEx(20, [cmd.path], message, request); }
++    return result;
++}
++
+ 
+ var http = require('http');
+ var childProcess = require('child_process');
+@@ -465,67 +491,26 @@
+     sendAgentMessage('Self Update failed because execv() failed', 3);
+ }
+ 
+-function windows_execve(name, agentfilename, sessionid) {
+-    var libc;
+-    try {
+-        libc = require('_GenericMarshal').CreateNativeProxy('msvcrt.dll');
+-        libc.CreateMethod('_wexecve');
+-    }
+-    catch (xx) {
+-        sendConsoleText('Self Update failed because msvcrt.dll is missing', sessionid);
+-        sendAgentMessage('Self Update failed because msvcrt.dll is missing', 3);
+-        return;
+-    }
+-
+-    var cwd = process.cwd();
+-    if (!cwd.endsWith('\\'))
+-    {
+-        cwd += '\\';
+-    }
+-    var cmd = require('_GenericMarshal').CreateVariable(process.env['windir'] + '\\system32\\cmd.exe', { wide: true });
+-    var args = require('_GenericMarshal').CreateVariable(3 * require('_GenericMarshal').PointerSize);
+-    var arg1 = require('_GenericMarshal').CreateVariable('cmd.exe', { wide: true });
+-    var arg2 = require('_GenericMarshal').CreateVariable('/C net stop "' + name + '" & "' + cwd + agentfilename + '.update.exe" -b64exec ' + 'dHJ5CnsKICAgIHZhciBzZXJ2aWNlTG9jYXRpb24gPSBwcm9jZXNzLmFyZ3YucG9wKCkudG9Mb3dlckNhc2UoKTsKICAgIHJlcXVpcmUoJ3Byb2Nlc3MtbWFuYWdlcicpLmVudW1lcmF0ZVByb2Nlc3NlcygpLnRoZW4oZnVuY3Rpb24gKHByb2MpCiAgICB7CiAgICAgICAgZm9yICh2YXIgcCBpbiBwcm9jKQogICAgICAgIHsKICAgICAgICAgICAgaWYgKHByb2NbcF0ucGF0aCAmJiAocHJvY1twXS5wYXRoLnRvTG93ZXJDYXNlKCkgPT0gc2VydmljZUxvY2F0aW9uKSkKICAgICAgICAgICAgewogICAgICAgICAgICAgICAgcHJvY2Vzcy5raWxsKHByb2NbcF0ucGlkKTsKICAgICAgICAgICAgfQogICAgICAgIH0KICAgICAgICBwcm9jZXNzLmV4aXQoKTsKICAgIH0pOwp9CmNhdGNoIChlKQp7CiAgICBwcm9jZXNzLmV4aXQoKTsKfQ==' +
+-        ' "' + process.execPath + '" & copy "' + cwd + agentfilename + '.update.exe" "' + process.execPath + '" & net start "' + name + '" & erase "' + cwd + agentfilename + '.update.exe"', { wide: true });
+-
+-    if (name == null)
+-    {
+-        // We can continue with self update for Temp/Console Mode on Windows
+-        var db = null;
+-        var update = cwd + agentfilename + '.update.exe';
+-        var updatedb = cwd + agentfilename + '.update.db';
+-        var parms = windows_getCommandLine(); parms.shift();
+-        
+-        var updatesource = parms.find(function (v) { return (v.startsWith('--updateSourcePath=')); });
+-        if (updatesource == null)
+-        {
+-            parms.push('--updateSourcePath="' + cwd + agentfilename + '"');
+-            updatesource = (cwd + agentfilename).split('.exe'); updatesource.pop(); updatesource = updatesource.join('.exe');
+-            db = updatesource + '.db';
+-            updatesource = (' & move "' + updatedb + '" "' + db + '"') + (' & erase "' + updatedb + '" & move "' + update + '" "' + updatesource + '.exe"');
+-        }
+-        else
+-        {
+-            updatesource = updatesource.substring(19).split('.exe');
+-            updatesource.pop(); updatesource = updatesource.join('.exe');
+-            db = updatesource + '.db';
+-            updatesource = (' & move "' + update + '" "' + updatesource + '.exe" & move "' + updatedb + '" "' + db + '" & erase "' + updatedb + '"') + (' & echo move "' + update + '" "' + updatesource + '.exe" & echo move "' + updatedb + '" "' + db + '"');
+-        }
+-
+-        var tmp = '/C echo copy "' + db + '" "' + updatedb + '" & copy "' + db + '" "' + updatedb + '"' + ' & "' + update + '" ' + parms.join(' ') + updatesource + ' & erase "' + update + '" & echo ERASE "' + update + '"';
+-        arg2 = require('_GenericMarshal').CreateVariable(tmp, { wide: true });
+-    }
+-
+-    arg1.pointerBuffer().copy(args.toBuffer());
+-    arg2.pointerBuffer().copy(args.toBuffer(), require('_GenericMarshal').PointerSize);
+-
+-    libc._wexecve(cmd, args, 0);
++function agentUpdate_ReportFailure()
++{
++    try { require('MeshAgent').SendCommand({ action: 'agentupdatefailed' }); } catch (e) { }
+ }
+ 
+ // Start a JavaScript based Agent Self-Update
+ function agentUpdate_Start(updateurl, updateoptions) {
+     // If this value is null
+     var sessionid = (updateoptions != null) ? updateoptions.sessionid : null; // If this is null, messages will be broadcast. Otherwise they will be unicasted
++    if (process.platform == 'win32') {
++        sendConsoleText('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.', sessionid);
++        sendAgentMessage('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.', 3);
++        return;
++    }
++    if (updateoptions == null || typeof updateoptions.hash != 'string' || !/^[0-9a-f]{96}$/i.test(updateoptions.hash)) {
++        sendConsoleText('Self Update refused because a valid SHA-384 hash was not supplied.', sessionid);
++        sendAgentMessage('Self Update refused because a valid SHA-384 hash was not supplied.', 3);
++        agentUpdate_ReportFailure();
++        return;
++    }
+ 
+     // If the url starts with *, switch it to use the same protoco, host and port as the control channel.
+     if (updateurl != null) {
+@@ -626,109 +611,136 @@
+                 sendConsoleText('Self Update failed, because there was a problem trying to download the update from ' + updateurl, sessionid);
+                 sendAgentMessage('Self Update failed, because there was a problem trying to download the update from ' + updateurl, 3);
+                 agentUpdate_Start._selfupdate = null;
++                agentUpdate_ReportFailure();
+             });
+             agentUpdate_Start._selfupdate.on('response', function (img)
+             {
++                if (img.statusCode != 200)
++                {
++                    sendConsoleText('Self Update failed because the update server returned HTTP status ' + img.statusCode + '.', sessionid);
++                    sendAgentMessage('Self Update failed because the update server returned HTTP status ' + img.statusCode + '.', 3);
++                    try { img.resume(); } catch (e) { }
++                    agentUpdate_Start._selfupdate = null;
++                    agentUpdate_ReportFailure();
++                    return;
++                }
+                 var self = this;
+-                this._file = require('fs').createWriteStream(agentfilename + (process.platform=='win32'?'.update.exe':'.update'), { flags: 'wb' });
++                this._fileClosed = false;
++                this._downloadFailed = false;
++                this._verifiedHash = null;
++                var stagedUpdatePath = process.execPath + '.update';
++                try { this._file = require('fs').createWriteStream(stagedUpdatePath, { flags: 'wb' }); }
++                catch (openError)
++                {
++                    sendConsoleText('Self Update failed while opening the staged update: ' + openError, sessionid);
++                    sendAgentMessage('Self Update failed while opening the staged update.', 3);
++                    agentUpdate_Start._selfupdate = null;
++                    agentUpdate_ReportFailure();
++                    return;
++                }
+                 this._filehash = require('SHA384Stream').create();
++                this._file.on('error', function (e)
++                {
++                    if (self._downloadFailed) { return; }
++                    self._downloadFailed = true;
++                    sendConsoleText('Self Update failed while writing the staged update: ' + e, sessionid);
++                    sendAgentMessage('Self Update failed while writing the staged update.', 3);
++                    try { require('fs').unlinkSync(stagedUpdatePath); } catch (zz) { }
++                    agentUpdate_Start._selfupdate = null;
++                    agentUpdate_ReportFailure();
++                });
++                this._file.on('close', function ()
++                {
++                    self._fileClosed = true;
++                    if (self._downloadFailed) { try { require('fs').unlinkSync(stagedUpdatePath); } catch (zz) { } return; }
++                    if (!self._downloadFailed && self._verifiedHash != null)
++                    {
++                        var verifiedHash = self._verifiedHash;
++                        self._verifiedHash = null;
++                        self._filehash.emit('hash', verifiedHash);
++                    }
++                });
+                 this._filehash.on('hash', function (h)
+                 {
+-                    if (updateoptions != null && updateoptions.hash != null)
++                    if (self._downloadFailed) { return; }
++                    if (updateoptions.hash.toLowerCase() == h.toString('hex').toLowerCase())
+                     {
+-                        if (updateoptions.hash.toLowerCase() == h.toString('hex').toLowerCase())
++                        if (sessionid != null) { sendConsoleText('Download complete. HASH verified.', sessionid); }
++                    }
++                    else
++                    {
++                        self._downloadFailed = true;
++                        agentUpdate_Start._retryCount++;
++                        sendConsoleText('Self Update FAILED because the downloaded agent FAILED hash check (' + agentUpdate_Start._retryCount + '), URL: ' + updateurl, sessionid);
++                        sendAgentMessage('Self Update FAILED because the downloaded agent FAILED hash check (' + agentUpdate_Start._retryCount + '), URL: ' + updateurl, 3);
++                        agentUpdate_Start._selfupdate = null;
++
++                        try
+                         {
+-                            if (sessionid != null) { sendConsoleText('Download complete. HASH verified.', sessionid); }
++                            // We are clearing these two properties, becuase some older agents may not cleanup correctly causing problems with the retry
++                            require('https').globalAgent.sockets = {};
++                            require('https').globalAgent.requests = {};
+                         }
+-                        else
++                        catch(z)
++                        {}
++                        if (needStreamFix)
+                         {
+-                            agentUpdate_Start._retryCount++;
+-                            sendConsoleText('Self Update FAILED because the downloaded agent FAILED hash check (' + agentUpdate_Start._retryCount + '), URL: ' + updateurl, sessionid);
+-                            sendAgentMessage('Self Update FAILED because the downloaded agent FAILED hash check (' + agentUpdate_Start._retryCount + '), URL: ' + updateurl, 3);
+-                            agentUpdate_Start._selfupdate = null;
+-
+-                            try
+-                            {
+-                                // We are clearing these two properties, becuase some older agents may not cleanup correctly causing problems with the retry
+-                                require('https').globalAgent.sockets = {};  
+-                                require('https').globalAgent.requests = {};
+-                            }
+-                            catch(z)
+-                            {}
+-                            if (needStreamFix)
+-                            {
+-                                sendConsoleText('This is an older agent that may have an httpstream bug. On next retry will try to fetch the update differently...');
+-                                needStreamFix = false;
+-                            }
++                            sendConsoleText('This is an older agent that may have an httpstream bug. On next retry will try to fetch the update differently...');
++                            needStreamFix = false;
++                        }
+ 
+-                            if (agentUpdate_Start._retryCount < 4)
+-                            {
+-                                // Retry the download again
+-                                sendConsoleText('Self Update will try again in 20 seconds...', sessionid);
+-                                agentUpdate_Start._timeout = setTimeout(agentUpdate_Start, 20000, updateurl, updateoptions);
+-                            }
+-                            else
+-                            {
+-                                sendConsoleText('Self Update giving up, too many failures...', sessionid);
+-                                sendAgentMessage('Self Update giving up, too many failures...', 3);
+-                            }
+-                            return;
++                        if (agentUpdate_Start._retryCount < 4)
++                        {
++                            // Retry the download again
++                            sendConsoleText('Self Update will try again in 20 seconds...', sessionid);
++                            agentUpdate_Start._timeout = setTimeout(agentUpdate_Start, 20000, updateurl, updateoptions);
+                         }
++                        else
++                        {
++                            sendConsoleText('Self Update giving up, too many failures...', sessionid);
++                            sendAgentMessage('Self Update giving up, too many failures...', 3);
++                            agentUpdate_ReportFailure();
++                        }
++                        return;
+                     }
+-                    else
+-                    {
+-                        sendConsoleText('Download complete. HASH=' + h.toString('hex'), sessionid);
+-                    }
++                    if (!self._fileClosed) { self._verifiedHash = h; return; }
+ 
+                     // Send an indication to the server that we got the update download correctly.
+                     try { require('MeshAgent').SendCommand({ action: 'agentupdatedownloaded' }); } catch (e) { }
+ 
+-                    if (sessionid != null) { sendConsoleText('Updating and restarting agent...', sessionid); }
+-                    if (process.platform == 'win32')
++                    if (process.platform != 'freebsd' && process.platform != 'linux')
+                     {
+-                        // Use _wexecve() equivalent to perform the update
+-                        windows_execve(name, agentfilename, sessionid);
++                        sendConsoleText('Self Update disabled for this platform; native service lifecycle is required.', sessionid);
++                        sendAgentMessage('Self Update disabled for this platform; native service lifecycle is required.', 3);
++                        try { require('fs').unlinkSync(stagedUpdatePath); } catch (zz) { }
++                        agentUpdate_Start._selfupdate = null;
++                        agentUpdate_ReportFailure();
++                        return;
+                     }
+-                    else
++
++                    if (sessionid != null) { sendConsoleText('Updating and restarting agent...', sessionid); }
++                    try
+                     {
+                         var m = require('fs').statSync(process.execPath).mode;
+-                        require('fs').chmodSync(process.cwd() + agentfilename + '.update', m);
+-
+-                        // remove binary
+-                        require('fs').unlinkSync(process.execPath);
+-
+-                        // copy update
+-                        require('fs').copyFileSync(process.cwd() + agentfilename + '.update', process.execPath);
+-                        require('fs').chmodSync(process.execPath, m);
+-
+-                        // erase update
+-                        require('fs').unlinkSync(process.cwd() + agentfilename + '.update');
++                        require('fs').chmodSync(stagedUpdatePath, m);
++                        require('fs').renameSync(stagedUpdatePath, process.execPath);
++                    }
++                    catch (replaceError)
++                    {
++                        sendConsoleText('Self Update failed while atomically replacing the agent: ' + replaceError, sessionid);
++                        sendAgentMessage('Self Update failed while atomically replacing the agent.', 3);
++                        agentUpdate_Start._selfupdate = null;
++                        agentUpdate_ReportFailure();
++                        return;
++                    }
+ 
+-                        switch (process.platform)
+-                        {
+-                            case 'freebsd':
+-                                bsd_execv(name, agentfilename, sessionid);
+-                                break;
+-                            case 'linux':
+-                                linux_execv(name, agentfilename, sessionid);
+-                                break;
+-                            default:
+-                                try
+-                                {
+-                                    // restart service
+-                                    var s = require('service-manager').manager.getService(name);
+-                                    s.restart();
+-                                }
+-                                catch (zz)
+-                                {
+-                                    if (zz.toString() != 'waitExit() aborted because thread is exiting')
+-                                    {
+-                                        sendConsoleText('Self Update encountered an error trying to restart service', sessionid);
+-                                        sendAgentMessage('Self Update encountered an error trying to restart service', 3);
+-                                    }
+-                                }
+-                                break;
+-                        }
++                    if (process.platform == 'freebsd')
++                    {
++                        bsd_execv(name, agentfilename, sessionid);
++                    }
++                    else
++                    {
++                        linux_execv(name, agentfilename, sessionid);
+                     }
+                 });
+ 
+@@ -770,7 +782,7 @@
+     }
+ }
+ 
+-// Return p number of spaces 
++// Return p number of spaces
+ function addPad(p, ret) { var r = ''; for (var i = 0; i < p; i++) { r += ret; } return r; }
+ 
+ setInterval(function () { sendConsoleText('Timer!'); }, 2000);
+@@ -915,6 +927,153 @@
+     }
+ }
+ 
++function closeFileUpload(request, removePartial) {
++    if (request == null) return true;
++    var uploadPath = request.uploadFilePath;
++    var closeOk = true;
++    if (request.uploadFile != null) {
++        try { fs.closeSync(request.uploadFile); } catch (e) { closeOk = false; }
++    }
++    delete request.uploadFile;
++    delete request.uploadFileid;
++    delete request.uploadFilePath;
++    delete request.uploadFileSize;
++    if ((removePartial === true) && (uploadPath != null)) { try { fs.unlinkSync(uploadPath); } catch (e) { } }
++    return closeOk;
++}
++
++function closeFileDownload(socket) {
++    if ((socket == null) || (socket.filedownload == null)) return;
++    if (socket.filedownload.f != null) { try { fs.closeSync(socket.filedownload.f); } catch (e) { } }
++    delete socket.filedownload;
++}
++
++function closeBasicFileDownload(request, socket) {
++    if ((request == null) || (request.downloadFile == null)) return;
++    try { request.downloadFile.pause(); } catch (e) { }
++    try { request.downloadFile.unpipe(socket); } catch (e) { }
++    delete request.downloadFile;
++}
++
++var recoveryRunCommandChild = null;
++function recoveryRunCommands(data) {
++    function terminalIsClosed(term) {
++        if (term == null || term._meshTerminalClosed === true) return true;
++        try { if (term.isBridgeClosed && term.isBridgeClosed()) return true; } catch (e) { }
++        return false;
++    }
++    function terminalClose(term) {
++        if (term == null) return;
++        try { if (term.closeBridge) { term.closeBridge(); return; } } catch (e) { }
++        try { if (term.end) { term.end(); return; } } catch (e2) { }
++        try { if (term.kill) term.kill(); } catch (e3) { }
++    }
++    function sendResult(text) {
++        if (data.reply) {
++            require('MeshAgent').SendCommand({ action: 'msg', type: 'runcommands', result: text, sessionid: data.sessionid, responseid: data.responseid });
++        } else if (text != null && text.length > 0) {
++            sendConsoleText(text, data.sessionid);
++        }
++    }
++
++    if (process.platform != 'win32') { sendResult('Recovery run commands are only available on Windows.'); return; }
++    if (data.runAsUser == null) data.runAsUser = 0;
++    if ((data.runAsUser !== 0) && (data.runAsUser !== 1) && (data.runAsUser !== 2)) { sendResult('Invalid runAsUser value.'); return; }
++    if (recoveryRunCommandChild != null) {
++        if (terminalIsClosed(recoveryRunCommandChild)) {
++            terminalClose(recoveryRunCommandChild);
++            recoveryRunCommandChild = null;
++        } else {
++            sendResult("Run commands can't execute, already busy.");
++            return;
++        }
++    }
++
++    var commandText = Array.isArray(data.cmds) ? data.cmds.join('\r\n') : ((data.cmds == null) ? '' : ('' + data.cmds));
++    var targetSessionId = null;
++    if (data.runAsUser > 0) {
++        try { targetSessionId = require('user-sessions').consoleUid(); } catch (e) { }
++        if ((typeof targetSessionId != 'number') || (targetSessionId < 0)) targetSessionId = null;
++    }
++    if (data.runAsUser == 2 && targetSessionId == null) { sendResult('Run commands user session is unavailable.'); return; }
++
++    var replydata = '';
++    var completed = false;
++    var failed = false;
++    var inputSent = false;
++    var timer = null;
++    var marker = '\x1b]MeshConsoleBridgeReady\x07';
++    var markerSeen = false;
++    var markerBuffer = '';
++    function bridgeState() {
++        if (recoveryRunCommandChild == null) return ' bridge=missing';
++        return (' bridgeReady=' + (recoveryRunCommandChild._meshTerminalReady === true) +
++            ' bridgeClosed=' + (recoveryRunCommandChild._meshTerminalClosed === true) +
++            ' markerSeen=' + markerSeen +
++            ' mode=' + recoveryRunCommandChild._meshTerminalMode +
++            ' tokenMode=' + recoveryRunCommandChild._meshTerminalTokenMode);
++    }
++    function complete() {
++        if (completed) return;
++        completed = true;
++        if (timer != null) { try { clearTimeout(timer); } catch (e) { } timer = null; }
++        if (data.reply) { sendResult(replydata); } else { sendConsoleText(failed ? 'Run commands failed.' : 'Run commands completed.', data.sessionid); }
++        recoveryRunCommandChild = null;
++    }
++    function sendInput() {
++        var term = recoveryRunCommandChild;
++        if (inputSent || completed || term == null) return;
++        inputSent = true;
++        try {
++            term.writeBridgeInput(commandText + '\r\n', function () { try { if (term.closeInput) term.closeInput(); } catch (e) { } });
++        } catch (e) {
++            failed = true;
++            replydata += 'Windows run commands failed writing to MeshConsoleBridgeW: ' + e.toString() + bridgeState();
++            if (!data.reply) sendConsoleText(replydata, data.sessionid);
++            terminalClose(term);
++            complete();
++        }
++    }
++    function appendOutput(chunk) {
++        var text = '';
++        try { text = chunk.toString(); } catch (e) { text = '' + chunk; }
++        if (!markerSeen) {
++            markerBuffer += text;
++            var markerIndex = markerBuffer.indexOf(marker);
++            if (markerIndex < 0) return;
++            markerSeen = true;
++            text = markerBuffer.substring(0, markerIndex) + markerBuffer.substring(markerIndex + marker.length);
++            markerBuffer = '';
++            sendInput();
++        }
++        if (text.length == 0) return;
++        replydata += text;
++        if (!data.reply) sendConsoleText(text, data.sessionid);
++    }
++
++    try {
++        var method = (data.runAsUser > 0 && targetSessionId != null) ? 'RunPowerShellCommandAsUser' : 'RunPowerShellCommand';
++        recoveryRunCommandChild = require('win-terminal')[method](80, 25, targetSessionId);
++        recoveryRunCommandChild.descriptorMetadata = 'RecoveryUserCommandsPowerShell';
++        if (recoveryRunCommandChild.onBridgeData) recoveryRunCommandChild.onBridgeData(appendOutput); else recoveryRunCommandChild.on('data', appendOutput);
++        recoveryRunCommandChild.on('error', function (error) { failed = true; replydata += 'Windows run commands failed through MeshConsoleBridgeW: ' + error.toString() + bridgeState(); if (!data.reply) sendConsoleText(replydata, data.sessionid); complete(); });
++        recoveryRunCommandChild.on('close', complete);
++        timer = setTimeout(function () {
++            failed = true;
++            replydata += 'Windows run commands timed out through MeshConsoleBridgeW.' + bridgeState();
++            if (!data.reply) sendConsoleText(replydata, data.sessionid);
++            terminalClose(recoveryRunCommandChild);
++            complete();
++        }, 300000);
++        if (recoveryRunCommandChild.onBridgeReady) recoveryRunCommandChild.onBridgeReady(sendInput);
++        else if (recoveryRunCommandChild.isBridgeReady && recoveryRunCommandChild.isBridgeReady()) sendInput();
++    } catch (e) {
++        replydata += 'Windows run commands failed before MeshConsoleBridgeW launch: ' + e.toString();
++        sendResult(replydata);
++        recoveryRunCommandChild = null;
++    }
++}
++
+ 
+ require('MeshAgent').AddCommandHandler(function (data)
+ {
+@@ -924,6 +1083,9 @@
+             case 'agentupdate':
+                 agentUpdate_Start(data.url, { hash: data.hash, tlshash: data.servertlshash, sessionid: data.sessionid });
+                 break;
++            case 'runcommands':
++                recoveryRunCommands(data);
++                break;
+             case 'msg':
+                 {
+                     switch (data.type) {
+@@ -980,8 +1142,9 @@
+                                                 if (tunnels[this.httprequest.index] == null) return; // Stop duplicate calls.
+ 
+                                                 // If there is a upload or download active on this connection, close the file
+-                                                if (this.httprequest.uploadFile) { fs.closeSync(this.httprequest.uploadFile); delete this.httprequest.uploadFile; delete this.httprequest.uploadFileid; delete this.httprequest.uploadFilePath; }
+-                                                if (this.httprequest.downloadFile) { delete this.httprequest.downloadFile; }
++                                                closeFileUpload(this.httprequest, false);
++                                                closeFileDownload(this);
++                                                closeBasicFileDownload(this.httprequest, this);
+ 
+                                                 //sendConsoleText("Tunnel #" + this.httprequest.index + " closed.", this.httprequest.sessionid);
+                                                 delete tunnels[this.httprequest.index];
+@@ -991,14 +1154,14 @@
+                                             });
+                                             s.on('data', function (data) {
+                                                 // If this is upload data, save it to file
+-                                                if ((this.httprequest.uploadFile) && (typeof data == 'object') && (data[0] != 123)) {
++                                                if ((this.httprequest.uploadFile != null) && (typeof data == 'object') && (data[0] != 123)) {
+                                                     // Save the data to file being uploaded.
+                                                     if (data[0] == 0) {
+                                                         // If data starts with zero, skip the first byte. This is used to escape binary file data from JSON.
+-                                                        try { fs.writeSync(this.httprequest.uploadFile, data, 1, data.length - 1); } catch (e) { sendConsoleText('FileUpload Error'); this.write(Buffer.from(JSON.stringify({ action: 'uploaderror' }))); return; } // Write to the file, if there is a problem, error out.
++                                                        try { fs.writeSync(this.httprequest.uploadFile, data, 1, data.length - 1); } catch (e) { var uploadReqId = this.httprequest.uploadFileid; closeFileUpload(this.httprequest, false); sendConsoleText('FileUpload Error'); this.write(Buffer.from(JSON.stringify({ action: 'uploaderror', reqid: uploadReqId }))); return; } // Write to the file, if there is a problem, error out.
+                                                     } else {
+                                                         // If data does not start with zero, save as-is.
+-                                                        try { fs.writeSync(this.httprequest.uploadFile, data); } catch (e) { sendConsoleText('FileUpload Error'); this.write(Buffer.from(JSON.stringify({ action: 'uploaderror' }))); return; } // Write to the file, if there is a problem, error out.
++                                                        try { fs.writeSync(this.httprequest.uploadFile, data); } catch (e) { var uploadReqId = this.httprequest.uploadFileid; closeFileUpload(this.httprequest, false); sendConsoleText('FileUpload Error'); this.write(Buffer.from(JSON.stringify({ action: 'uploaderror', reqid: uploadReqId }))); return; } // Write to the file, if there is a problem, error out.
+                                                     }
+                                                     this.write(Buffer.from(JSON.stringify({ action: 'uploadack', reqid: this.httprequest.uploadFileid }))); // Ask for more data.
+                                                     return;
+@@ -1044,27 +1207,14 @@
+                                                                     if (this.httprequest.xoptions.cols) { cols = this.httprequest.xoptions.cols; }
+                                                                 }
+ 
+-                                                                // Admin Terminal
+-                                                                if (require('win-virtual-terminal').supported) {
+-                                                                    // ConPTY PseudoTerminal
+-                                                                    // this.httprequest._term = require('win-virtual-terminal')[this.httprequest.protocol == 6 ? 'StartPowerShell' : 'Start'](80, 25);
+-
+-                                                                    // The above line is commented out, because there is a bug with ClosePseudoConsole() API, so this is the workaround
+-                                                                    this.httprequest._dispatcher = require('win-dispatcher').dispatch({ modules: [{ name: 'win-virtual-terminal', script: getJSModule('win-virtual-terminal') }], launch: { module: 'win-virtual-terminal', method: 'Start', args: [cols, rows] } });
+-                                                                    this.httprequest._dispatcher.ws = this;
+-                                                                    this.httprequest._dispatcher.on('connection', function (c) {
+-                                                                        this.ws._term = c;
+-                                                                        c.pipe(this.ws, { dataTypeSkip: 1 });
+-                                                                        this.ws.pipe(c, { dataTypeSkip: 1 });
+-                                                                    });
+-                                                                }
+-                                                                else {
+-                                                                    // Legacy Terminal
+-                                                                    this.httprequest._term = require('win-terminal').Start(80, 25);
+-                                                                    this.httprequest._term.pipe(this, { dataTypeSkip: 1 });
+-                                                                    this.pipe(this.httprequest._term, { dataTypeSkip: 1, end: false });
+-                                                                    this.prependListener('end', function () { this.httprequest._term.end(function () { sendConsoleText('Terminal was closed'); }); });
++                                                                var targetSessionId = null;
++                                                                if ((this.httprequest.protocol == 8) || (this.httprequest.protocol == 9)) {
++                                                                    try { targetSessionId = require('user-sessions').consoleUid(); } catch (ex) { }
+                                                                 }
++                                                                this.httprequest._term = require('win-terminal')[(this.httprequest.protocol == 6 || this.httprequest.protocol == 9) ? 'StartPowerShell' : 'Start'](cols, rows, targetSessionId);
++                                                                this.httprequest._term.pipe(this, { dataTypeSkip: 1 });
++                                                                this.pipe(this.httprequest._term, { dataTypeSkip: 1, end: false });
++                                                                this.prependListener('end', function () { this.httprequest._term.end(function () { sendConsoleText('Terminal was closed'); }); });
+                                                             }
+                                                             else {
+                                                                 var env = { HISTCONTROL: 'ignoreboth' };
+@@ -1121,10 +1271,19 @@
+                                                                     fs.mkdirSync(cmd.path);
+                                                                     break;
+                                                                 }
+-                                                            case 'rm':
++                                                            case 'execute': { nativeFileAction(this, cmd); break; }
++                case 'open': { nativeFileAction(this, cmd); break; }
++                case 'rm':
+                                                                 {
+                                                                     // Delete, possibly recursive delete
+-                                                                    for (var i in cmd.delfiles) {
++                                                                    if (!Array.isArray(cmd.delfiles)) { break; }
++                    for (var i in cmd.delfiles) {
++                        if (typeof cmd.delfiles[i] != 'string' || !cmd.delfiles[i] || cmd.delfiles[i] == '.' || cmd.delfiles[i] == '..' || /[\\/:\x00]/.test(cmd.delfiles[i])) { continue; }
++                        if (process.platform == 'win32') {
++                            nativeFileAction(this, { action: 'delete', reqid: cmd.reqid, path: path.join(cmd.path, cmd.delfiles[i]), rec: cmd.rec });
++                            continue;
++                        }
++
+                                                                         try { deleteFolderRecursive(path.join(cmd.path, cmd.delfiles[i]), cmd.rec); } catch (e) { }
+                                                                     }
+                                                                     break;
+@@ -1168,20 +1327,23 @@
+                                                                             }
+                                                                         }
+                                                                         MeshServerLogEx((cmd.ask == 'coredump') ? 104 : 49, [cmd.path], 'Download: \"' + cmd.path + '\"', this.httprequest);
+-                                                                        if ((cmd.path == null) || (this.filedownload != null)) { this.write({ action: 'download', sub: 'cancel', id: this.filedownload.id }); delete this.filedownload; }
+-                                                                        this.filedownload = { id: cmd.id, path: cmd.path, ptr: 0 }
+-                                                                        try { this.filedownload.f = fs.openSync(this.filedownload.path, 'rbN'); } catch (e) { this.write({ action: 'download', sub: 'cancel', id: this.filedownload.id }); delete this.filedownload; }
++                                                                        if (cmd.path == null) { this.write({ action: 'download', sub: 'cancel', id: cmd.id }); break; }
++                                                                        if (this.filedownload != null) { var previousDownloadId = this.filedownload.id; closeFileDownload(this); this.write({ action: 'download', sub: 'cancel', id: previousDownloadId }); }
++                                                                        this.filedownload = { id: cmd.id, path: cmd.path, ptr: 0 };
++                                                                        try { this.filedownload.f = fs.openSync(this.filedownload.path, 'rbN'); } catch (e) { var failedDownloadId = this.filedownload.id; closeFileDownload(this); this.write({ action: 'download', sub: 'cancel', id: failedDownloadId }); }
+                                                                         if (this.filedownload) { this.write({ action: 'download', sub: 'start', id: cmd.id }); }
+                                                                     } else if ((this.filedownload != null) && (cmd.id == this.filedownload.id)) { // Download commands
+-                                                                        if (cmd.sub == 'startack') { sendNextBlock = ((typeof cmd.ack == 'number') ? cmd.ack : 8); } else if (cmd.sub == 'stop') { delete this.filedownload; } else if (cmd.sub == 'ack') { sendNextBlock = 1; }
++                                                                        if (cmd.sub == 'startack') { sendNextBlock = ((typeof cmd.ack == 'number') ? cmd.ack : 8); } else if ((cmd.sub == 'stop') || (cmd.sub == 'cancel')) { closeFileDownload(this); } else if (cmd.sub == 'ack') { sendNextBlock = 1; }
+                                                                     }
+                                                                     // Send the next download block(s)
+-                                                                    while (sendNextBlock > 0) {
++                                                                    if ((sendNextBlock > 0) && (this.filedownload != null)) {
+                                                                         sendNextBlock--;
+                                                                         var buf = Buffer.alloc(16384);
+-                                                                        var len = fs.readSync(this.filedownload.f, buf, 4, 16380, null);
+-                                                                        this.filedownload.ptr += len;
+-                                                                        if (len < 16380) { buf.writeInt32BE(0x01000001, 0); fs.closeSync(this.filedownload.f); delete this.filedownload; sendNextBlock = 0; } else { buf.writeInt32BE(0x01000000, 0); }
++                                                                        var activeDownload = this.filedownload;
++                                                                        var len;
++                                                                        try { len = fs.readSync(activeDownload.f, buf, 4, 16380, null); } catch (e) { var failedDownloadId = activeDownload.id; closeFileDownload(this); this.write({ action: 'download', sub: 'cancel', id: failedDownloadId }); break; }
++                                                                        activeDownload.ptr += len;
++                                                                        if (len < 16380) { buf.writeInt32BE(0x01000001, 0); closeFileDownload(this); sendNextBlock = 0; } else { buf.writeInt32BE(0x01000000, 0); }
+                                                                         this.write(buf.slice(0, len + 4)); // Write as binary
+                                                                     }
+                                                                     break;
+@@ -1189,38 +1351,33 @@
+                                                             case 'upload':
+                                                                 {
+                                                                     // Upload a file, browser to agent
+-                                                                    if (this.httprequest.uploadFile != null) { fs.closeSync(this.httprequest.uploadFile); delete this.httprequest.uploadFile; }
++                                                                    if (this.httprequest.uploadFile != null) { closeFileUpload(this.httprequest, false); }
+                                                                     if (cmd.path == undefined) break;
+                                                                     var filepath = cmd.name ? pathjoin(cmd.path, cmd.name) : cmd.path;
+                                                                     this.httprequest.uploadFilePath = filepath;
+                                                                     MeshServerLogEx(50, [filepath], 'Upload: \"' + filepath + '\"', this.httprequest);
+-                                                                    try { this.httprequest.uploadFile = fs.openSync(filepath, 'wbN'); } catch (e) { this.write(Buffer.from(JSON.stringify({ action: 'uploaderror', reqid: cmd.reqid }))); break; }
++                                                                    try { this.httprequest.uploadFile = fs.openSync(filepath, 'wbN'); } catch (e) { closeFileUpload(this.httprequest, false); this.write(Buffer.from(JSON.stringify({ action: 'uploaderror', reqid: cmd.reqid }))); break; }
+                                                                     this.httprequest.uploadFileid = cmd.reqid;
+-                                                                    if (this.httprequest.uploadFile) { this.write(Buffer.from(JSON.stringify({ action: 'uploadstart', reqid: this.httprequest.uploadFileid }))); }
++                                                                    if (this.httprequest.uploadFile != null) { this.write(Buffer.from(JSON.stringify({ action: 'uploadstart', reqid: this.httprequest.uploadFileid }))); }
+                                                                     break;
+                                                                 }
+                                                             case 'uploaddone':
+                                                                 {
+                                                                     // Indicates that an upload is done
+-                                                                    if (this.httprequest.uploadFile) {
+-                                                                        fs.closeSync(this.httprequest.uploadFile);
+-                                                                        this.write(Buffer.from(JSON.stringify({ action: 'uploaddone', reqid: this.httprequest.uploadFileid }))); // Indicate that we closed the file.
+-                                                                        delete this.httprequest.uploadFile;
+-                                                                        delete this.httprequest.uploadFileid;
+-                                                                        delete this.httprequest.uploadFilePath;
++                                                                    if (this.httprequest.uploadFile != null) {
++                                                                        var uploadReqId = this.httprequest.uploadFileid;
++                                                                        var closeOk = closeFileUpload(this.httprequest, false);
++                                                                        this.write(Buffer.from(JSON.stringify({ action: closeOk ? 'uploaddone' : 'uploaderror', reqid: uploadReqId }))); // Indicate whether the file closed and flushed successfully.
+                                                                     }
+                                                                     break;
+                                                                 }
+                                                             case 'uploadcancel':
+                                                                 {
+                                                                     // Indicates that an upload is canceled
+-                                                                    if (this.httprequest.uploadFile) {
+-                                                                        fs.closeSync(this.httprequest.uploadFile);
+-                                                                        fs.unlinkSync(this.httprequest.uploadFilePath);
+-                                                                        this.write(Buffer.from(JSON.stringify({ action: 'uploadcancel', reqid: this.httprequest.uploadFileid }))); // Indicate that we closed the file.
+-                                                                        delete this.httprequest.uploadFile;
+-                                                                        delete this.httprequest.uploadFileid;
+-                                                                        delete this.httprequest.uploadFilePath;
++                                                                    if (this.httprequest.uploadFile != null) {
++                                                                        var uploadReqId = this.httprequest.uploadFileid;
++                                                                        closeFileUpload(this.httprequest, true);
++                                                                        this.write(Buffer.from(JSON.stringify({ action: 'uploadcancel', reqid: uploadReqId }))); // Indicate that we closed the file.
+                                                                     }
+                                                                     break;
+                                                                 }
+@@ -1301,7 +1458,10 @@
+                 }
+                 break;
+             case 'help':
+-                response = "Available commands are: agentupdate, agentupdateex, dbkeys, dbget, dbset, dbcompact, eval, netinfo, osinfo, setdebug, versions.";
++                response = "Available commands are: agentupdate, agentupdateex, dbkeys, dbget, dbset, dbcompact, eval, netinfo, osinfo, setdebug, umhctl, versions.";
++                break;
++            case 'umhctl':
++                response = require('umhctl').consoleaction(args, rights, sessionid, null);
+                 break;
+             case '_descriptors':
+                 response = 'Open Descriptors: ' + JSON.stringify(getOpenDescriptors());
+@@ -1315,10 +1475,10 @@
+                 break;
+             case 'agentupdateex':
+                 // Perform an direct agent update without requesting any information from the server, this should not typically be used.
+-                if (args['_'].length == 1) {
+-                    if (args['_'][0].startsWith('https://')) { agentUpdate_Start(args['_'][0], { sessionid: sessionid }); } else { response = "Usage: agentupdateex https://server/path"; }
++                if (args['_'].length == 2) {
++                    if (args['_'][0].startsWith('https://') && /^[0-9a-f]{96}$/i.test(args['_'][1])) { agentUpdate_Start(args['_'][0], { sessionid: sessionid, hash: args['_'][1] }); } else { response = "Usage: agentupdateex https://server/path SHA384"; }
+                 } else {
+-                    agentUpdate_Start(null, { sessionid: sessionid });
++                    response = "Usage: agentupdateex https://server/path SHA384";
+                 }
+                 break;
+             case 'eval':
