@@ -1,7 +1,8 @@
 """Fork-safety tests for the image release tooling; never invoke Docker, SSH, systemd, or a live endpoint.
 
 Covers agent seeding (T11), the reviewed-version allowlist (D5/T23), the start-time shadow-copy
-check (G4), the smoke assertions (T22) and the tracked image-size mitigation (T24).
+check (G4), the smoke assertions (T22), the tracked image-size mitigation (T24) and the
+image build context (T20).
 """
 import hashlib
 import importlib.util
@@ -894,6 +895,73 @@ class SmokeCommandTests(unittest.TestCase):
     def test_image_mode_preloads_the_tracked_mitigation(self):
         self.assertEqual(SMOKE_IMAGE.MITIGATION_SOURCE, TRACKED_MITIGATION)
         self.assertEqual(SMOKE_IMAGE.MITIGATION_TARGET, INSTALLER.MITIGATION.as_posix())
+
+
+def docker_ignore_rules(path):
+    rules = []
+    for line in path.read_text(encoding='utf-8').splitlines():
+        line = line.strip()
+        if line and not line.startswith('#'):
+            negate = line.startswith('!')
+            pattern = line[1:] if negate else line
+            regex = ''.join('.*' if part == '**' else re.escape(part).replace(r'\*', '[^/]*').replace(r'\?', '[^/]')
+                            for part in re.split(r'(\*\*)', pattern.strip('/')))
+            rules.append((negate, re.compile(regex + r'\Z')))
+    return rules
+
+
+def docker_excludes(rules, path):
+    """Docker's rule: the last pattern matching the path or one of its parents decides."""
+    parts = path.split('/')
+    candidates = ['/'.join(parts[:index]) for index in range(1, len(parts) + 1)]
+    excluded = False
+    for negate, regex in rules:
+        if any(regex.match(candidate) for candidate in candidates):
+            excluded = not negate
+    return excluded
+
+
+class DockerContextTests(unittest.TestCase):
+    """T20: local state never enters the image build context; every COPY source still does."""
+
+    def setUp(self):
+        self.rules = docker_ignore_rules(DEPLOYMENT / 'Dockerfile.dockerignore')
+
+    def test_every_dockerfile_copy_source_is_sent(self):
+        sources = []
+        for line in (DEPLOYMENT / 'Dockerfile').read_text(encoding='utf-8').splitlines():
+            words = line.split()
+            if words[:1] == ['COPY'] and not any(word.startswith('--from') for word in words):
+                sources += words[1:-1]
+        self.assertIn('MeshCentral', sources)
+        self.assertIn('artifacts', sources)
+        for source in sources:
+            with self.subTest(source=source):
+                self.assertFalse(docker_excludes(self.rules, source))
+
+    def test_files_the_build_reads_are_sent(self):
+        for path in ('MeshCentral/package-lock.json', 'MeshCentral/agents/meshcore.js',
+                     'MeshCentral/agents/hashagents.js', 'MeshCentral/public/scripts/agent-desktop-0.0.2.js',
+                     'MeshCentral/plugins/nativeruntime/nativeruntime.js', 'MeshCentral/meshagent.js',
+                     'MeshCentral/THIRD_PARTY_NOTICES.txt',
+                     'artifacts/MeshServiceRuntime-MeshService64.exe/MeshService64.exe'):
+            with self.subTest(path=path):
+                self.assertFalse(docker_excludes(self.rules, path))
+
+    def test_local_state_secrets_and_siblings_are_not_sent(self):
+        for path in ('MeshCentral/node_modules/meshcentral/meshcentral.js', 'MeshCentral/meshcentral-data/config.json',
+                     'MeshCentral/meshcentral-data/agentserver-cert-private.key', 'MeshCentral/server-backups/dump.zip',
+                     'MeshCentral/meshcentral-web/public/scripts/custom.js', 'MeshCentral/meshcentral-files/x',
+                     'MeshCentral/meshcentral-backups/x', 'MeshCentral/meshcentral-recordings/x',
+                     'MeshAgent/branding_config.local.json', 'MeshAgent/artifacts/validation/report.json',
+                     'MeshAgent/tools/deployment/Dockerfile', 'meshcentral-fork-ssot/SSOT.md', 'UserModeHook/build/x'):
+            with self.subTest(path=path):
+                self.assertTrue(docker_excludes(self.rules, path))
+
+    def test_matcher_follows_docker_last_match_semantics(self):
+        rules = [(False, re.compile(r'[^/]*\Z')), (True, re.compile(r'a/b\Z'))]
+        self.assertFalse(docker_excludes(rules, 'a/b'))
+        self.assertTrue(docker_excludes(rules, 'a/c'))
 
 
 if __name__ == '__main__':
