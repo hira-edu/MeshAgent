@@ -32,8 +32,6 @@ sys.path.insert(0, str(ROOT))
 import deploy  # noqa: E402
 
 REMOTE_BASE = deploy.MESHCENTRAL_BASE
-# deploy.py's remote meshctrl fallback puts the login key in the server's /tmp.
-REMOTE_TMP_PREFIX = "/tmp/meshcentral-"
 
 SYSTEMCTL_SHIM = r"""#!/bin/sh
 echo "$*" >> "$FAKE_STATE/systemctl.log"
@@ -98,14 +96,10 @@ class FakeRemote:
         self.shims = self.workdir / "shims"
         self.shims.mkdir()
         self.fake_base = self.base.as_posix()
-        self.tmp = self.workdir / "tmp"
-        self.tmp.mkdir()
-        self.fake_tmp_prefix = self.tmp.as_posix() + "/meshcentral-"
         self.shell = find_posix_shell()
         self.calls = []
         self._write_shim("systemctl", SYSTEMCTL_SHIM)
-        for name in ("cp", "rm"):
-            self._write_shim(name, FAILING_COMMAND_SHIM.replace("@NAME@", name))
+        self._write_shim("cp", FAILING_COMMAND_SHIM.replace("@NAME@", "cp"))
         python = pathlib.Path(sys.executable).as_posix()
         self._write_shim("python3", f'#!/bin/sh\nexec "{python}" "$@"\n')
 
@@ -116,27 +110,16 @@ class FakeRemote:
 
     # Path translation between deploy.py's remote paths and the temp directory.
     def to_fake(self, text):
-        return text.replace(REMOTE_BASE, self.fake_base).replace(REMOTE_TMP_PREFIX, self.fake_tmp_prefix)
+        return text.replace(REMOTE_BASE, self.fake_base)
 
     def from_fake(self, text):
-        for fake, remote in (
-            (self.fake_base, REMOTE_BASE),
-            (str(self.base), REMOTE_BASE),
-            (self.fake_tmp_prefix, REMOTE_TMP_PREFIX),
-        ):
-            text = text.replace(fake, remote)
-        return text
+        return text.replace(self.fake_base, REMOTE_BASE).replace(str(self.base), REMOTE_BASE)
 
     def path(self, remote_path):
         """Return the local file standing in for a remote path."""
-        inside_base = remote_path == REMOTE_BASE or remote_path.startswith(REMOTE_BASE + "/")
-        if not inside_base and not remote_path.startswith(REMOTE_TMP_PREFIX):
+        if remote_path != REMOTE_BASE and not remote_path.startswith(REMOTE_BASE + "/"):
             raise ValueError(f"Remote path outside the fake server: {remote_path}")
         return pathlib.Path(self.to_fake(remote_path))
-
-    def temp_files(self):
-        """Return the names of meshcentral-* files left in the fake server's /tmp."""
-        return sorted(path.name for path in self.tmp.iterdir())
 
     def write(self, remote_path, data):
         target = self.path(remote_path)

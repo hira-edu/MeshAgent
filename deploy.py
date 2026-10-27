@@ -25,6 +25,7 @@ import math
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -2538,59 +2539,47 @@ def run_local_command(command, cwd, timeout=120):
     )
 
 
-def remove_remote_temp_files(paths):
-    """Delete server temp files (the uploaded login key) and fail loudly if any remain."""
-    quoted = [remote_quote(path) for path in paths]
-    checks = " && ".join(f"test ! -e {path}" for path in quoted)
-    if ssh_cmd(f"rm -f {' '.join(quoted)} && {checks}") is None:
+def require_local_meshcentral_cli():
+    """Fail unless meshctrl and the updateAgents helper can run on this workstation.
+
+    meshctrl.js prints a hint and exits 0 when minimist or ws is missing, so this is checked
+    before the login key is fetched. There is no remote fallback: the key stays local.
+    """
+    problems = []
+    if shutil.which("node") is None:
+        problems.append("node is not on PATH")
+    meshctrl = LOCAL_MESHCENTRAL_REPO / "meshctrl.js"
+    if not meshctrl.is_file():
+        problems.append(f"missing {meshctrl}")
+    for module in ("minimist", "ws"):
+        package = LOCAL_MESHCENTRAL_REPO / "node_modules" / module / "package.json"
+        if not package.is_file():
+            problems.append(f"missing Node module {module} ({package.parent})")
+    helper = LOCAL_REPO / "tools" / "meshcentral_update_agents.js"
+    if not helper.is_file():
+        problems.append(f"missing update helper {helper}")
+    if problems:
         raise RuntimeError(
-            "Could not confirm removal of temporary files from the server; delete them by hand: "
-            + ", ".join(paths)
+            "The local MeshCentral CLI is not ready: " + "; ".join(problems) +
+            f". Install node and run `npm ci` in {LOCAL_MESHCENTRAL_REPO}."
         )
 
 
 def run_meshctrl(action_args, login_user, login_key_file, timeout=180):
-    """Run meshctrl and return the completed process object."""
-    meshctrl = LOCAL_MESHCENTRAL_REPO / "meshctrl.js"
-    if meshctrl.exists():
-        cmd = [
-            "node",
-            str(meshctrl),
-            *action_args,
-            "--url",
-            MESHCENTRAL_CONTROL_URL,
-            "--loginuser",
-            login_user,
-            "--loginkeyfile",
-            login_key_file,
-        ]
-        return run_local_command(cmd, LOCAL_MESHCENTRAL_REPO, timeout=timeout)
-
-    remote_key_file = f"/tmp/meshcentral-loginkey-{os.getpid()}-{int(time.time() * 1000)}.hex"
-    if scp_upload(Path(login_key_file), remote_key_file) is False:
-        raise RuntimeError(f"MeshCentral CLI not found at {meshctrl}, and login key upload failed for remote meshctrl fallback")
-    try:
-        remote_meshctrl = "/opt/meshcentral/node_modules/meshcentral/meshctrl.js"
-        remote_args = [
-            "node",
-            remote_meshctrl,
-            *action_args,
-            "--url",
-            MESHCENTRAL_CONTROL_URL,
-            "--loginuser",
-            login_user,
-            "--loginkeyfile",
-            remote_key_file,
-        ]
-        remote_command = " ".join(shlex.quote(str(arg)) for arg in remote_args)
-        result, timeout_error = run_remote_process(build_remote_cmd("ssh") + [get_remote_target(), remote_command], timeout=timeout)
-        if timeout_error is not None:
-            return subprocess.CompletedProcess(remote_args, 124, "", str(timeout_error))
-        if result is None:
-            return subprocess.CompletedProcess(remote_args, 1, "", "remote meshctrl failed without a result")
-        return result
-    finally:
-        remove_remote_temp_files([remote_key_file])
+    """Run the local meshctrl and return the completed process object."""
+    require_local_meshcentral_cli()
+    cmd = [
+        "node",
+        str(LOCAL_MESHCENTRAL_REPO / "meshctrl.js"),
+        *action_args,
+        "--url",
+        MESHCENTRAL_CONTROL_URL,
+        "--loginuser",
+        login_user,
+        "--loginkeyfile",
+        login_key_file,
+    ]
+    return run_local_command(cmd, LOCAL_MESHCENTRAL_REPO, timeout=timeout)
 
 
 def run_meshctrl_json(action_args, login_user, login_key_file, timeout=180):
@@ -2613,104 +2602,29 @@ def run_meshctrl_text(action_args, login_user, login_key_file, timeout=180):
 
 
 def send_update_agents(nodeids, login_user, login_key_file, timeout=90):
-    """Submit MeshCentral updateAgents for a list of node identifiers."""
+    """Submit MeshCentral updateAgents for a list of node identifiers with the local helper."""
+    require_local_meshcentral_cli()
     helper = LOCAL_REPO / "tools" / "meshcentral_update_agents.js"
-    if helper.exists() is False:
-        raise RuntimeError(f"Update helper not found at {helper}")
-    local_meshcentral_deps_ready = (
-        (LOCAL_MESHCENTRAL_REPO / "node_modules" / "minimist").exists() and
-        (LOCAL_MESHCENTRAL_REPO / "node_modules" / "ws").exists()
-    )
-
     fd, nodeids_file = tempfile.mkstemp(prefix="meshcentral-nodeids-", suffix=".json")
     os.close(fd)
     try:
         Path(nodeids_file).write_text(json.dumps(nodeids), encoding="utf-8")
-        if local_meshcentral_deps_ready:
-            cmd = [
-                "node",
-                str(helper),
-                "--url",
-                MESHCENTRAL_CONTROL_URL,
-                "--loginuser",
-                login_user,
-                "--loginkeyfile",
-                login_key_file,
-                "--nodeids-file",
-                nodeids_file,
-            ]
-            result = run_local_command(cmd, LOCAL_REPO, timeout=timeout)
-            if result.returncode != 0:
-                raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "update helper failed")
-            return json.loads(result.stdout)
-
-        remote_key_file = f"/tmp/meshcentral-loginkey-{os.getpid()}-{int(time.time() * 1000)}.hex"
-        remote_nodeids_file = f"/tmp/meshcentral-nodeids-{os.getpid()}-{int(time.time() * 1000)}.json"
-        if scp_upload(Path(login_key_file), remote_key_file) is False or scp_upload(Path(nodeids_file), remote_nodeids_file) is False:
-            raise RuntimeError("update helper remote fallback failed to upload input files")
-        try:
-            remote_script = f"""cd /opt/meshcentral/node_modules/meshcentral && node - <<'NODE'
-const crypto = require('crypto');
-const fs = require('fs');
-const WebSocket = require('ws');
-
-function normalizeUrl(rawUrl) {{
-    let url = (rawUrl || '').trim();
-    if (url.endsWith('/')) {{ url = url.slice(0, -1); }}
-    if (url.endsWith('/control.ashx') === false) {{ url += '/control.ashx'; }}
-    return url;
-}}
-
-function encodeCookie(payload, key) {{
-    payload.time = Math.floor(Date.now() / 1000);
-    const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv('aes-256-gcm', key.slice(0, 32), iv);
-    const crypted = Buffer.concat([cipher.update(JSON.stringify(payload), 'utf8'), cipher.final()]);
-    return Buffer.concat([iv, cipher.getAuthTag(), crypted]).toString('base64').replace(/\\+/g, '@').replace(/\\//g, '$');
-}}
-
-const nodeids = JSON.parse(fs.readFileSync({json.dumps(remote_nodeids_file)}, 'utf8'));
-const keyHex = fs.readFileSync({json.dumps(remote_key_file)}, 'utf8').replace(/\\s+/g, '');
-const loginKey = Buffer.from(keyHex, 'hex');
-const loginUser = {json.dumps(login_user)};
-const url = normalizeUrl({json.dumps(MESHCENTRAL_CONTROL_URL)});
-const authCookie = encodeCookie({{ userid: `user//${{loginUser}}`, domainid: '' }}, loginKey);
-const ws = new WebSocket(`${{url}}${{url.includes('?') ? '&' : '?'}}auth=${{authCookie}}`);
-let completed = false;
-
-function finish(code, payload) {{
-    if (completed) {{ return; }}
-    completed = true;
-    if (payload) {{ console.log(JSON.stringify(payload)); }}
-    try {{ ws.close(); }} catch (ex) {{ }}
-    setTimeout(() => process.exit(code), 50);
-}}
-
-ws.on('open', function onOpen() {{
-    ws.send(JSON.stringify({{ action: 'updateAgents', nodeids, responseid: 'meshagent-update' }}));
-    setTimeout(() => finish(0, {{ ok: true, count: nodeids.length }}), 500);
-}});
-ws.on('message', function onMessage(data) {{
-    let msg = null;
-    try {{ msg = JSON.parse(data); }} catch (ex) {{ return; }}
-    if (msg && msg.action === 'close' && msg.cause === 'noauth') {{
-        finish(1, {{ ok: false, error: msg.msg || 'noauth' }});
-    }}
-}});
-ws.on('error', function onError(err) {{ finish(1, {{ ok: false, error: err.message || 'websocket error' }}); }});
-ws.on('close', function onClose() {{
-    if (completed === false) {{ finish(1, {{ ok: false, error: 'control channel closed before updateAgents completed' }}); }}
-}});
-NODE"""
-            result, timeout_error = run_remote_process(build_remote_cmd("ssh") + [get_remote_target(), remote_script], timeout=timeout)
-            if timeout_error is not None:
-                raise RuntimeError(f"remote update helper timed out: {timeout_error}")
-            if result is None or result.returncode != 0:
-                detail = "" if result is None else (result.stderr.strip() or result.stdout.strip())
-                raise RuntimeError(detail or "remote update helper failed")
-            return json.loads(result.stdout)
-        finally:
-            remove_remote_temp_files([remote_key_file, remote_nodeids_file])
+        cmd = [
+            "node",
+            str(helper),
+            "--url",
+            MESHCENTRAL_CONTROL_URL,
+            "--loginuser",
+            login_user,
+            "--loginkeyfile",
+            login_key_file,
+            "--nodeids-file",
+            nodeids_file,
+        ]
+        result = run_local_command(cmd, LOCAL_REPO, timeout=timeout)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "update helper failed")
+        return json.loads(result.stdout)
     finally:
         try:
             os.unlink(nodeids_file)
@@ -3942,6 +3856,11 @@ def cmd_update_online(args):
     print("  Update Online Agents")
     print("=" * 60)
 
+    try:
+        require_local_meshcentral_cli()
+    except RuntimeError as error:
+        print(f"[ERROR] {error}")
+        return False
     login_key_file = create_temp_login_key_file()
     try:
         online_nodes = get_online_agent_nodes(login_user, login_key_file, args.filter)
