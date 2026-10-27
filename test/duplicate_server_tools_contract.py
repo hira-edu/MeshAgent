@@ -275,16 +275,19 @@ def test_module_timestamp_overlay():
 
 
 def test_millisecond_version_comparison():
-    assert dup_checklist.iso_millis(1792956227002945151) == "2026-10-25T19:23:47.002Z"
+    # Node 20 builds fs.Stats dates from mtimeMs rounded to the nearest millisecond.
+    assert dup_checklist.iso_millis(1792956227002945151) == "2026-10-25T19:23:47.003Z"
     assert dup_checklist.iso_millis(1790937236531453752) == "2026-10-02T10:33:56.531Z"
+    assert dup_checklist.iso_millis(1790937236531500000) == "2026-10-02T10:33:56.532Z"
+    assert dup_checklist.iso_millis(1790937236999600000) == "2026-10-02T10:33:57.000Z"
     stamps = {"meshcentral-data/modules_meshcore/a.js": 1792956227002945151}
     probe = {"args": {"minifycore": False}, "cores": {"windows-amt": {"modules": [
-        {"name": "a", "kind": "js", "version": "2026-10-25T19:23:47.002Z"},
+        {"name": "a", "kind": "js", "version": "2026-10-25T19:23:47.003Z"},
         {"name": "coretranslations", "kind": "json", "version": None}]}}}
     assert dup_checklist.compare_versions_to_capture(probe, stamps)[0] == "PASS"
-    probe["cores"]["windows-amt"]["modules"][0]["version"] = "2026-10-25T19:23:47.000Z"
+    probe["cores"]["windows-amt"]["modules"][0]["version"] = "2026-10-25T19:23:47.002Z"
     status, detail = dup_checklist.compare_versions_to_capture(probe, stamps)
-    assert status == "FAIL" and "capture 2026-10-25T19:23:47.002Z" in detail[0]
+    assert status == "FAIL" and "capture 2026-10-25T19:23:47.003Z" in detail[0]
     probe["cores"]["windows-amt"]["modules"].append({"name": "b", "kind": "js", "version": "x"})
     assert any("not in the module capture" in p for p in dup_checklist.compare_versions_to_capture(probe, stamps)[1])
     probe["args"]["minifycore"] = True

@@ -228,8 +228,10 @@ def version_epoch(version):
 
 
 def iso_millis(mtime_ns):
-    """What fs.statSync(path).mtime.toISOString() gives for an mtime: milliseconds, truncated."""
-    millis = mtime_ns // 1_000_000
+    """What fs.statSync(path).mtime.toISOString() gives for an mtime in Node 20: the Date is built from
+    mtimeMs rounded to the nearest millisecond (seen on the pinned Node: mtimeMs 1792956226985.945 gives
+    .986Z), the same on production's Linux Node 20.20.2."""
+    millis = (mtime_ns + 500_000) // 1_000_000
     seconds = datetime.fromtimestamp(millis // 1000, tz=timezone.utc)
     return seconds.strftime("%Y-%m-%dT%H:%M:%S.") + f"{millis % 1000:03d}Z"
 
