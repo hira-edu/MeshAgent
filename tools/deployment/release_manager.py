@@ -470,9 +470,21 @@ def recover(config, transaction):
         seed_agents(Path(previous['directory']), Path(previous['runtime']))
         start(config, previous)
     else:
-        # The retained host installation has no release manifest, so it has no shadow allowlist.
-        print('Restoring the retained host MeshCentral service; the shadow-copy check (G4) applies only '
-              'to image releases and does not cover it')
+        # The retained host installation has no release manifest. Its explicit allowlist is the
+        # snapshot promote() recorded while that service was healthy, before stopping it; anything
+        # added or changed since (for example a candidate mount's placeholder file) blocks the restart.
+        allowlist = transaction.get('host_shadow_allowlist')
+        if allowlist is None:
+            raise RuntimeError('Not restoring the host MeshCentral service: this transaction has no record of the '
+                               'host shadow copies (written by an older controller). Operator action is needed: '
+                               'inspect meshcentral-data and meshcentral-web, then start the meshcentral service '
+                               'by hand. The transaction is retained.')
+        try:
+            meshcentral_shadow_check.check(BASE, allowlist, allow_missing=True)
+        except meshcentral_shadow_check.ShadowCopyError as error:
+            raise meshcentral_shadow_check.ShadowCopyError(
+                'Not restoring the host MeshCentral service: its data or web folders changed after the promotion '
+                'stopped it. Operator action is needed; the transaction is retained.\n' + str(error)) from error
         run('systemctl', 'enable', '--now', 'meshcentral')
     if not healthy(config, previous['digest'] if previous else None):
         raise RuntimeError('Recovery health failed; transaction retained for operator recovery')
@@ -497,6 +509,9 @@ def promote(config, digest):
     directory = prepare(config, digest)
     runtime = seed_agents(directory)
     release = {'digest': digest, 'directory': str(directory), 'runtime': str(runtime)}
+    # First migration: record the healthy host installation's shadow copies, the explicit allowlist
+    # recover() checks before restarting the host service. Refuses before anything is stopped.
+    host_allowlist = None if previous else meshcentral_shadow_check.snapshot(BASE)
     backup = STATE / ('config-' + uuid.uuid4().hex + '.json')
     config_path = BASE / 'meshcentral-data/config.json'
     metadata = config_path.stat()
@@ -507,6 +522,8 @@ def promote(config, digest):
     transaction = {'previous': previous, 'candidate': release, 'config_backup': str(backup),
                    'config_metadata': {'uid': metadata.st_uid, 'gid': metadata.st_gid,
                                        'mode': metadata.st_mode & 0o777}}
+    if not previous:
+        transaction['host_shadow_allowlist'] = host_allowlist
     atomic_json(journal, transaction)
     try:
         if previous:

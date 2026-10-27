@@ -78,20 +78,19 @@ def _sha256(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def find_shadow_files(root, allowlist, hidden=(), overlays=None):
-    """Return one message per shadowing file, or an empty list.
+def _governed_entries(root, hidden=(), overlays=None, allow_missing=False):
+    """Yield (kind, relative, path) for every governed entry: 'file', 'symlink', 'empty' or 'special'.
 
-    ``root`` holds meshcentral-data and meshcentral-web. ``hidden`` lists relative paths whose host
-    content is covered by a verified release mount, so MeshCentral never sees it. ``overlays`` maps a
-    relative folder to the host folder mounted in its place, which is scanned instead.
+    ``allow_missing`` treats an absent meshcentral-data or meshcentral-web as empty (a host
+    installation without web overrides); a release container always mounts both.
     """
     root = Path(root)
     overlays = dict(overlays or {})
     hidden = {PurePosixPath(path).as_posix() for path in hidden}
     for folder in (DATA, WEB):
-        if (root / folder).is_symlink() or not (root / folder).is_dir():
-            raise ShadowCopyError('Cannot check shadow copies: ' + str(root / folder) + ' is not a directory')
-    problems = []
+        path = root / folder
+        if path.is_symlink() or (path.exists() and not path.is_dir()) or (not path.exists() and not allow_missing):
+            raise ShadowCopyError('Cannot check shadow copies: ' + str(path) + ' is not a directory')
 
     def covered(relative):
         return any(relative == path or relative.startswith(path + '/') for path in hidden)
@@ -100,42 +99,82 @@ def find_shadow_files(root, allowlist, hidden=(), overlays=None):
         if covered(relative):
             return
         if path.is_symlink():
-            problems.append(relative + ': symbolic link')
+            yield 'symlink', relative, path
         elif path.is_dir():
             children = sorted(path.iterdir())
             if not children and any(fnmatchcase(relative, pattern) for pattern in PRESENCE_PATTERNS):
-                problems.append(relative + '/: empty folder still hides the package copy')
+                yield 'empty', relative, path
             for child in children:
-                visit(relative + '/' + child.name, child)
+                yield from visit(relative + '/' + child.name, child)
         elif path.is_file():
-            expected = allowlist.get(relative)
-            if expected is None:
-                problems.append(relative + ': not in the release shadow allowlist')
-            else:
-                actual = _sha256(path)
-                if actual != expected:
-                    problems.append(relative + ': sha256 ' + actual + ' differs from the allowlisted ' + expected)
+            yield 'file', relative, path
         elif path.exists():
-            problems.append(relative + ': not a regular file')
+            yield 'special', relative, path
 
-    for entry in sorted((root / DATA).iterdir()):
-        relative = DATA + '/' + entry.name
-        if relative not in SHADOW_FOLDERS and any(fnmatchcase(entry.name, pattern) for pattern in DATA_PATTERNS):
-            visit(relative, entry)
+    if (root / DATA).is_dir():
+        for entry in sorted((root / DATA).iterdir()):
+            relative = DATA + '/' + entry.name
+            if relative not in SHADOW_FOLDERS and any(fnmatchcase(entry.name, pattern) for pattern in DATA_PATTERNS):
+                yield from visit(relative, entry)
     for relative in SHADOW_FOLDERS:
-        visit(relative, Path(overlays.pop(relative)) if relative in overlays else root / relative)
+        yield from visit(relative, Path(overlays.pop(relative)) if relative in overlays else root / relative)
     if overlays:
         raise ValueError('Overlays outside the governed folders: ' + ', '.join(sorted(overlays)))
-    return problems
 
 
-def check(root, allowlist, hidden=(), overlays=None):
+def _problem(kind, relative, path, allowlist):
+    if kind == 'symlink':
+        return relative + ': symbolic link'
+    if kind == 'empty':
+        return relative + '/: empty folder still hides the package copy'
+    if kind == 'special':
+        return relative + ': not a regular file'
+    expected = allowlist.get(relative)
+    if expected is None:
+        return relative + ': not in the release shadow allowlist'
+    actual = _sha256(path)
+    if actual != expected:
+        return relative + ': sha256 ' + actual + ' differs from the allowlisted ' + expected
+    return None
+
+
+def find_shadow_files(root, allowlist, hidden=(), overlays=None, allow_missing=False):
+    """Return one message per shadowing file, or an empty list.
+
+    ``root`` holds meshcentral-data and meshcentral-web. ``hidden`` lists relative paths whose host
+    content is covered by a verified release mount, so MeshCentral never sees it. ``overlays`` maps a
+    relative folder to the host folder mounted in its place, which is scanned instead.
+    """
+    problems = (_problem(kind, relative, path, allowlist)
+                for kind, relative, path in _governed_entries(root, hidden, overlays, allow_missing))
+    return [problem for problem in problems if problem]
+
+
+def check(root, allowlist, hidden=(), overlays=None, allow_missing=False):
     """Raise ShadowCopyError naming every shadowing file; return None when there are none."""
-    problems = find_shadow_files(root, allowlist, hidden, overlays)
+    problems = find_shadow_files(root, allowlist, hidden, overlays, allow_missing)
     if problems:
         raise ShadowCopyError('Shadow copies would override the MeshCentral package under ' + str(root) +
                               '. Remove them, or list them with their sha256 in the release manifest '
                               'shadowAllowlist:\n  ' + '\n  '.join(problems))
+
+
+def snapshot(root):
+    """Return {relative path: sha256} of every governed file of a host installation.
+
+    Used as the explicit allowlist that restoring that installation is checked against. Refuses
+    an installation with entries an allowlist cannot express (links, special files, empty folders
+    that hide the package), naming each.
+    """
+    allowlist, problems = {}, []
+    for kind, relative, path in _governed_entries(root, allow_missing=True):
+        if kind == 'file':
+            allowlist[relative] = _sha256(path)
+        else:
+            problems.append(_problem(kind, relative, path, {}))
+    if problems:
+        raise ShadowCopyError('Cannot record the shadow copies of ' + str(root) + ':\n  ' + '\n  '.join(problems))
+    return allowlist
 
 
 def main(argv=None):

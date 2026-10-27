@@ -1057,5 +1057,91 @@ class MitigationShimTests(unittest.TestCase):
         self.assert_refused(self.start(), 'the icns probe was parsed')
 
 
+class HostRecoveryTests(FixtureCase):
+    """G4 on the first-migration fallback: the host service restarts only on the folders it ran with."""
+
+    HOST_FILES = {'meshcentral-data/meshcore.js': b'host core',
+                  'meshcentral-data/modules_meshcore/clipboard.js': b'host module',
+                  'meshcentral-web/views/default3.handlebars': b'host view',
+                  'meshcentral-web/public/scripts/custom.js': b'custom'}
+
+    def setUp(self):
+        super().setUp()
+        for relative, data in self.HOST_FILES.items():
+            write(self.base / relative, data)
+        # The candidate allowlists the host files, so it reaches `docker run` and fails there.
+        allowlist = [{'path': relative, 'sha256': sha256(data)} for relative, data in self.HOST_FILES.items()]
+        self.candidate = make_release(self.release_dir(DIGEST), {'data/MeshService64.exe': b'exe'},
+                                      shadowAllowlist=allowlist)
+        self.calls = []
+        self.during_candidate = lambda: None
+        for name, value in {'run': mock.Mock(side_effect=self.fake_run), 'prepare': mock.Mock(return_value=self.candidate),
+                            'remove_container': mock.Mock(), 'healthy': mock.Mock(return_value=True)}.items():
+            patch = mock.patch.object(MANAGER, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def fake_run(self, *args, capture=False):
+        self.calls.append(args)
+        if args[:2] == ('docker', 'run'):
+            self.during_candidate()
+            raise RuntimeError('candidate start')
+        return ''
+
+    def restarted_host(self):
+        return ('systemctl', 'enable', '--now', 'meshcentral') in self.calls
+
+    def test_unchanged_host_folders_are_restored(self):
+        with self.assertRaisesRegex(RuntimeError, 'candidate start'):
+            MANAGER.promote(self.config, DIGEST)
+        self.assertTrue(self.restarted_host())
+        self.assertIsNone(json.loads((self.state / 'active.json').read_text()))
+        self.assertFalse((self.state / 'transaction.json').exists())
+
+    def test_a_file_added_or_changed_while_stopped_blocks_the_restart(self):
+        def candidate_side_effects():
+            write(self.base / 'meshcentral-data/modules_meshcore/win-dispatcher.js', b'')  # mount placeholder
+            write(self.base / 'meshcentral-data/meshcore.js', b'changed core')
+        self.during_candidate = candidate_side_effects
+        with self.assertRaises(MANAGER.meshcentral_shadow_check.ShadowCopyError) as raised:
+            MANAGER.promote(self.config, DIGEST)
+        message = str(raised.exception)
+        self.assertIn('Not restoring the host MeshCentral service', message)
+        self.assertIn('meshcentral-data/modules_meshcore/win-dispatcher.js: not in the release shadow allowlist', message)
+        self.assertIn('meshcentral-data/meshcore.js: sha256 ' + sha256(b'changed core'), message)
+        self.assertFalse(self.restarted_host())
+        self.assertTrue((self.state / 'transaction.json').is_file())
+
+    def test_a_transaction_without_a_host_record_needs_the_operator(self):
+        transaction = {'previous': None, 'candidate': None,
+                       'config_backup': str(write(self.state / 'config-backup.json', self.config_path.read_bytes())),
+                       'config_metadata': {'uid': 0, 'gid': 0, 'mode': 0o600}}
+        with self.assertRaisesRegex(RuntimeError, 'no record of the host shadow copies.*Operator action is needed'):
+            MANAGER.recover(self.config, transaction)
+        self.assertFalse(self.restarted_host())
+
+    def test_a_host_that_cannot_be_recorded_is_refused_before_anything_stops(self):
+        (self.base / 'meshcentral-data/modules_meshcore_min').mkdir()
+        with self.assertRaisesRegex(MANAGER.meshcentral_shadow_check.ShadowCopyError,
+                                    '(?s)Cannot record.*modules_meshcore_min/: empty folder'):
+            MANAGER.promote(self.config, DIGEST)
+        self.assertEqual(self.calls, [])
+        self.assertFalse((self.state / 'transaction.json').exists())
+        self.assertEqual(list(self.state.glob('config-*.json')), [])
+
+    def test_snapshot_records_every_governed_file_and_tolerates_a_missing_web_folder(self):
+        self.assertEqual(SHADOW.snapshot(self.base),
+                         {relative: sha256(data) for relative, data in self.HOST_FILES.items()})
+        for relative in self.HOST_FILES:
+            if relative.startswith('meshcentral-web/'):
+                (self.base / relative).unlink()
+        for folder in ('public/scripts', 'public', 'views', ''):
+            (self.base / 'meshcentral-web' / folder).rmdir()
+        self.assertEqual(sorted(SHADOW.snapshot(self.base)), ['meshcentral-data/meshcore.js',
+                                                               'meshcentral-data/modules_meshcore/clipboard.js'])
+        with self.assertRaisesRegex(SHADOW.ShadowCopyError, 'meshcentral-web is not a directory'):
+            SHADOW.check(self.base, {})  # a release start still requires both folders
+
+
 if __name__ == '__main__':
     unittest.main()
