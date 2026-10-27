@@ -8,7 +8,7 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from deploy_fake_remote import DeployFixture, deploy, deploy_args, run_quiet  # noqa: E402
+from deploy_fake_remote import DeployFixture, deploy, deploy_args, rollback_args, run_quiet  # noqa: E402
 
 NEW_IN_RELEASE = "modules_meshcore/clipboard.js"
 
@@ -17,9 +17,9 @@ def diff(before, after):
     return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
 
 
-def deploy_release(fixture):
-    """Seed v1 (without the module the release adds), stage v2 and deploy it."""
-    fixture.seed_remote("v1", skip=(NEW_IN_RELEASE,))
+def deploy_release(fixture, adds_files=True):
+    """Seed v1 (by default without the module the release adds), stage v2 and deploy it."""
+    fixture.seed_remote("v1", skip=(NEW_IN_RELEASE,) if adds_files else ())
     before = fixture.remote.snapshot()
     fixture.write_release("v2")
     fixture.stage()
@@ -113,12 +113,68 @@ def test_backup_refuses_an_existing_backup_directory():
         assert "backup directory already exists" in output, output
 
 
+def test_rollback_after_a_successful_deploy():
+    with DeployFixture() as fixture:
+        before = deploy_release(fixture, adds_files=False)
+        assert fixture.remote.restart_count() == 1
+        # The local build still holds the release being rolled back; rollback must verify
+        # against the backup, not against these bytes.
+        ok, output = run_quiet(deploy.cmd_rollback, rollback_args())
+        assert ok is True, output
+        assert "Restored state matches the backup manifest." in output, output
+        assert diff(before, fixture.remote.snapshot()) == []
+        assert fixture.remote.restart_count() == 2, "rollback must restart MeshCentral on the restored files"
+
+
+def test_rollback_removes_files_the_release_added():
+    with DeployFixture() as fixture:
+        before = deploy_release(fixture)
+        added = [deploy.get_core_publish_path(role, NEW_IN_RELEASE) for role in ("data-core", "module-core")]
+        assert all(fixture.remote.exists(path) for path in added)
+        # Rollback needs only the backup manifest, not the local build.
+        fixture.remove_local_build()
+        ok, output = run_quiet(deploy.cmd_rollback, rollback_args())
+        assert ok is True, output
+        assert "removed 2 file(s)" in output, output
+        assert not any(fixture.remote.exists(path) for path in added)
+        assert diff(before, fixture.remote.snapshot()) == []
+        assert fixture.remote.restart_count() == 2
+
+
+def test_rollback_does_not_restart_when_the_restore_fails():
+    with DeployFixture() as fixture:
+        deploy_release(fixture)
+        backup = fixture.latest_backup()
+        manifest = fixture.remote.read_json(f"{backup}/{deploy.BACKUP_MANIFEST_FILENAME}")
+        tampered = next(entry for entry in manifest["entries"] if entry["state"] == "present")
+        fixture.remote.write(f"{backup}/{deploy.BACKUP_FILES_DIRNAME}/{tampered['copy']}", "tampered")
+        ok, output = run_quiet(deploy.cmd_rollback, rollback_args())
+        assert ok is False, output
+        assert fixture.remote.restart_count() == 1, output
+
+
+def test_backup_state_verification_reports_drift():
+    with DeployFixture() as fixture:
+        before = deploy_release(fixture)
+        backup = fixture.latest_backup()
+        errors = deploy.verify_backup_state(backup)
+        assert len(errors) == len(diff(before, fixture.remote.snapshot())), errors
+        assert any("recorded absent, but present" in error for error in errors), errors
+        assert any("does not match the backed-up bytes" in error for error in errors), errors
+        run_quiet(deploy.restore_agents_from_backup, backup)
+        assert deploy.verify_backup_state(backup) == []
+
+
 TESTS = [
     test_backup_records_every_target_including_absent,
     test_restore_returns_every_path_to_its_recorded_state,
     test_restore_without_a_manifest_fails_loudly,
     test_restore_reports_a_tampered_copy_and_still_restores_the_rest,
     test_backup_refuses_an_existing_backup_directory,
+    test_rollback_after_a_successful_deploy,
+    test_rollback_removes_files_the_release_added,
+    test_rollback_does_not_restart_when_the_restore_fails,
+    test_backup_state_verification_reports_drift,
 ]
 
 

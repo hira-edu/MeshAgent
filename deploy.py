@@ -2379,6 +2379,61 @@ PY"""
         return None
 
 
+def load_backup_manifest(backup_path):
+    """Return (manifest, error) for a remote backup's manifest after validating its shape."""
+    manifest_path = f"{backup_path}/{BACKUP_MANIFEST_FILENAME}"
+    raw = ssh_cmd(f"cat {remote_quote(manifest_path)}")
+    if raw is None:
+        return None, f"Unable to read backup manifest {manifest_path}"
+    try:
+        manifest = json.loads(raw)
+    except json.JSONDecodeError as error:
+        return None, f"Backup manifest {manifest_path} is not valid JSON: {error}"
+    if not isinstance(manifest, dict) or manifest.get("schema") != BACKUP_MANIFEST_SCHEMA:
+        return None, f"Backup manifest {manifest_path} has an unsupported schema"
+    entries = manifest.get("entries")
+    if not isinstance(entries, list):
+        return None, f"Backup manifest {manifest_path} has no entry list"
+    for entry in entries:
+        valid = (
+            isinstance(entry, dict)
+            and isinstance(entry.get("path"), str)
+            and (
+                entry.get("state") == "absent"
+                or (
+                    entry.get("state") == "present"
+                    and isinstance(entry.get("sha384"), str)
+                    and isinstance(entry.get("size"), int)
+                )
+            )
+        )
+        if not valid:
+            return None, f"Backup manifest {manifest_path} has an invalid entry: {entry!r}"
+    return manifest, None
+
+
+def verify_backup_state(backup_path):
+    """Return errors for every recorded path whose current remote state differs from the backup."""
+    manifest, error = load_backup_manifest(backup_path)
+    if error:
+        return [error]
+    entries = manifest["entries"]
+    metadata = collect_remote_file_metadata([entry["path"] for entry in entries])
+    if metadata is None:
+        return [REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR]
+    errors = []
+    for entry in entries:
+        current = metadata.get(entry["path"])
+        if entry["state"] == "absent":
+            if current is not None:
+                errors.append(f"{entry['path']}: recorded absent, but present")
+        elif current is None:
+            errors.append(f"{entry['path']}: recorded present, but missing")
+        elif current["hash"] != entry["sha384"].upper() or current["size"] != entry["size"]:
+            errors.append(f"{entry['path']}: does not match the backed-up bytes")
+    return errors
+
+
 def remove_stray_agent_payloads():
     """Remove known non-agent payloads from agent publish directories."""
     return ssh_cmd("rm -f " + " ".join(remote_quote(path) for path in get_stray_agent_payload_paths())) is not None
@@ -3539,17 +3594,15 @@ def cmd_rollback(args):
         f"file(s) the backed-up release did not have."
     )
 
-    # Rehash
-    rehash_ok = refresh_remote_hashagents() is not False
-    if rehash_ok is False:
-        print("[WARNING] Failed to regenerate hashagents.json on the first rollback attempt. Verifying published state directly.")
-    verification_errors = verify_remote_publish(get_present_local_artifacts())
-    verification_errors.extend(verify_remote_core_publish(get_present_local_core_artifacts()))
+    # Verify against the backup's own manifest. hashagents.json is one of the recorded paths,
+    # so it is restored byte for byte rather than regenerated.
+    verification_errors = verify_backup_state(selected)
     if verification_errors:
-        print("[ERROR] Rollback verification failed:")
+        print("[ERROR] Rollback verification against the backup manifest failed; MeshCentral was not restarted:")
         for error in verification_errors:
             print(f"  - {error}")
         return False
+    print("  Restored state matches the backup manifest.")
 
     # Restart
     restart_result = ssh_cmd(f"systemctl restart {SERVICE_NAME}", check=False)
