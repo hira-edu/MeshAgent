@@ -47,8 +47,10 @@ probe output and checklist results.
    - a manifest (path, sha256, mtime) and a file-by-file comparison with `evidence/live/hashes.tsv`.
 4. **Config.** `config.json` starts from the wrapper's `config.json.template` and is reduced to the
    key set production has (`summary.txt`). Production's non-secret values come from
-   `production_flags.json`. Hosts, ports and paths get duplicate values, and every secret is freshly
-   random. MeshCentral generates its own certificates, including a local code-signing certificate, at
+   `production_flags.json` and, for `agentConfig`, `auth`, `ciphers`, `cookieIpCheck`,
+   `customFiles` and `autobackup.backupskipfoldersglob`, from the read-only capture
+   `evidence/live/config-extra-values.json`. Hosts, ports and paths get duplicate values, and every
+   secret is freshly random. MeshCentral generates its own certificates, including a local code-signing certificate, at
    first start. Generation fails if the config contains any production host, IP, ServerID or MeshID
    from `C:\mc-dup\denylist.json`. That denylist is built from `evidence/live/*.txt`, the MeshAgent
    docs, the plan, and the `.msh` that `deploy.py` publishes. Every difference from production is
@@ -81,8 +83,9 @@ The served page is matched to the template that produced it. Items that need an 
 | `signedagents/*.exe`, `hashagents.json` | re-signed with the duplicate's code-signing certificate; hashagents not refreshed (SSH-only step, unused by 1.2.5) | server-signed with the production certificate |
 | Data-dir module versions | captured mtimes, to the second (the tar has no sub-second times) | sub-second mtimes |
 | Autobackup | configured, but there is no `mongodump`, so it logs a warning | runs |
-| Not captured | `ciphers`, `cookieIpCheck`, `agentConfig`, `auth`, `url`, `backupskipfoldersglob`, favicons, unmanaged extras (`diaghost.exe`, `diagsvc.dll`, `upgrade.bat`, `install-*.ps1`, `svchost_payload.dll`, `meshagent_osx-arm-64`) | present |
-| `customFiles.r0UmairReconnectCanary` | assumed `{"scope": ["default3"], "js": ["r0-umair-reconnect-canary.js"]}` | one scope and one js entry, values not captured |
+| Production identifiers | `cert`, `url`, `certurl`, `agentAliasDNS` and the cert hash/URL lists stay local or are left out, and stay on the denylist | production hosts |
+| Not captured | favicons, unmanaged extras (`diaghost.exe`, `diagsvc.dll`, `upgrade.bat`, `install-*.ps1`, `svchost_payload.dll`, `meshagent_osx-arm-64`) | present |
+| `customFiles.r0UmairReconnectCanary` | layout A only, from the capture; layout B drops it (D16) | present |
 
 ## Test agent (VM)
 

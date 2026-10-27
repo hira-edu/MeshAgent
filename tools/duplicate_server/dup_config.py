@@ -1,7 +1,8 @@
 """config.json generation for the duplicate layouts, and the production-identifier denylist.
 
 config.json = the wrapper's config.json.template, reduced to the key set production actually has
-(summary.txt), with production's non-secret values and fresh local values for hosts and secrets.
+(summary.txt), with production's non-secret values (production_flags.json and the read-only capture
+evidence/live/config-extra-values.json) and fresh local values for hosts, bind address and secrets.
 """
 import ipaddress
 import json
@@ -11,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dup_common import (
-    DENYLIST_PATH, LAYOUTS, PRODUCTION_SUMMARY, REPORTS, SSOT_ROOT, TOOL_DIR, WORKTREE_ROOT,
+    DENYLIST_PATH, EXTRA_VALUES_PATH, LAYOUTS, PRODUCTION_SUMMARY, REPORTS, SSOT_ROOT, TOOL_DIR, WORKTREE_ROOT,
     DupError, layout_root, log, read_json, write_json,
 )
 
@@ -41,8 +42,17 @@ def summary_config_keys(summary_text):
     return settings, domain
 
 
+SPEC_KINDS = {"value", "dup", "omit", "evidence"}
+
+
+def load_extra_values():
+    """Non-secret production values captured read-only (evidence/live/config-extra-values.json)."""
+    return read_json(EXTRA_VALUES_PATH)
+
+
 def load_flags():
     flags = read_json(FLAGS_PATH)
+    extra = load_extra_values()
     settings, domain = summary_config_keys(PRODUCTION_SUMMARY.read_text(encoding="utf-8"))
     for section, expected in (("settings", settings), ("domain", domain)):
         listed = list(flags[section])
@@ -50,9 +60,29 @@ def load_flags():
             raise DupError(f"production_flags.json {section} keys differ from summary.txt: "
                            f"missing {sorted(set(expected) - set(listed))}, extra {sorted(set(listed) - set(expected))}")
         for key, spec in flags[section].items():
-            if len({"value", "dup", "omit"} & set(spec)) != 1:
-                raise DupError(f"production_flags.json {section}.{key} must have exactly one of value/dup/omit")
+            if len(SPEC_KINDS & set(spec)) != 1:
+                raise DupError(f"production_flags.json {section}.{key} must have exactly one of {sorted(SPEC_KINDS)}")
+            for name in ([spec["evidence"]] if "evidence" in spec else []) + spec.get("evidence_keys", []):
+                if name not in extra:
+                    raise DupError(f"production_flags.json {section}.{key} needs {name!r}, missing from {EXTRA_VALUES_PATH}")
     return flags
+
+
+def validate_bind(address):
+    """The duplicate may listen on loopback or a private/host-only address, never on all or public interfaces."""
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        raise DupError(f"--bind must be an IP address, got {address!r}")
+    if parsed.is_unspecified or not (parsed.is_loopback or parsed.is_private or parsed.is_link_local):
+        raise DupError(f"--bind {address} is not a loopback, private or link-local address")
+    return str(parsed)
+
+
+def configured_bind(layout):
+    """The address a layout listens on, as written in its config.json."""
+    config = read_json(layout_root(layout) / "meshcentral-data" / "config.json")
+    return config["settings"]["portBind"]
 
 
 # --------------------------------------------------------------------------- generation
@@ -75,30 +105,30 @@ def dup_value(kind, key, layout, spec, context):
         return pysecrets.token_hex(32)
     if kind == "mongodb":
         return context["mongodb"]
-    if kind == "loopback":
-        return "127.0.0.1"
+    if kind == "bind":
+        return context["bind"]
     if kind == "false":
         return False
     if kind == "autobackup":
         value = {"backuppath": str(root / "meshcentral-backups")}
         value.update(spec["known"])
+        for name in spec.get("evidence_keys", []):
+            value[name] = context["extra"][name]
         return value
     if kind == "origins":
-        return [cfg["cert"], "127.0.0.1"]
+        return list(dict.fromkeys([cfg["cert"], "127.0.0.1", context["bind"]]))
     if kind == "title":
         return f"MeshCentral DUP {layout}"
-    if kind == "customfiles":
-        return spec["assumed"] if layout in spec["layouts"] else None
     raise DupError(f"Unknown dup kind {kind!r} for {key}")
 
 
-def generate(layout, mongodb_uri):
+def generate(layout, mongodb_uri, bind="127.0.0.1"):
     """Build the config dict and a record of every key that differs from production."""
     flags = load_flags()
     template = json.loads(template_path().read_text(encoding="utf-8"))
-    record = {"template": str(template_path()), "dropped_template_keys": [], "substituted": [], "omitted": [],
-              "duplicate_only": []}
-    context = {"mongodb": mongodb_uri}
+    record = {"template": str(template_path()), "evidence": str(EXTRA_VALUES_PATH), "bind": validate_bind(bind),
+              "dropped_template_keys": [], "from_evidence": [], "substituted": [], "omitted": [], "duplicate_only": []}
+    context = {"mongodb": mongodb_uri, "bind": validate_bind(bind), "extra": load_extra_values()}
 
     def build(section_template, section_flags, label):
         result = {}
@@ -111,15 +141,16 @@ def generate(layout, mongodb_uri):
                 result[key] = spec["value"]
             elif "omit" in spec:
                 record["omitted"].append({"key": f"{label}.{key}", "reason": spec["omit"]})
-            else:
-                value = dup_value(spec["dup"], key, layout, spec, context)
-                if value is None:
+            elif "evidence" in spec:
+                if layout not in spec.get("layouts", list(LAYOUTS)):
                     record["omitted"].append({"key": f"{label}.{key}", "reason": spec["reason"]})
                     continue
+                result[key] = context["extra"][spec["evidence"]]
+                record["from_evidence"].append(f"{label}.{key}")
+            else:
+                value = dup_value(spec["dup"], key, layout, spec, context)
                 result[key] = value
                 entry = {"key": f"{label}.{key}", "reason": spec.get("reason", "")}
-                if spec.get("assumed") is not None:
-                    entry["assumed_value"] = True
                 if spec["dup"] != "random":
                     entry["value"] = value if spec["dup"] != "mongodb" else "<local URI>"
                 record["substituted"].append(entry)
@@ -138,8 +169,8 @@ def generate(layout, mongodb_uri):
     return config, record
 
 
-def write_config(layout, mongodb_uri):
-    config, record = generate(layout, mongodb_uri)
+def write_config(layout, mongodb_uri, bind="127.0.0.1"):
+    config, record = generate(layout, mongodb_uri, bind)
     text = json.dumps(config, indent=2) + "\n"
     hits = scan_text(text, load_denylist())
     if hits:

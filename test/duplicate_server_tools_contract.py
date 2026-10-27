@@ -159,7 +159,14 @@ def test_generated_config(denylist_path):
         assert "agentAliasDNS" not in settings and "certurl" not in domain and "agentwebcerthashes" not in domain
         assert any(k.endswith(".agentPort") for k in record["dropped_template_keys"])
         assert not dup_config.scan_text(json.dumps(config), dup_config.load_denylist(denylist_path))
-    assert "r0UmairReconnectCanary" in configs["A"]["domains"][""]["customFiles"]
+    extra = dup_config.load_extra_values()
+    for layout, config in configs.items():
+        settings, domain = config["settings"], config["domains"][""]
+        assert settings["ciphers"] == extra["ciphers"] and settings["cookieIpCheck"] == extra["cookieIpCheck"]
+        assert domain["agentConfig"] == extra["agentConfig"] and domain["auth"] == extra["auth"]
+        assert settings["autobackup"]["backupskipfoldersglob"] == extra["backupskipfoldersglob"]
+        assert settings["autobackup"]["backuppath"].startswith(str(dup_common.layout_root(layout)))
+    assert configs["A"]["domains"][""]["customFiles"] == extra["customFiles"]
     assert "customFiles" not in configs["B"]["domains"][""], "layout B drops the canary entry (D16)"
     assert "mpsPort" not in configs["A"]["settings"] and configs["B"]["settings"]["mpsPort"] == 4434
     for key in ("sessionKey", "dbEncryptKey", "dbRecordsEncryptKey"):

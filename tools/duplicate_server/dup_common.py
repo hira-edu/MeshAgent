@@ -53,6 +53,8 @@ EVIDENCE = SSOT_ROOT / "evidence"
 LAYOUT_A_TAR = EVIDENCE / "production-layout-a" / "layout-a.tar"
 PRODUCTION_HASHES = EVIDENCE / "live" / "hashes.tsv"
 PRODUCTION_SUMMARY = EVIDENCE / "live" / "summary.txt"
+EXTRA_VALUES_PATH = EVIDENCE / "live" / "config-extra-values.json"
+LAYOUT_A_MODULES_TAR = EVIDENCE / "production-layout-a" / "layout-a-modules-posix.tar"
 PRODUCTION_UNTRACKED = EVIDENCE / "production-untracked"
 
 LAYOUTS = {
