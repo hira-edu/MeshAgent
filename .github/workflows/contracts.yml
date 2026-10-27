@@ -1,0 +1,299 @@
+name: Contracts and MeshCentral tests
+
+# Runs the MeshAgent static contracts, the release and deploy suites that need no
+# server or built binaries, and the MeshCentral wrapper tests, against a fresh
+# checkout of hira-edu/MeshCentral placed beside MeshAgent.
+# It never deploys, signs or releases, and it uses no secrets.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      meshcentral_ref:
+        description: 'hira-edu/MeshCentral branch, tag or commit to test against'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contracts-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MESHCENTRAL_REPOSITORY: hira-edu/MeshCentral
+  # Precedence: dispatch input, then the repository variable, then main.
+  MESHCENTRAL_REF: ${{ inputs.meshcentral_ref || vars.MESHCENTRAL_REF || 'main' }}
+  # The fork does not carry the upstream release tags, and the upstream-base contract
+  # diffs against them. They are fetched from upstream and pinned to these commits, so a
+  # moved or replaced upstream tag fails the job instead of changing the baseline.
+  MESHCENTRAL_UPSTREAM_URL: https://github.com/Ylianst/MeshCentral.git
+  MESHCENTRAL_UPSTREAM_TAGS: >-
+    1.2.1=a2876029077b04a1708e2c92cbba96831f791b6a
+    1.2.5=b09b1d60328de8e2d2f7387561ed51c64011c82a
+  # Optional override for the wrapper folder inside the MeshCentral checkout ('.' or
+  # 'deploy'). When unset, the folder is detected; see "Install MeshCentral wrapper".
+  MESHCENTRAL_WRAPPER_DIR: ${{ vars.MESHCENTRAL_WRAPPER_DIR }}
+  # Node matches the duplicate server and production (SSOT D20). Python matches the
+  # release workflow.
+  NODE_VERSION: '20.20.2'
+  PYTHON_VERSION: '3.12'
+  TEST_TIMEOUT_SECONDS: '600'
+  # Tests in this repository that this workflow does not run. One line per test:
+  # "<path> | <reason>". Every path must exist, or the job fails, so a renamed or
+  # deleted test cannot leave a stale entry behind. A test matched by a run pattern
+  # below is reported as EXCLUDED with its reason instead of being run.
+  EXCLUDED_TESTS: |
+    test/meshcentral_agent_update_hash_contract.js | Checks node_modules/meshcentral/meshagent.js as deployed: deploy.py publishes the fork's meshagent.js over the installed package on the server. npm ci installs the pristine upstream meshcentral 1.2.5 package, which lacks the fork's agent-update hash change, so this fails here by construction until the fork itself is the installed package (Stage 4). Run it against the duplicate or production layout.
+    test/service_bundle_embedding_contract.js | Needs built MeshServiceRuntime executables (meshservice/x64/MeshServiceRuntime/MeshService-2022.exe and the ARM64 one) to extract and compare the embedded service DLL. The coordinated release workflow runs it after building ("Validate embedded service DLL parity").
+    test/power_action_policy_lab_runtime.js | Lab-only: reads branding_config.local.json (local identities, never committed, and must not reach CI) and the gitignored meshcore/generated/meshagent_branding.h. Its tracked-source half, test/power_action_policy_contract.js, runs here.
+    test/deploy_service_host_export_runtime.py | Needs built x64 and ARM64 MeshServiceBundle DLLs (meshservice/{x64,ARM64}/MeshServiceBundle/MeshService-2022.dll), which this workflow does not build.
+
+jobs:
+  contracts:
+    name: Contracts and MeshCentral tests (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      LOG_ROOT: ${{ github.workspace }}/test-logs
+    defaults:
+      run:
+        shell: bash
+        working-directory: MeshAgent
+    steps:
+      - name: Check out MeshAgent
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: MeshAgent
+          persist-credentials: false
+
+      - name: Check out MeshCentral beside MeshAgent
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ env.MESHCENTRAL_REPOSITORY }}
+          ref: ${{ env.MESHCENTRAL_REF }}
+          path: MeshCentral
+          # Full history: the upstream-base contract diffs fork bases such as 587973e8c.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set MESHCENTRAL_ROOT
+        run: |
+          root="$GITHUB_WORKSPACE/MeshCentral"
+          test -d "$root/.git" || { echo "::error::MeshCentral checkout missing at $root"; exit 1; }
+          echo "MESHCENTRAL_ROOT=$root" >> "$GITHUB_ENV"
+          echo "MeshCentral $MESHCENTRAL_REPOSITORY@$MESHCENTRAL_REF is $(git -C "$root" rev-parse HEAD)"
+
+      - name: Fetch pinned upstream MeshCentral tags
+        working-directory: MeshCentral
+        run: |
+          set -euo pipefail
+          refspecs=()
+          for pin in $MESHCENTRAL_UPSTREAM_TAGS; do
+            refspecs+=("refs/tags/${pin%%=*}:refs/tags/${pin%%=*}")
+          done
+          # Not forced: a fork tag with the same name and different target fails here.
+          git fetch --no-tags "$MESHCENTRAL_UPSTREAM_URL" "${refspecs[@]}"
+          for pin in $MESHCENTRAL_UPSTREAM_TAGS; do
+            tag="${pin%%=*}"; want="${pin#*=}"
+            got="$(git rev-parse --verify "refs/tags/$tag^{commit}")"
+            if [ "$got" != "$want" ]; then
+              echo "::error::Upstream tag $tag is $got, expected $want"
+              exit 1
+            fi
+            echo "tag $tag = $got"
+          done
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install MeshCentral wrapper dependencies
+        id: wrapper
+        run: |
+          set -euo pipefail
+          # The deployment wrapper is the package.json named meshcentral-deploy. It sits at
+          # the repository root today and moves to deploy/ in Stage 1 (SSOT D1).
+          is_wrapper() {
+            local manifest="$MESHCENTRAL_ROOT/$1/package.json"
+            [ -f "$manifest" ] && [ "$(node -p 'require(process.argv[1]).name' "$manifest")" = meshcentral-deploy ]
+          }
+          if [ -n "${MESHCENTRAL_WRAPPER_DIR:-}" ]; then
+            dir="$MESHCENTRAL_WRAPPER_DIR"
+            is_wrapper "$dir" || { echo "::error::MESHCENTRAL_WRAPPER_DIR=$dir has no package.json named meshcentral-deploy"; exit 1; }
+          else
+            found=()
+            for candidate in . deploy; do
+              if is_wrapper "$candidate"; then found+=("$candidate"); fi
+            done
+            if [ "${#found[@]}" -ne 1 ]; then
+              echo "::error::Expected exactly one meshcentral-deploy package.json in MeshCentral (root or deploy/), found ${#found[@]}: ${found[*]:-none}. Set the MESHCENTRAL_WRAPPER_DIR variable."
+              exit 1
+            fi
+            dir="${found[0]}"
+          fi
+          wrapper="$(cd "$MESHCENTRAL_ROOT/$dir" && pwd)"
+          test -f "$wrapper/package-lock.json" || { echo "::error::$wrapper/package-lock.json missing; npm ci needs it"; exit 1; }
+          echo "MeshCentral wrapper: $wrapper"
+          echo "MESHCENTRAL_WRAPPER_PATH=$wrapper" >> "$GITHUB_ENV"
+          cd "$wrapper"
+          npm ci --no-audit --no-fund
+          node -p "'installed meshcentral ' + require('./node_modules/meshcentral/package.json').version"
+
+      - name: Prepare test runner
+        run: |
+          set -euo pipefail
+          mkdir -p "$LOG_ROOT"
+          {
+            echo "MeshAgent $(git rev-parse HEAD)"
+            echo "MeshCentral $(git -C "$MESHCENTRAL_ROOT" rev-parse HEAD) ($MESHCENTRAL_REPOSITORY@$MESHCENTRAL_REF)"
+            echo "Wrapper $MESHCENTRAL_WRAPPER_PATH"
+            echo "node $(node --version), $(python --version 2>&1)"
+          } > "$LOG_ROOT/environment.txt"
+          cat > "$RUNNER_TEMP/test-runner.sh" <<'RUNNER'
+          # Sourced by each test step. Runs one test per call, keeps its full output in
+          # $LOG_ROOT/<group>/<name>.log and counts failures for finish_group.
+          # Actions runs bash steps with -e; a failing test must be counted, not end the step.
+          set +e -uo pipefail
+          FAILED=0
+          RAN=0
+          declare -A EXCLUDED_REASON=()
+          while IFS= read -r line; do
+            [ -n "${line//[[:space:]]/}" ] || continue
+            path="$(printf '%s' "${line%%|*}" | xargs)"
+            reason="$(printf '%s' "${line#*|}" | sed 's/^ *//')"
+            if [ "$path" = "$line" ] || [ -z "$reason" ]; then
+              echo "::error::EXCLUDED_TESTS line needs '<path> | <reason>': $line"; exit 1
+            fi
+            [ -e "$path" ] || { echo "::error::EXCLUDED_TESTS names a missing test: $path"; exit 1; }
+            EXCLUDED_REASON["$path"]="$reason"
+          done <<< "$EXCLUDED_TESTS"
+
+          # run_test <group> <test path or name> <working directory> <command...>
+          run_test() {
+            local group="$1" name="$2" dir="$3"; shift 3
+            local log status start=$SECONDS
+            log="$LOG_ROOT/$group/$(basename "$name").log"
+            mkdir -p "$LOG_ROOT/$group"
+            if [ -n "${EXCLUDED_REASON[$name]+set}" ]; then
+              printf 'EXCLUDED\t%s\t%s\t%s\n' "$group" "$name" "${EXCLUDED_REASON[$name]}" | tee -a "$LOG_ROOT/results.tsv"
+              return 0
+            fi
+            (cd "$dir" && timeout --kill-after=30 "$TEST_TIMEOUT_SECONDS" "$@") > "$log" 2>&1
+            status=$?
+            RAN=$((RAN + 1))
+            if [ "$status" -eq 0 ]; then
+              printf 'PASS\t%s\t%s\t%ss\n' "$group" "$name" "$((SECONDS - start))" | tee -a "$LOG_ROOT/results.tsv"
+            else
+              FAILED=$((FAILED + 1))
+              printf 'FAIL(%s)\t%s\t%s\t%ss\n' "$status" "$group" "$name" "$((SECONDS - start))" | tee -a "$LOG_ROOT/results.tsv"
+              echo "::group::$name output (exit $status)"; tail -n 100 "$log"; echo "::endgroup::"
+              echo "::error title=$group::$name failed with exit $status"
+            fi
+          }
+
+          # Every pattern must match at least one file: an empty match is a failure, not a skip.
+          expand() {
+            local found
+            found="$(compgen -G "$1")" || { echo "::error::No tests match $1" >&2; return 1; }
+            printf '%s\n' "$found" | LC_ALL=C sort
+          }
+
+          finish_group() {
+            echo "$1: $RAN run, $FAILED failed"
+            [ "$RAN" -gt 0 ] || { echo "::error::$1 ran no tests"; exit 1; }
+            [ "$FAILED" -eq 0 ] || exit 1
+          }
+          RUNNER
+
+      - name: JavaScript contracts (test/*_contract.js)
+        if: ${{ !cancelled() && steps.wrapper.outcome == 'success' }}
+        run: |
+          source "$RUNNER_TEMP/test-runner.sh"
+          tests="$(expand 'test/*_contract.js')" || exit 1
+          while IFS= read -r t; do run_test js-contracts "$t" . node "$t"; done <<< "$tests"
+          finish_group js-contracts
+
+      - name: Python contracts (test/*_contract.py)
+        if: ${{ !cancelled() && steps.wrapper.outcome == 'success' }}
+        run: |
+          source "$RUNNER_TEMP/test-runner.sh"
+          tests="$(expand 'test/*_contract.py')" || exit 1
+          while IFS= read -r t; do run_test py-contracts "$t" . python "$t"; done <<< "$tests"
+          finish_group py-contracts
+
+      - name: Release tooling tests (test/ci_release*_test.py)
+        if: ${{ !cancelled() && steps.wrapper.outcome == 'success' }}
+        run: |
+          source "$RUNNER_TEMP/test-runner.sh"
+          tests="$(expand 'test/ci_release*_test.py')" || exit 1
+          while IFS= read -r t; do run_test ci-release "$t" . python "$t" -v; done <<< "$tests"
+          finish_group ci-release
+
+      - name: Deploy suites
+        if: ${{ !cancelled() && steps.wrapper.outcome == 'success' }}
+        run: |
+          source "$RUNNER_TEMP/test-runner.sh"
+          for t in \
+            test/deploy_rollback_runtime.py \
+            test/deploy_config_edit_runtime.py \
+            test/deploy_meshctrl_runtime.py \
+            test/deploy_artifact_selection_runtime.py \
+            test/deploy_transport_health_runtime.py \
+            test/deploy_proxy_certificate_sni_runtime.py
+          do
+            test -f "$t" || { echo "::error::Deploy suite $t is missing"; FAILED=$((FAILED + 1)); continue; }
+            run_test deploy "$t" . python "$t"
+          done
+          finish_group deploy
+
+      - name: MeshCentral tests (node --test tests/*.test.js)
+        if: ${{ !cancelled() && steps.wrapper.outcome == 'success' }}
+        run: |
+          source "$RUNNER_TEMP/test-runner.sh"
+          # tests/ is at the MeshCentral root today; Stage 1 may move it beside the wrapper.
+          dirs=()
+          for candidate in tests deploy/tests; do
+            if [ -d "$MESHCENTRAL_ROOT/$candidate" ]; then dirs+=("$candidate"); fi
+          done
+          [ "${#dirs[@]}" -gt 0 ] || { echo "::error::No tests/ or deploy/tests/ folder in $MESHCENTRAL_ROOT"; exit 1; }
+          for d in "${dirs[@]}"; do
+            tests="$(cd "$MESHCENTRAL_ROOT" && expand "$d/*.test.js")" || exit 1
+            while IFS= read -r t; do run_test meshcentral "$t" "$MESHCENTRAL_ROOT" node --test "$t"; done <<< "$tests"
+          done
+          finish_group meshcentral
+
+      - name: Summarise results
+        if: ${{ always() }}
+        run: |
+          results="$LOG_ROOT/results.tsv"
+          [ -f "$results" ] || { echo "No results recorded."; exit 0; }
+          {
+            echo "### Contracts and MeshCentral tests"
+            echo
+            echo "| Result | Group | Test | Detail |"
+            echo "|---|---|---|---|"
+            # Failures first, then exclusions, then passes; run order within each.
+            awk -F'\t' '{ rank = ($1 ~ /^FAIL/) ? 0 : ($1 == "EXCLUDED") ? 1 : 2; print rank "\t" $0 }' "$results" \
+              | sort -s -t$'\t' -k1,1n | cut -f2- \
+              | awk -F'\t' '{ printf "| %s | %s | `%s` | %s |\n", $1, $2, $3, $4 }'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cut -f1 "$results" | sed 's/(.*//' | sort | uniq -c
+
+      - name: Upload test logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: contract-test-logs
+          path: test-logs/
+          if-no-files-found: warn
+          retention-days: 30
