@@ -174,35 +174,112 @@ def prepare(config, digest):
     return directory
 
 
-def seed_agents(directory, previous):
-    # A fresh copy per promotion avoids reusing a signed cache for a different image.
-    # Preserve macOS/Linux payloads published by their separate platform pipelines.
-    state = directory / ('runtime-' + uuid.uuid4().hex)
-    state.mkdir()
-    for role, live in (('data', 'agents'), ('signed', 'signedagents')):
-        source = Path(previous['runtime']) / role if previous else BASE / 'meshcentral-data' / live
-        target = state / role
-        if source.exists():
-            if source.is_symlink() or any(path.is_symlink() for path in source.rglob('*')):
-                raise ValueError('Symlink in incumbent agent runtime state')
-            shutil.copytree(source, target)
-        else:
-            target.mkdir()
-        for path in (directory / 'overrides' / role).iterdir():
-            shutil.copyfile(path, target / path.name)
-        for name in ('hashagents.json', 'MasterService.exe'):
-            (target / name).unlink(missing_ok=True)
+# Runtime agent folders: manifest role -> folder it replaces inside meshcentral-data.
+AGENT_ROLES = (('data', 'agents'), ('signed', 'signedagents'))
+# Never seeded into a runtime, even when a release lists them (unchanged policy).
+AGENT_SEED_EXCLUDED = ('hashagents.json', 'MasterService.exe')
+
+
+def file_sha256(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def agent_seed(manifest):
+    """Return {role: {name: sha256}} for the runtime agent folders, from the manifest alone."""
+    seed = {role: {} for role, _ in AGENT_ROLES}
+    for relative, digest in manifest['files'].items():
+        role, _, name = relative.partition('/')
+        if role not in seed:
+            continue
+        if not name or '/' in name:
+            raise ValueError('Agent seed members must be direct children of their role folder: ' + relative)
+        if name not in AGENT_SEED_EXCLUDED:
+            seed[role][name] = digest
+    return seed
+
+
+def release_manifest(directory):
+    return json.loads((directory / 'overrides' / 'manifest.json').read_text())
+
+
+def seed_agents(directory, runtime=None):
+    """Build the writable agent folders for one release from that release's manifest only.
+
+    Nothing is copied from the incumbent installation or from another release's runtime,
+    so a binary removed from a release, or deleted from the host, never comes back.
+    With ``runtime`` set, that existing runtime of the same release is rebuilt in place
+    (recovery reuses the previous release's runtime path).
+    """
+    directory = Path(directory)
+    seed = agent_seed(release_manifest(directory))
+    if runtime is None:
+        runtime = directory / ('runtime-' + uuid.uuid4().hex)
+    runtime = Path(runtime)
+    if runtime.parent != directory or not runtime.name.startswith('runtime-'):
+        raise ValueError('Agent runtime must be a runtime-* folder of its own release: ' + str(runtime))
+    staging = runtime.with_name(runtime.name + '.seeding')
+    if staging.exists():
+        raise RuntimeError('Incomplete agent runtime seeding exists; inspect it before retrying: ' + str(staging))
+    staging.mkdir()
+    for role, files in seed.items():
+        target = staging / role
+        target.mkdir()
+        for name, digest in files.items():
+            source = directory / 'overrides' / role / name
+            if source.is_symlink() or not source.is_file():
+                raise ValueError('Release agent seed member is not a regular file: ' + role + '/' + name)
+            shutil.copyfile(source, target / name)
+            if file_sha256(target / name) != digest:
+                raise ValueError('Release agent seed member digest mismatch: ' + role + '/' + name)
     user = pwd.getpwnam('meshcentral')
-    for path in [state, *state.rglob('*')]:
-        if path.is_symlink():
-            raise ValueError('Symlink in agent runtime state')
+    for path in [staging, *staging.rglob('*')]:
         os.chown(path, user.pw_uid, user.pw_gid)
-    return state
+    if runtime.is_symlink():
+        raise ValueError('Agent runtime is a symlink: ' + str(runtime))
+    if runtime.exists():
+        # The release's own manifest is the only source; server-written state is regenerated.
+        shutil.rmtree(runtime)
+    os.replace(staging, runtime)
+    return runtime
+
+
+def verify_agent_runtime(directory, runtime):
+    """Fail unless the runtime holds exactly the release's manifest agent files."""
+    seed = agent_seed(release_manifest(Path(directory)))
+    runtime = Path(runtime)
+    problems = []
+    if runtime.is_symlink() or not runtime.is_dir():
+        raise ValueError('Agent runtime is missing or not a directory: ' + str(runtime))
+    for role, files in seed.items():
+        folder = runtime / role
+        if folder.is_symlink() or not folder.is_dir():
+            problems.append(role + '/: missing or not a directory')
+            continue
+        present = set()
+        for path in sorted(folder.rglob('*')):
+            relative = path.relative_to(runtime).as_posix()
+            if path.is_symlink():
+                problems.append(relative + ': symbolic link')
+            elif path.is_dir():
+                problems.append(relative + ': unexpected directory')
+            elif path.parent != folder or path.name not in files:
+                problems.append(relative + ': not in the release manifest')
+            else:
+                present.add(path.name)
+                if file_sha256(path) != files[path.name]:
+                    problems.append(relative + ': sha256 differs from the release manifest')
+        for name in sorted(set(files) - present):
+            problems.append(role + '/' + name + ': listed in the release manifest but missing')
+    if problems:
+        raise ValueError('Agent runtime does not match its release manifest (' + str(runtime) + '):\n  ' +
+                         '\n  '.join(problems))
 
 
 def start(config, release):
     directory = Path(release['directory'])
     manifest = validate_manifest(directory / 'overrides', config['meshcentral_version'])
+    verify_agent_runtime(directory, release['runtime'])
     user = pwd.getpwnam('meshcentral')
     args = ['docker', 'run', '--detach', '--name', CONTAINER, '--restart', 'unless-stopped',
             '--network', 'host', '--read-only', '--cap-drop', 'ALL',
@@ -272,6 +349,9 @@ def recover(config, transaction):
     sync_directory(path.parent)
     previous = transaction['previous']
     if previous:
+        # Rebuild the previous runtime from its own manifest; state written while it ran
+        # (or planted since) is discarded rather than carried into the recovered service.
+        seed_agents(Path(previous['directory']), Path(previous['runtime']))
         start(config, previous)
     else:
         run('systemctl', 'enable', '--now', 'meshcentral')
@@ -296,7 +376,7 @@ def promote(config, digest):
     if not healthy(config, previous['digest'] if previous else None, attempts=1):
         raise RuntimeError('Current production service is unhealthy; refusing promotion')
     directory = prepare(config, digest)
-    runtime = seed_agents(directory, previous)
+    runtime = seed_agents(directory)
     release = {'digest': digest, 'directory': str(directory), 'runtime': str(runtime)}
     backup = STATE / ('config-' + uuid.uuid4().hex + '.json')
     config_path = BASE / 'meshcentral-data/config.json'
