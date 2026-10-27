@@ -165,12 +165,20 @@ class FakeRemote:
         return self.systemctl_calls().count("restart")
 
     # Transport
+    def _posix_path(self, path):
+        """Return a path in the form the POSIX shell uses inside PATH."""
+        text = path.as_posix()
+        if os.name == "nt" and len(text) > 1 and text[1] == ":":
+            text = "/" + text[0].lower() + text[2:]
+        return text
+
     def _run_shell(self, script):
         env = dict(os.environ)
-        env["PATH"] = str(self.shims) + os.pathsep + env.get("PATH", "")
         env["FAKE_STATE"] = self.state.as_posix()
+        # Git bash puts /usr/bin first, so the shims are prepended inside the shell.
+        prologue = f'PATH="{self._posix_path(self.shims)}:$PATH"; export PATH\n'
         completed = subprocess.run(
-            [self.shell, "-c", self.to_fake(script)],
+            [self.shell, "-c", prologue + self.to_fake(script)],
             capture_output=True,
             text=True,
             encoding="utf-8",

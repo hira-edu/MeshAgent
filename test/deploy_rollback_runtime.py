@@ -165,6 +165,58 @@ def test_backup_state_verification_reports_drift():
         assert deploy.verify_backup_state(backup) == []
 
 
+def stage_release(fixture):
+    """Seed v1 without the module the release adds and stage v2, without deploying."""
+    fixture.seed_remote("v1", skip=(NEW_IN_RELEASE,))
+    before = fixture.remote.snapshot()
+    fixture.write_release("v2")
+    fixture.stage()
+    return before
+
+
+def test_partial_publish_is_restored_automatically():
+    with DeployFixture() as fixture:
+        before = stage_release(fixture)
+        # Break the publish on the last core copy: every agent copy, meshagent.js and the new
+        # data-core module have already been written by then.
+        late_target = deploy.get_core_publish_path("module-core", NEW_IN_RELEASE)
+        fixture.remote.fail_cp_to(late_target[len(deploy.MESHCENTRAL_BASE):])
+        ok, output = run_quiet(deploy.cmd_deploy, deploy_args())
+        assert ok is False, output
+        assert "Publishing stopped part-way" in output, output
+        assert "Deployment failed and was rolled back" in output, output
+        assert "1 file(s) the release added removed" in output, output
+        assert "MeshCentral was not restarted" in output, output
+        assert diff(before, fixture.remote.snapshot()) == []
+        assert fixture.remote.restart_count() == 0
+
+
+def test_failed_restart_is_restored_and_restarted():
+    with DeployFixture() as fixture:
+        before = stage_release(fixture)
+        fixture.remote.plan_restarts(["failed", "active"])
+        ok, output = run_quiet(deploy.cmd_deploy, deploy_args())
+        assert ok is False, output
+        assert "MeshCentral did not come back after the restart (status: failed)" in output, output
+        assert "Deployment failed and was rolled back" in output, output
+        assert "restarted on the restored files and is active" in output, output
+        assert diff(before, fixture.remote.snapshot()) == []
+        assert fixture.remote.restart_count() == 2
+        assert not list(deploy.MANIFEST_DIR.glob("release-manifest-*.json")), "a failed deploy must not write a release manifest"
+
+
+def test_failed_restart_reports_when_the_restored_release_stays_down():
+    with DeployFixture() as fixture:
+        before = stage_release(fixture)
+        fixture.remote.plan_restarts(["failed", "failed"])
+        ok, output = run_quiet(deploy.cmd_deploy, deploy_args())
+        assert ok is False, output
+        assert "Deployment failed and was rolled back" in output, output
+        assert "did not come back on the restored files either (status: failed)" in output, output
+        assert diff(before, fixture.remote.snapshot()) == []
+        assert fixture.remote.restart_count() == 2
+
+
 TESTS = [
     test_backup_records_every_target_including_absent,
     test_restore_returns_every_path_to_its_recorded_state,
@@ -175,6 +227,9 @@ TESTS = [
     test_rollback_removes_files_the_release_added,
     test_rollback_does_not_restart_when_the_restore_fails,
     test_backup_state_verification_reports_drift,
+    test_partial_publish_is_restored_automatically,
+    test_failed_restart_is_restored_and_restarted,
+    test_failed_restart_reports_when_the_restored_release_stays_down,
 ]
 
 

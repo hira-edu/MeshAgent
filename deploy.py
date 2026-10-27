@@ -2434,6 +2434,57 @@ def verify_backup_state(backup_path):
     return errors
 
 
+def restart_service_and_wait():
+    """Restart MeshCentral and return its `systemctl is-active` state (None if unreadable)."""
+    restart_result = ssh_cmd(f"systemctl restart {SERVICE_NAME}", check=False)
+    time.sleep(3)
+    # is-active exits non-zero for every state but "active"; keep the state text either way.
+    status = ssh_cmd(f"systemctl is-active {SERVICE_NAME} || true", check=False)
+    if restart_result is None:
+        print("    [WARNING] The restart command failed or its transport dropped; relying on the status probe.")
+    return status.strip() if status else None
+
+
+def recover_deploy_from_backup(backup_path, failure, restart):
+    """Return the server to the pre-deploy backup after a failed deploy and report the outcome.
+
+    The deploy has already failed; this only decides what state it leaves behind. With
+    restart=True MeshCentral is restarted on the restored files, because it was already
+    restarted on the new ones. Returns True when the restored state is verified (and, with
+    restart, MeshCentral is active again).
+    """
+    print(f"\n  [RECOVERY] {failure}")
+    print(f"  [RECOVERY] Restoring the pre-deploy state from {backup_path}")
+    summary = restore_agents_from_backup(backup_path)
+    if summary is None:
+        print("\n[FAILED] Deployment failed and the automatic restore did not complete.")
+        print(f"  The server may hold a mix of old and new files. Restore by hand from {backup_path}")
+        print("  (deploy.py rollback) once the cause is fixed.")
+        return False
+    errors = verify_backup_state(backup_path)
+    if errors:
+        print("\n[FAILED] Deployment failed; the restore ran but the restored state does not match the backup:")
+        for error in errors:
+            print(f"  - {error}")
+        print(f"  Backup kept at {backup_path}.")
+        return False
+    restored = (
+        f"{summary['restored']} file(s) put back and {summary['removed']} file(s) the release added removed; "
+        f"verified against {backup_path}/{BACKUP_MANIFEST_FILENAME}"
+    )
+    print(f"\n[FAILED] Deployment failed and was rolled back: {restored}.")
+    if not restart:
+        print("  MeshCentral was not restarted; it is still running the pre-deploy release.")
+        return True
+    status = restart_service_and_wait()
+    if status == "active":
+        print("  MeshCentral was restarted on the restored files and is active.")
+        return True
+    print(f"  MeshCentral did not come back on the restored files either (status: {status}).")
+    print("  Check logs with: deploy.py logs 50")
+    return False
+
+
 def remove_stray_agent_payloads():
     """Remove known non-agent payloads from agent publish directories."""
     return ssh_cmd("rm -f " + " ".join(remote_quote(path) for path in get_stray_agent_payload_paths())) is not None
@@ -3441,6 +3492,11 @@ def cmd_deploy(args):
     # Step 2-4: Publish staged payloads to all destinations in one remote session
     print(f"\n  [2/6] Publishing staged payloads")
     if publish_staged_payloads(agent_artifacts, public_artifacts, core_artifacts) is False:
+        recover_deploy_from_backup(
+            backup_path,
+            "Publishing stopped part-way; some targets may already hold new files.",
+            restart=False,
+        )
         return False
     if public_artifacts:
         print(f"    Published runtime payloads, MeshCore overrides, and MasterService.exe to {USERFILES_DIR}.")
@@ -3463,26 +3519,14 @@ def cmd_deploy(args):
         print("    [ERROR] Deployment verification failed:")
         for error in verification_errors:
             print(f"      - {error}")
-        print("    Restoring backup before restart.")
-        if restore_agents_from_backup(backup_path) is None:
-            print("    [ERROR] Backup restoration failed; hash refresh and restart were not attempted.")
-            return False
-        if refresh_remote_hashagents() is False:
-            print("    [ERROR] Backup was restored, but hashagents.json refresh failed; restart was not attempted.")
-            return False
+        recover_deploy_from_backup(backup_path, "Published files failed verification before restart.", restart=False)
         return False
     print("    Done.")
 
     # Step 6: Restart MeshCentral
     print(f"\n  [6/6] Restarting MeshCentral service")
-    restart_result = ssh_cmd(f"systemctl restart {SERVICE_NAME}", check=False)
-    time.sleep(3)
-
-    # Verify service came back
-    status = ssh_cmd(f"systemctl is-active {SERVICE_NAME}", check=False)
-    if status and status.strip() == "active":
-        if restart_result is None:
-            print("    Restart command transport failed, but the service is active after the recovery probe.")
+    status = restart_service_and_wait()
+    if status == "active":
         print(f"    Service status: {status}")
         post_restart_rehash_ok = refresh_remote_hashagents() is not False
         if post_restart_rehash_ok is False:
@@ -3501,22 +3545,16 @@ def cmd_deploy(args):
             print("\n[ERROR] Post-restart publish verification failed:")
             for error in runtime_errors:
                 print(f"  - {error}")
-            print("  Restoring backup and restarting MeshCentral.")
-            if restore_agents_from_backup(backup_path) is None:
-                print("  [ERROR] Backup restoration failed; hash refresh and recovery restart were not attempted.")
-                return False
-            if refresh_remote_hashagents() is False:
-                print("  [ERROR] Backup was restored, but hashagents.json refresh failed; recovery restart was not attempted.")
-                return False
-            if ssh_cmd(f"systemctl restart {SERVICE_NAME}", check=False) is None:
-                print("  [ERROR] Backup and manifests were restored, but the recovery restart command failed.")
+            recover_deploy_from_backup(backup_path, "Published files failed verification after restart.", restart=True)
             return False
         print("\n[SUCCESS] Deployment complete!")
     else:
-        if restart_result is None:
-            print("    [WARNING] Restart command transport failed and the recovery probe did not confirm recovery.")
-        print(f"    [WARNING] Service status: {status}")
-        print("    Check logs with: deploy.py logs 50")
+        print(f"    [ERROR] Service status after restart: {status}")
+        recover_deploy_from_backup(
+            backup_path,
+            f"MeshCentral did not come back after the restart (status: {status}).",
+            restart=True,
+        )
         return False
 
     manifest_path = None
@@ -3605,17 +3643,11 @@ def cmd_rollback(args):
     print("  Restored state matches the backup manifest.")
 
     # Restart
-    restart_result = ssh_cmd(f"systemctl restart {SERVICE_NAME}", check=False)
-    time.sleep(3)
-
-    status = ssh_cmd(f"systemctl is-active {SERVICE_NAME}", check=False)
-    if not (status and status.strip() == "active"):
-        if restart_result is None:
-            print("[WARNING] Rollback restart transport failed and the recovery probe did not confirm recovery.")
-        print(f"\n  Service status: {status}")
+    status = restart_service_and_wait()
+    if status != "active":
+        print(f"\n[ERROR] The files were rolled back, but MeshCentral is not active (status: {status}).")
+        print("  Check logs with: deploy.py logs 50")
         return False
-    if restart_result is None:
-        print("  Restart command transport failed, but the service is active after the recovery probe.")
     print(f"\n  Service status: {status}")
     print(f"\n[SUCCESS] Rolled back to {bname}")
     return True
