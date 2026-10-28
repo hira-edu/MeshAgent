@@ -240,6 +240,25 @@ assert(!publishStateBody.includes('or {"files": {}, "manifests": {}}'), 'publish
 const coreStateBody = extractFunction('get_core_publish_state');
 assert(coreStateBody.includes('if remote_paths and metadata_cache is None:'), 'core state must preserve unavailable transport distinctly');
 
+// Stage 1: every MeshCentral publish role is refused before any SSH (Stage 4 tarball install only);
+// the declared map stays, and agent binaries keep their data/signed/module roles.
+assert(source.includes('MESHCENTRAL_PUBLISH_ROLES = frozenset(CORE_PUBLISH_ROLE_DIRS)'), 'every MeshCentral publish role must be refused');
+assert(source.includes('production moves to the MeshCentral fork only through the Stage 4 tarball install') && source.includes("MESHCENTRAL_PUBLISH_DOC = 'docs/DEPLOYMENT.md"), 'the refusal must name the Stage 4 tarball install and the DEPLOYMENT.md section');
+const firstIndex = (body, needles) => Math.min(...needles.map((needle) => { const at = body.indexOf(needle); return at < 0 ? Infinity : at; }));
+const remoteCalls = ['ssh_cmd(', 'scp_upload(', 'run_remote_script(', 'collect_remote_file_metadata(', 'collect_remote_publish_snapshot('];
+for (const [name, gate] of [['cmd_stage', 'report_meshcentral_publish_refusal()'], ['cmd_deploy', 'report_meshcentral_publish_refusal()'],
+    ['publish_staged_payloads', 'refused = meshcentral_publish_refusals(core_artifacts)'],
+    ['verify_remote_core_publish', 'refused = meshcentral_publish_refusals(core_artifacts)'],
+    ['get_core_publish_state', 'refused = dict(meshcentral_publish_refusals(core_artifacts))']]) {
+    const body = extractFunction(name);
+    const at = body.indexOf(gate);
+    assert(at >= 0, `${name} must apply the MeshCentral publish refusal`);
+    assert(at < firstIndex(body, remoteCalls), `${name} must refuse MeshCentral files before any remote call`);
+}
+for (const name of ['cmd_stage', 'cmd_deploy']) {
+    assert(extractFunction(name).includes('core_artifacts = []'), `${name} must stage or deploy no MeshCentral file`);
+}
+
 const verifyPublishBody = extractFunction('verify_remote_publish');
 assert(!verifyPublishBody.includes('verify_remote_embedded_service_bundle('), 'verify_remote_publish must not SCP-download EXEs for redundant embedded checks');
 assert(verifyPublishBody.includes('return [REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR]'), 'verify_remote_publish must report transport failure explicitly');
@@ -269,7 +288,7 @@ if (evidenceDir) {
         'WINDOWS_INSTALL_ROOT_DEFAULT_SOURCE=branding_config.local.json',
         'LEGACY_MESHAGENT_REMOTE_UPDATE_DEFAULT=false',
         'GENERIC_TEMPLATE_INSTALL_PATH_FALLBACK=false',
-        'MESHCTRL_MODULE_ROOT_PUBLISH=true'
+        'MESHCENTRAL_PUBLISH_REFUSED=true'
     ].join('\n') + '\n');
 } else {
     process.stdout.write(JSON.stringify(report, null, 2) + '\n');

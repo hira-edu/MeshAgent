@@ -106,34 +106,50 @@ def test_reset_selects_only_its_own_reports():
         (reports / name).unlink()
 
 
-def test_staged_loader_rules(deploy):
-    # Layout A runs the stock npm package; since Stage 1 the installed wrapper package is the fork.
-    pristine = (meshcentral_paths.upstream_package_dir() / "meshcentral.js").read_bytes().decode("utf-8")
-    fresh = deploy.align_proxy_certificate_sni(deploy.version_meshcentral_module_loader(pristine))
-    layout = TEMP_ROOT / "loader-layout"
-    (layout / "node_modules" / "meshcentral").mkdir(parents=True)
-    (layout / "node_modules" / "meshcentral" / "meshcentral.js").write_bytes(pristine.encode("utf-8"))
-    staged_path = TEMP_ROOT / "loader-repo" / "meshcentral.js"
-    staged_path.parent.mkdir(parents=True)
-    # Production's staged loader: same text, CRLF where a fresh run writes LF.
-    staged_path.write_bytes(fresh.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8"))
-    data, record = dup_layout.versioned_loader(deploy, staged_path, layout)
-    assert data == staged_path.read_bytes() and record["equals_fresh_transform_ignoring_line_endings"] is True
-    marker = "// Favor minified meshcore if present."
-    assert marker in fresh
-    staged_path.write_bytes(fresh.replace(marker, "// edited by hand", 1).encode("utf-8"))
-    expect_error(lambda: dup_layout.versioned_loader(deploy, staged_path, layout), "differs")
-    staged_path.write_bytes(b"not a loader")
-    expect_error(lambda: dup_layout.versioned_loader(deploy, staged_path, layout), "deploy.py rejected")
-    staged_path.write_bytes(pristine.encode("utf-8"))
-    expect_error(lambda: dup_layout.versioned_loader(deploy, staged_path, layout), "not a fully staged loader")
-    staged_path.unlink()
-    expect_error(lambda: dup_layout.versioned_loader(deploy, staged_path, layout), "missing")
-    # The loader deploy.py stages since Stage 1 is the fork's committed file, which passes the same rules.
-    fork_loader = dup_layout.resolve_source(dup_layout.source_repo(), deploy.CORE_ARTIFACTS["meshcentral.js"]["local_path"])
-    assert fork_loader == meshcentral_paths.fork_file("meshcentral.js")
-    data, record = dup_layout.versioned_loader(deploy, fork_loader, layout)
-    assert data == fork_loader.read_bytes()
+def test_production_loader_rebuild(deploy):
+    # Layout A's meshcentral.js is production's: stock 1.2.5 plus deploy.py's transforms, which must
+    # reproduce production's sha256 exactly. The fork's committed loader is not used for it.
+    pristine = (meshcentral_paths.upstream_package_dir() / "meshcentral.js").read_bytes()
+    production = dup_layout.load_production_hashes()[dup_layout.PRODUCTION_LOADER]["sha256"]
+    data, record = dup_layout.production_loader(deploy, pristine, production)
+    assert hashlib.sha256(data).hexdigest() == production and record["equals_production"] is True
+    assert record["first_deploy_crlf_lines"] == len(dup_layout.FIRST_DEPLOY_CRLF_LINES)
+    assert data.replace(b"\r\n", b"\n") == deploy.align_proxy_certificate_sni(
+        deploy.version_meshcentral_module_loader(pristine.decode("utf-8"))).encode("utf-8").replace(b"\r\n", b"\n")
+    expect_error(lambda: dup_layout.production_loader(deploy, pristine, "0" * 64), "!= production")
+    marker = b"// Favor minified meshcore if present."
+    assert marker in pristine
+    expect_error(lambda: dup_layout.production_loader(deploy, pristine.replace(marker, b"// edited by hand", 1), production), "!= production")
+    expect_error(lambda: dup_layout.production_loader(deploy, b"not a loader", production), "deploy.py rejected")
+    fork = meshcentral_paths.fork_file("meshcentral.js").read_bytes()
+    assert hashlib.sha256(fork).hexdigest() != production, "since S1.6 the fork loader differs from production's"
+
+
+def test_shadow_cores_and_release_versions():
+    for path in ("meshcentral-data/meshcore.js", "meshcentral-data/meshcore.min.js",
+                 "meshcentral-data/modules_meshcore/win-terminal.js", "meshcentral-data/modules_meshcore_min/x.min.js",
+                 "meshcentral-data/modules_meshcore/"):
+        assert dup_layout.is_shadow_core(path), path
+    for path in ("meshcentral-data/recoverycore.js", "meshcentral-data/agents/MeshService64.exe",
+                 "meshcentral-data/plugins/nativeruntime/client.js", "meshcentral-web/public/scripts/custom.js",
+                 "node_modules/meshcentral/agents/modules_meshcore/win-terminal.js"):
+        assert not dup_layout.is_shadow_core(path), path
+    manifest = {"date": "2026-10-28T09:43:06.000Z", "commit": "c",
+                "modules": {"modules_meshcore/a.js": "2026-10-28T09:43:06.000Z", "modules_meshcore/b.js": "2026-10-28T09:43:06.000Z"}}
+    probe = {"args": {"minifycore": False}, "cores": {"windows-amt": {"modules": [
+        {"name": "a", "kind": "js", "version": "2026-10-28T09:43:06.000Z"},
+        {"name": "coretranslations", "kind": "json", "version": None},
+        {"name": "b", "kind": "js", "version": "2026-10-28T09:43:06.000Z"}]}}}
+    status, detail = dup_checklist.compare_versions_to_release_manifest(probe, manifest)
+    assert status == "PASS", detail
+    probe["cores"]["windows-amt"]["modules"][2]["version"] = "2026-10-25T19:23:47.081Z"
+    status, detail = dup_checklist.compare_versions_to_release_manifest(probe, manifest)
+    assert status == "FAIL" and "release manifest" in detail[0], detail
+    probe["cores"]["windows-amt"]["modules"].append({"name": "c", "kind": "js", "version": "x"})
+    status, detail = dup_checklist.compare_versions_to_release_manifest(probe, manifest)
+    assert any("not in the release manifest" in d for d in detail), detail
+    probe["args"]["minifycore"] = True
+    assert dup_checklist.compare_versions_to_release_manifest(probe, manifest)[0] == "FAIL"
 
 
 def test_stage1_sources_and_package_roles(deploy):
@@ -369,7 +385,8 @@ def main():
     test_publish_paths_map_onto_layout(deploy)
     test_agent_artifacts_exclude_identity_manifests()
     test_reset_selects_only_its_own_reports()
-    test_staged_loader_rules(deploy)
+    test_production_loader_rebuild(deploy)
+    test_shadow_cores_and_release_versions()
     test_stage1_sources_and_package_roles(deploy)
     test_tarball_manifest_applies_only_npm_bin_rewrite()
     test_summary_key_parsing_and_flag_coverage()

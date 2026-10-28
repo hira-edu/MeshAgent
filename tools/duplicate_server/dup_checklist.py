@@ -262,6 +262,29 @@ def compare_versions_to_capture(probe, timestamps=None):
     return ("PASS" if not problems else "FAIL"), (problems or f"{checked} module entries match")
 
 
+def compare_versions_to_release_manifest(probe, manifest):
+    """Every module version in every served core must equal the release manifest's entry for the
+    file served (agents/module-versions.json in the package; minifycore false serves modules_meshcore)."""
+    if probe["args"]["minifycore"] is not False:
+        return "FAIL", [f"minifycore is {probe['args']['minifycore']!r}; production serves modules_meshcore (false)"]
+    versions = manifest.get("modules") or {}
+    problems, checked = [], 0
+    for core_name, core in sorted(probe["cores"].items()):
+        for module in core["modules"]:
+            if module["kind"] != "js":
+                continue
+            key = f"modules_meshcore/{module['name']}.js"
+            checked += 1
+            if versions.get(key) is None:
+                problems.append(f"{core_name}/{module['name']}: {key} is not in the release manifest")
+            elif module["version"] != versions[key]:
+                problems.append(f"{core_name}/{module['name']}: served {module['version']}, release manifest {versions[key]}")
+    if checked == 0:
+        problems.append("no module versions were compared")
+    detail = problems or f"{checked} module entries match release {manifest.get('date')} (commit {manifest.get('commit')})"
+    return ("PASS" if not problems else "FAIL"), detail
+
+
 def run_checklist(layout, label=None):
     results = Results(layout)
     root = layout_root(layout)
@@ -331,7 +354,24 @@ def run_checklist(layout, label=None):
                    "coreTextSha256": core["coreTextSha256"],
                    "modules": [{"name": m["name"], "version": m["version"]} for m in core["modules"]]}
     results.add("7a", f"served {windows_core} core composition", "INFO", composition)
-    if production_checks:
+    if variant == "stage1":
+        # After the cutover (D18) the cores come from the package, with release-dated versions (D17);
+        # the core text itself must still be production's.
+        package_agents = root / "node_modules" / "meshcentral" / "agents"
+        problems = []
+        if probe["coreSource"] != str(package_agents):
+            problems.append(f"core source {probe['coreSource']} is not the package agents/ (shadow core left in the data dir?)")
+        prod_core = dup_layout.load_production_hashes()["meshcentral-data/meshcore.js"]["sha256"]
+        if core["coreTextSha256"] != prod_core:
+            problems.append(f"core text sha256 {core['coreTextSha256']} != production meshcore.js {prod_core}")
+        results.add("7b", "Windows core comes from the package after the cutover (no shadow core) and its text = production meshcore.js",
+                    "PASS" if not problems else "FAIL",
+                    problems or {"source": probe["coreSource"], "win-dispatcher": "win-dispatcher" in names,
+                                 "sysinfo": "sysinfo" in names, "win-info": "win-info" in names})
+        manifest = read_json(package_agents / "module-versions.json")
+        status, detail = compare_versions_to_release_manifest(probe, manifest)
+        results.add("7d", "served module versions = release manifest (agents/module-versions.json)", status, detail)
+    elif production_checks:
         expected = production_data_modules()
         windows_expected = {n: e for n, e in expected.items() if not n.startswith("linux-")}
         problems = []

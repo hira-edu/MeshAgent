@@ -25,17 +25,40 @@ def test_helpers_take_an_explicit_artifact_list():
         assert "get_present_local" not in source, f"{function.__name__} must not filter by today's disk"
 
 
-def test_core_state_reports_a_declared_file_missing_locally():
+def test_core_state_reports_every_declared_meshcentral_file_as_refused():
     with DeployFixture() as fixture:
         fixture.write_release("v1")
         fixture.seed_remote("v1")
         missing = deploy.build_local_core_artifact_entries()[-1]
         pathlib.Path(missing["local_path"]).unlink()
+        calls = len(fixture.remote.calls)
         state = deploy.get_core_publish_state()
-        assert missing["name"] in [entry["name"] for entry in state], "a missing local file must not drop out"
-        errors = deploy.get_core_publish_state_errors(state)
-        assert f"{missing['name']}: local source missing; cannot verify the published copies" in errors, errors
-        assert len(errors) == 1, errors
+        assert [entry["name"] for entry in state] == list(deploy.CORE_ARTIFACTS), "every declared file is reported, none dropped"
+        assert all(entry["refused"] is True for entry in state), state
+        assert len(fixture.remote.calls) == calls, "refused MeshCentral files are not read over SSH"
+        assert deploy.get_core_publish_state_errors(state) == []
+        assert "refused" in deploy.summarize_core_publish_state(state)
+
+
+def test_meshcentral_publish_and_verify_are_refused_before_any_ssh():
+    with DeployFixture() as fixture:
+        fixture.write_release("v2")
+        core = deploy.build_local_core_artifact_entries()
+        assert {name for name, unused in deploy.meshcentral_publish_refusals(core)} == set(deploy.CORE_ARTIFACTS)
+        assert deploy.MESHCENTRAL_PUBLISH_ROLES == frozenset(deploy.CORE_PUBLISH_ROLE_DIRS)
+        calls = len(fixture.remote.calls)
+        ok, output = run_quiet(deploy.publish_staged_payloads, [], [], core)
+        assert ok is False and deploy.MESHCENTRAL_PUBLISH_REFUSAL in output, output
+        errors = deploy.verify_remote_core_publish(core)
+        assert len(errors) == len(core) and all(deploy.MESHCENTRAL_PUBLISH_REFUSAL in error for error in errors), errors
+        assert len(fixture.remote.calls) == calls, "nothing may reach the server for MeshCentral files"
+        # The agent-binary path still publishes.
+        fixture.seed_remote("v1")
+        fixture.stage()
+        agents = deploy.get_agent_publish_artifacts(deploy.get_present_local_artifacts())
+        ok, output = run_quiet(deploy.publish_staged_payloads, agents, [], [])
+        assert ok is True, output
+        assert fixture.remote.read(deploy.get_publish_path("data", "MeshService64.exe")) == b"MeshService64.exe v2\n"
 
 
 def test_publish_state_reports_a_tracked_binary_missing_locally():
@@ -56,14 +79,15 @@ def test_rollback_restores_a_file_dropped_from_the_map():
         fixture.stage()
         ok, output = run_quiet(deploy.cmd_deploy, deploy_args())
         assert ok is True, output
-        # The next release drops a module from the map and from the local tree.
-        dropped = "modules_meshcore/clipboard.js"
-        del deploy.CORE_ARTIFACTS[dropped]
+        # The next release drops an agent payload from the map and from the local tree.
+        dropped = "service_bundle.dll"
+        del deploy.ARTIFACTS[dropped]
+        deploy.REQUIRED_AGENT_ARTIFACTS = set(deploy.REQUIRED_AGENT_ARTIFACTS) - {dropped}
         fixture.remove_local_build()
         ok, output = run_quiet(deploy.cmd_rollback, rollback_args())
         assert ok is True, output
-        for role in ("data-core", "module-core"):
-            path = deploy.get_core_publish_path(role, dropped)
+        for role in ("signed", "module"):
+            path = deploy.get_publish_path(role, dropped)
             assert fixture.remote.read(path) == before[path], path
         assert fixture.remote.snapshot() == before
 
@@ -82,7 +106,8 @@ def test_deploy_still_refuses_missing_required_artifacts():
 
 TESTS = [
     test_helpers_take_an_explicit_artifact_list,
-    test_core_state_reports_a_declared_file_missing_locally,
+    test_core_state_reports_every_declared_meshcentral_file_as_refused,
+    test_meshcentral_publish_and_verify_are_refused_before_any_ssh,
     test_publish_state_reports_a_tracked_binary_missing_locally,
     test_rollback_restores_a_file_dropped_from_the_map,
     test_deploy_still_refuses_missing_required_artifacts,

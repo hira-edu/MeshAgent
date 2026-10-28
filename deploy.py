@@ -451,6 +451,47 @@ for _core_module in ("clipboard", "desktop-audio", "process-manager", "service-m
             "publish_targets": ("data-core", "module-core"),
         }
 
+# ─── MeshCentral files: declared, but refused since Stage 1 ──────────────────
+# CORE_ARTIFACTS still declares every MeshCentral file deploy.py used to publish, so status, health,
+# backups and rollbacks keep naming those paths (T14). Publishing them is refused for every MeshCentral
+# role, before any SSH. The fork's meshcentral.js reads agents/module-versions.json, which only the
+# packed tarball carries, so a copied loader would stop the server. Copies into meshcentral-data are
+# the shadow cores the cutover removes (D18). Production moves to the fork only through the Stage 4
+# tarball install. Agent binaries (ARTIFACTS) are published as before.
+MESHCENTRAL_PUBLISH_ROLES = frozenset(CORE_PUBLISH_ROLE_DIRS)
+MESHCENTRAL_PUBLISH_DOC = 'docs/DEPLOYMENT.md, "MeshCentral files are not published by deploy.py"'
+MESHCENTRAL_PUBLISH_REFUSAL = (
+    "deploy.py does not publish MeshCentral files (roles " + ", ".join(sorted(MESHCENTRAL_PUBLISH_ROLES)) +
+    "): production moves to the MeshCentral fork only through the Stage 4 tarball install; see " +
+    MESHCENTRAL_PUBLISH_DOC
+)
+
+
+def meshcentral_publish_refusals(entries):
+    """Return [(name, roles)] for the entries that target a MeshCentral publish role."""
+    refused = []
+    for entry in entries:
+        roles = [role for role in get_artifact_publish_targets(entry) if role in MESHCENTRAL_PUBLISH_ROLES]
+        if roles:
+            refused.append((entry["name"], roles))
+    return refused
+
+
+def declared_meshcentral_refusals():
+    """The refusal for every MeshCentral file the map declares."""
+    return meshcentral_publish_refusals([dict(config, name=name) for name, config in CORE_ARTIFACTS.items()])
+
+
+def report_meshcentral_publish_refusal():
+    """Print the refusal for every declared MeshCentral artifact and return their names."""
+    refused = declared_meshcentral_refusals()
+    if refused:
+        print(f"  [REFUSED] {len(refused)} declared MeshCentral artifact(s): {MESHCENTRAL_PUBLISH_REFUSAL}")
+        for name, roles in refused:
+            print(f"  [REFUSED] {name:<45s} {', '.join(roles)}")
+    return [name for name, unused in refused]
+
+
 # Additional deploy target for MasterService (public userfiles for agent download)
 _USERFILES_USER = os.environ.get("MESHCENTRAL_USERFILES_USER", "")
 USERFILES_DIR = f"{MESHCENTRAL_BASE}/meshcentral-files/domain/user-{_USERFILES_USER}/Public" if _USERFILES_USER else ""
@@ -1356,8 +1397,6 @@ def build_stage_manifest_artifacts(entries):
             "size_bytes": entry["size_bytes"],
             "sha384": entry["sha384"],
         })
-        if "package_version" in entry:
-            artifacts[-1]["package_version"] = entry["package_version"]
     return artifacts
 
 
@@ -1472,18 +1511,6 @@ def align_proxy_certificate_sni(source):
     return source.replace(original, aligned, 1)
 
 
-def read_local_fork_package_version():
-    """Return the version in the MeshCentral fork's package.json, which meshcentral.js belongs to."""
-    manifest_path = LOCAL_MESHCENTRAL_REPO / "package.json"
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        raise RuntimeError(f"Cannot read the MeshCentral fork package version from {manifest_path}: {error}") from error
-    if manifest.get("name") != "meshcentral" or not manifest.get("version"):
-        raise RuntimeError(f"{manifest_path} is not the meshcentral package (name {manifest.get('name')!r}, version {manifest.get('version')!r})")
-    return manifest["version"]
-
-
 def build_local_core_artifact_entries():
     """Collect local MeshCentral core/module metadata without regenerating staged bytes."""
     entries = []
@@ -1500,9 +1527,6 @@ def build_local_core_artifact_entries():
             "present": present,
             "publish_targets": tuple(config.get("publish_targets", ())),
         }
-        if name == "meshcentral.js" and present:
-            # The loader is the fork's own file; it may only replace the same package version.
-            entry["package_version"] = read_local_fork_package_version()
         if present:
             entry["size_bytes"] = local_path.stat().st_size
             entry["sha384"] = file_digest(local_path, "sha384")
@@ -1513,11 +1537,6 @@ def build_local_core_artifact_entries():
 def get_present_local_artifacts():
     """Return only local artifacts that are present on disk."""
     return [entry for entry in build_local_artifact_entries() if entry["present"] is True]
-
-
-def get_present_local_core_artifacts():
-    """Return present MeshCentral core/module artifacts."""
-    return [entry for entry in build_local_core_artifact_entries() if entry["present"] is True]
 
 
 def find_local_artifact(local_artifacts, artifact_name):
@@ -1643,12 +1662,6 @@ def validate_required_deploy_artifacts(local_artifacts):
     """Return a sorted list of required deploy artifacts that are missing locally."""
     local_names = {entry["name"] for entry in local_artifacts}
     return sorted(REQUIRED_AGENT_ARTIFACTS - local_names)
-
-
-def validate_required_core_artifacts(core_artifacts):
-    """Return sorted MeshCentral core/module artifacts missing locally."""
-    local_names = {entry["name"] for entry in core_artifacts}
-    return sorted(set(CORE_ARTIFACTS.keys()) - local_names)
 
 
 def get_hashagents_tracked_artifacts(local_artifacts):
@@ -1901,7 +1914,12 @@ def verify_remote_publish(local_artifacts, signed_runtime_mode=False):
 
 
 def verify_remote_core_publish(core_artifacts):
-    """Validate MeshCentral core/module override files against the given (published) entries."""
+    """Validate MeshCentral core/module override files against the given (published) entries.
+
+    Refused before any SSH for MeshCentral roles (MESHCENTRAL_PUBLISH_REFUSAL)."""
+    refused = meshcentral_publish_refusals(core_artifacts)
+    if refused:
+        return [f"{name}: {MESHCENTRAL_PUBLISH_REFUSAL}" for name, unused in refused]
     errors = []
     remote_paths = []
     for entry in core_artifacts:
@@ -1928,10 +1946,17 @@ def get_core_publish_state(core_artifacts=None):
     """Return publish parity for MeshCentral-served core/module files.
 
     With no baseline, every declared core artifact is reported; one missing from the local
-    tree is reported as unverifiable rather than left out.
+    tree is reported as unverifiable rather than left out. MeshCentral roles are refused: their
+    entries are reported as refused, and nothing is read over SSH for them.
     """
     if not core_artifacts:
         core_artifacts = build_local_core_artifact_entries()
+    refused = dict(meshcentral_publish_refusals(core_artifacts))
+    if refused:
+        return [{"name": entry["name"], "remote_relative_path": entry["remote_relative_path"], "refused": True,
+                 "roles": [{"role": role, "path": get_core_publish_path(role, entry["remote_relative_path"]), "refused": True}
+                           for role in refused.get(entry["name"], ())]}
+                for entry in core_artifacts]
     remote_paths = []
     for entry in core_artifacts:
         for role in get_artifact_publish_targets(entry):
@@ -1971,6 +1996,8 @@ def get_core_publish_state_errors(core_state):
         return [REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR]
     errors = []
     for entry in core_state:
+        if entry.get("refused") is True:
+            continue  # not published by deploy.py; reported by summarize_core_publish_state
         if entry.get("local_present") is False:
             errors.append(f"{entry['name']}: local source missing; cannot verify the published copies")
             continue
@@ -1988,8 +2015,14 @@ def summarize_core_publish_state(core_state):
     """Render a compact core/module parity summary."""
     if core_state is None:
         return "unavailable"
+    refused = [entry["name"] for entry in core_state if entry.get("refused") is True]
+    if refused and len(refused) == len(core_state):
+        return f"refused for {len(refused)} MeshCentral artifact(s): Stage 4 tarball install only"
     parts = []
     for entry in core_state:
+        if entry.get("refused") is True:
+            parts.append(f"{entry['name']}(refused)")
+            continue
         role_parts = [
             f"{role['role']}={format_publish_match(role.get('matches_local'))}"
             for role in entry.get("roles", [])
@@ -2263,17 +2296,10 @@ def publish_staged_payloads(agent_artifacts, public_artifacts=None, core_artifac
     """Publish staged artifacts to all remote destinations in one shell session."""
     commands = [f"mkdir -p {remote_quote(path)}" for path in PUBLISH_ROLE_DIRS.values()]
     core_artifacts = core_artifacts or []
-    for entry in core_artifacts:
-        if entry["name"] == "meshcentral.js":
-            installed = load_remote_json(get_core_publish_path("module-root", "package.json"))
-            if not isinstance(installed, dict):
-                print("[ERROR] Cannot read the installed MeshCentral package version; no payloads published.")
-                return False
-            expected = entry.get("package_version")
-            if installed.get("name") != "meshcentral" or not expected or installed.get("version") != expected:
-                print(f"[ERROR] The installed MeshCentral package is {installed.get('name')}@{installed.get('version')}, "
-                      f"but the staged meshcentral.js belongs to meshcentral@{expected}; no payloads published.")
-                return False
+    refused = meshcentral_publish_refusals(core_artifacts)
+    if refused:
+        print(f"[ERROR] {MESHCENTRAL_PUBLISH_REFUSAL}; no payloads published: " + ", ".join(name for name, unused in refused))
+        return False
     for path in CORE_PUBLISH_ROLE_DIRS.values():
         commands.append(f"mkdir -p {remote_quote(path)}")
     for entry in agent_artifacts:
@@ -2967,6 +2993,11 @@ def write_release_manifest(ts, backup_path, service_status, local_artifacts=None
             "signed_agents_dir": SIGNED_AGENTS,
             "module_agents_dir": MODULE_AGENTS,
             "userfiles_dir": USERFILES_DIR,
+            # Declared MeshCentral files this release did not publish (Stage 4 tarball install only).
+            "meshcentral_publish_refused": {
+                "reason": MESHCENTRAL_PUBLISH_REFUSAL,
+                "artifacts": [name for name, unused in declared_meshcentral_refusals()],
+            },
         },
         "hashagents": [
             {
@@ -3200,21 +3231,13 @@ def cmd_stage(args):
     print("=" * 60)
 
     local_artifacts = get_present_local_artifacts()
-    try:
-        core_artifacts = get_present_local_core_artifacts()
-    except RuntimeError as error:
-        print(f"[ERROR] {error}")
-        return False
+    # MeshCentral files are refused, by name, before any SSH; only agent binaries are staged.
+    report_meshcentral_publish_refusal()
+    core_artifacts = []
     missing_required = validate_required_deploy_artifacts(local_artifacts)
-    missing_core = validate_required_core_artifacts(core_artifacts)
     if missing_required:
         print("[ERROR] Missing required deploy artifacts:")
         for name in missing_required:
-            print(f"  - {name}")
-        return False
-    if missing_core:
-        print("[ERROR] Missing required MeshCentral core/module artifacts:")
-        for name in missing_core:
             print(f"  - {name}")
         return False
     if DEPLOY_PLATFORM == "macos":
@@ -3344,9 +3367,10 @@ def cmd_deploy(args):
     print("=" * 60)
 
     local_artifacts = get_present_local_artifacts()
-    core_artifacts = get_present_local_core_artifacts()
+    # MeshCentral files are refused, by name, before any SSH; only agent binaries are deployed.
+    report_meshcentral_publish_refusal()
+    core_artifacts = []
     missing_required = validate_required_deploy_artifacts(local_artifacts)
-    missing_core = validate_required_core_artifacts(core_artifacts)
     if DEPLOY_PLATFORM == "macos":
         # Re-check at publish time: the server's core modules can change after staging.
         macos_errors = validate_macos_release(local_artifacts) if local_artifacts else []
@@ -3361,11 +3385,6 @@ def cmd_deploy(args):
     if missing_required:
         print("[ERROR] Missing required deploy artifacts:")
         for name in missing_required:
-            print(f"  - {name}")
-        return False
-    if missing_core:
-        print("[ERROR] Missing required MeshCentral core/module artifacts:")
-        for name in missing_core:
             print(f"  - {name}")
         return False
     if payload_report["ok"] is False:

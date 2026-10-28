@@ -629,6 +629,34 @@ expected binary and service health. `deploy.py deploy` checks this setting and
 stops before publishing if it cannot confirm it; `--allow-fleet-update` is the
 explicit override for a planned fleet rollout.
 
+### MeshCentral files are not published by deploy.py
+
+Since Stage 1, `deploy.py` publishes agent binaries only. It refuses every MeshCentral
+publish role: `module-root`, `module-core`, `module-public`, `data-core`, `data-plugin` and
+`web-public`. This covers `meshcentral.js` and the other server files, the agent cores and
+modules, the viewer scripts, `custom.js` and the `nativeruntime` plugin, and also the macOS
+profile's `macosinstaller.js`.
+
+There are two reasons:
+
+- The fork's `meshcentral.js` reads release-dated module versions from
+  `agents/module-versions.json`, which only the packed fork tarball carries. A loader copied on
+  its own would stop the server at start.
+- Copies into `meshcentral-data` are the shadow cores that the Stage 1 cutover removes (D18).
+
+Production moves to the MeshCentral fork only through the Stage 4 tarball install, which
+installs the whole package and then removes the shadow copies.
+
+The refusal is explicit, and nothing is silently dropped:
+
+- `stage` and `deploy` list every declared MeshCentral artifact as `[REFUSED]` with its roles,
+  before any SSH. They then stage or deploy the agent binaries as before.
+- The release manifest records the refused artifacts under `deploy.meshcentral_publish_refused`.
+- `status`, `health` and `repair-hashagents` report the MeshCentral files as refused and read
+  nothing about them over SSH.
+- `CORE_ARTIFACTS` stays declared, so backups, restores and rollbacks of earlier releases
+  still cover those paths.
+
 ### Backups and automatic restore
 
 Each deploy writes a backup to `/opt/meshcentral/backups/<UTC timestamp>` (with

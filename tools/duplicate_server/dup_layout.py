@@ -22,6 +22,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "test" / "lib"))
+import meshcentral_paths  # noqa: E402  (the shared MeshCentral path helper the tests use)
+
 from dup_common import (
     DUP_ROOT, LAYOUT_A_TAR, MESHCENTRAL_VERSION, PRODUCTION_HASHES, PRODUCTION_UNTRACKED, REPORTS, WORKTREE_ROOT,
     DupError, layout_root, log, npm, read_json, sha256_file, write_json,
@@ -48,29 +53,21 @@ def source_repo():
 
 
 def meshcentral_repo():
-    """The MeshCentral checkout: MESHCENTRAL_ROOT (as for the tests), else the source repo's sibling."""
-    configured = os.environ.get("MESHCENTRAL_ROOT")
-    root = Path(configured).resolve() if configured else source_repo().parent / "MeshCentral"
-    if not (root / "meshagent.js").is_file() or not (root / "agents").is_dir():
-        raise DupError(f"{root} is not a MeshCentral fork checkout (no meshagent.js and agents/); set MESHCENTRAL_ROOT")
-    return root
-
-
-WRAPPER_PACKAGE_NAME = "meshcentral-deploy"
+    """The MeshCentral checkout, resolved by the shared helper exactly as the tests resolve it:
+    MESHCENTRAL_ROOT, else the sibling of this MeshAgent checkout. There is no other fallback, so a
+    worktree without MESHCENTRAL_ROOT fails loudly instead of using another checkout."""
+    try:
+        return meshcentral_paths.meshcentral_root()
+    except meshcentral_paths.MeshCentralPathError as error:
+        raise DupError(str(error)) from error
 
 
 def wrapper_dir():
-    """The deployment wrapper (Stage 1 layout): MeshCentral/deploy, named meshcentral-deploy."""
-    directory = meshcentral_repo() / "deploy"
-    manifest = directory / "package.json"
+    """The deployment wrapper (Stage 1 layout): MeshCentral/deploy, named meshcentral-deploy (shared helper)."""
     try:
-        name = read_json(manifest).get("name")
-    except (OSError, ValueError, DupError) as error:
-        raise DupError(f"Deployment wrapper not found: {manifest} is not readable ({error}). "
-                       "The wrapper moved to deploy/ in Stage 1; use a checkout with that layout.") from error
-    if name != WRAPPER_PACKAGE_NAME:
-        raise DupError(f"{manifest} is named {name!r}, not {WRAPPER_PACKAGE_NAME!r}")
-    return directory
+        return meshcentral_paths.wrapper_dir()
+    except meshcentral_paths.MeshCentralPathError as error:
+        raise DupError(str(error)) from error
 
 
 def resolve_source(repo, local_path):
@@ -211,34 +208,48 @@ def collect_agent_artifacts(deploy, repo):
     return entries, excluded
 
 
-def versioned_loader(deploy, staged_path, root):
-    """The meshcentral.js deploy.py publishes.
+PRODUCTION_LOADER = "node_modules/meshcentral/meshcentral.js"
+# The three lines deploy.py's first module-version transform wrote. Production's loader was versioned
+# by that earlier deploy, which left them with the file's CRLF; the current transform (which also adds
+# the preferredModule lines, with LF) writes them with LF on a pristine 1.2.5 file.
+FIRST_DEPLOY_CRLF_LINES = (
+    "const modulePath = obj.path.join(moduleDirPath, modulesDir[i]);",
+    "const moduleVersion = obj.fs.statSync(modulePath).mtime.toISOString();",
+    "const moduleData = ['try { addModule(\"', moduleName, '\", \"', obj.escapeCodeString(obj.fs.readFileSync(modulePath).toString('binary')), '\", \"', moduleVersion, '\"); addedModules.push(\"', moduleName, '\"); } catch (ex) { }\\r\\n'];",
+)
 
-    Since Stage 1 deploy.py stages the fork's committed loader (CORE_ARTIFACTS["meshcentral.js"]), which
-    holds production's bytes: production's installed loader had been versioned by an earlier deploy, so
-    it keeps CRLF on lines a fresh run on pristine 1.2.5 writes with LF. The file is used only if deploy.py's
-    transforms leave it unchanged and it equals a fresh run on the layout's own stock npm copy apart from
-    line endings."""
-    staged_path = Path(staged_path)
-    if not staged_path.is_file():
-        raise DupError(f"deploy.py's staged loader is missing at {staged_path}")
-    staged = staged_path.read_bytes()
-    staged_text = staged.decode("utf-8")
+
+def production_loader(deploy, upstream_loader, expected_sha256):
+    """Production's meshcentral.js, rebuilt from the stock 1.2.5 loader (upstream_loader, bytes) and
+    deploy.py's transform helpers, then required to be byte-equal to production (expected_sha256).
+
+    Since Stage 1 the fork's committed loader reads release-dated versions, so it no longer stands for
+    production. Production runs stock 1.2.5 plus deploy.py's module-version and proxy SNI transforms; the
+    only other difference is the first deploy's CRLF on FIRST_DEPLOY_CRLF_LINES, restored here. Any
+    other difference fails on the hash."""
     def transform(text):
         try:
             return deploy.align_proxy_certificate_sni(deploy.version_meshcentral_module_loader(text))
         except ValueError as error:
-            raise DupError(f"deploy.py rejected a MeshCentral loader: {error}") from error
+            raise DupError(f"deploy.py rejected the stock MeshCentral loader: {error}") from error
 
-    if transform(staged_text) != staged_text:
-        raise DupError(f"{staged_path} is not a fully staged loader (deploy.py transforms would change it)")
-    installed = (root / "node_modules" / "meshcentral" / "meshcentral.js").read_bytes().decode("utf-8")
-    fresh = transform(installed).encode("utf-8")
-    if staged.replace(b"\r\n", b"\n") != fresh.replace(b"\r\n", b"\n"):
-        raise DupError(f"{staged_path} differs from what deploy.py generates from the installed MeshCentral")
-    return staged, {"source": str(staged_path), "sha256": sha256_file(staged_path),
-                    "equals_fresh_transform": staged == fresh,
-                    "equals_fresh_transform_ignoring_line_endings": True}
+    fresh = transform(upstream_loader.decode("utf-8"))
+    lines = fresh.split("\n")
+    restored = 0
+    for index, line in enumerate(lines):
+        if line.strip() in FIRST_DEPLOY_CRLF_LINES and not line.endswith("\r"):
+            lines[index] = line + "\r"
+            restored += 1
+    if restored != len(FIRST_DEPLOY_CRLF_LINES):
+        raise DupError(f"expected {len(FIRST_DEPLOY_CRLF_LINES)} transformed loader lines, found {restored}")
+    data = "\n".join(lines).encode("utf-8")
+    if transform(data.decode("utf-8")).encode("utf-8") != data:
+        raise DupError("the rebuilt production loader is not a fixed point of deploy.py's transforms")
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != expected_sha256:
+        raise DupError(f"rebuilt production loader sha256 {actual} != production {expected_sha256} ({PRODUCTION_HASHES})")
+    return data, {"source": "stock meshcentral 1.2.5 meshcentral.js + deploy.py transforms", "sha256": actual,
+                  "equals_production": True, "first_deploy_crlf_lines": restored}
 
 
 def is_package_path(deploy, remote_path):
@@ -257,7 +268,11 @@ def collect_core_artifacts(deploy, repo, root, include_package=True):
                 continue
         entry = {"name": name, "remote_relative_path": config["remote_relative_path"], "publish_targets": targets}
         if name == "meshcentral.js":
-            entry["bytes"], entry["loader"] = versioned_loader(deploy, resolve_source(repo, config["local_path"]), root)
+            # Layout A: production's loader, rebuilt from the layout's stock npm copy (checked equal to the
+            # pinned upstream tarball before this runs).
+            upstream = (root / "node_modules" / "meshcentral" / "meshcentral.js").read_bytes()
+            expected = load_production_hashes()[PRODUCTION_LOADER]["sha256"]
+            entry["bytes"], entry["loader"] = production_loader(deploy, upstream, expected)
         else:
             local_path = resolve_source(repo, config["local_path"])
             if not local_path.is_file():
@@ -267,11 +282,21 @@ def collect_core_artifacts(deploy, repo, root, include_package=True):
     return entries
 
 
+# Data-dir shadow cores: MeshCentral serves these instead of the package's agents/ copies while they
+# exist (meshcentral.js updateMeshCore). The Stage 1 cutover removes them (D18), so B-stage1 has none.
+SHADOW_CORE_PREFIXES = ("meshcentral-data/meshcore.js", "meshcentral-data/meshcore.min.js",
+                        "meshcentral-data/modules_meshcore/", "meshcentral-data/modules_meshcore_min/")
+
+
+def is_shadow_core(relative):
+    return relative.startswith(SHADOW_CORE_PREFIXES)
+
+
 def publish_locally(name, include_package=True):
     """Apply deploy.py's publish map (publish_staged_payloads) to the local tree.
 
-    include_package=False leaves node_modules/meshcentral alone (B-stage1: the package is the fork
-    tarball), so only the data and web folders get deploy.py's copies."""
+    include_package=False is B-stage1: node_modules/meshcentral is the fork tarball, so deploy.py's
+    package roles are left out, and so are its data-dir shadow cores (D18)."""
     deploy = load_deploy()
     repo = source_repo()
     root = layout_root(name)
@@ -292,9 +317,13 @@ def publish_locally(name, include_package=True):
             shutil.copyfile(entry["local_path"], target)
             copies.append({"artifact": entry["name"], "role": role, "target": str(target.relative_to(root)),
                            "sha256": sha256_file(target)})
+    skipped_shadow_cores = []
     for entry in cores:
         for role in entry["publish_targets"]:
             target = remote_to_local(deploy, deploy.get_core_publish_path(role, entry["remote_relative_path"]), root)
+            if not include_package and is_shadow_core(target.relative_to(root).as_posix()):
+                skipped_shadow_cores.append(target.relative_to(root).as_posix())
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             if "bytes" in entry:
                 target.write_bytes(entry["bytes"])
@@ -312,19 +341,21 @@ def publish_locally(name, include_package=True):
     loader = next((e["loader"] for e in cores if e["name"] == "meshcentral.js"), None)
     return {"source_repo": str(repo), "meshcentral_repo": str(meshcentral_repo()), "copies": copies,
             "excluded": excluded, "loader": loader, "include_package": include_package,
-            "skipped_package_paths": skipped_package_paths,
+            "skipped_package_paths": skipped_package_paths, "skipped_shadow_cores": skipped_shadow_cores,
             "not_reproduced": [
                 "refresh_remote_hashagents (SSH only); MeshCentral 1.2.5 never reads hashagents.json "
                 "(const reassignment inside try, meshcentral.js updateMeshAgentsTable)",
                 "file owners and modes (Windows)"]}
 
 
-def extract_production_capture(name):
-    """Extract layout-a.tar over the tree, keeping the captured mtimes (module mtimes are module versions)."""
+def extract_production_capture(name, without_shadow_cores=False):
+    """Extract layout-a.tar over the tree, keeping the captured mtimes (module mtimes are module versions).
+    without_shadow_cores leaves out the data-dir shadow cores (B-stage1, D18)."""
     root = layout_root(name)
     if not LAYOUT_A_TAR.is_file():
         raise DupError(f"Production capture missing: {LAYOUT_A_TAR}")
     extracted = []
+    skipped = []
     with tarfile.open(LAYOUT_A_TAR) as archive:
         members = archive.getmembers()
         for member in members:
@@ -332,18 +363,22 @@ def extract_production_capture(name):
                 raise DupError(f"Unexpected member in {LAYOUT_A_TAR}: {member.name}")
             if not (member.isfile() or member.isdir()):
                 raise DupError(f"Unsupported member type in {LAYOUT_A_TAR}: {member.name}")
+        if without_shadow_cores:
+            skipped = [m.name for m in members if m.isfile() and is_shadow_core(m.name)]
+            members = [m for m in members if not is_shadow_core(m.name.rstrip("/") + ("/" if m.isdir() else ""))]
         archive.extractall(root, members=members, filter="data")
     with tarfile.open(LAYOUT_A_TAR) as archive:
         for member in archive.getmembers():
-            if not member.isfile():
+            if not member.isfile() or member.name in skipped:
                 continue
             path = root / member.name
             actual = int(path.stat().st_mtime)
             if actual != int(member.mtime):
                 raise DupError(f"mtime not preserved for {member.name}: {actual} != {int(member.mtime)}")
             extracted.append(member.name)
-    log(f"  extracted {len(extracted)} files from layout-a.tar with original mtimes")
-    return {"tar": str(LAYOUT_A_TAR), "tar_sha256": sha256_file(LAYOUT_A_TAR), "files": len(extracted)}
+    log(f"  extracted {len(extracted)} files from layout-a.tar with original mtimes"
+        + (f"; left out {len(skipped)} shadow-core files" if without_shadow_cores else ""))
+    return {"tar": str(LAYOUT_A_TAR), "tar_sha256": sha256_file(LAYOUT_A_TAR), "files": len(extracted), "skipped": skipped}
 
 
 MODULE_TAR_PREFIXES = ("meshcentral-data/meshcore", "meshcentral-data/modules_meshcore")
@@ -559,10 +594,11 @@ def build_layout_b(tgz=None, stage1=False):
     """Layout B.
 
     tgz: install that tarball into node_modules/meshcentral with no override copies.
-    stage1: B-stage1, the Stage 1 fork as production would run it. The package is the wrapper's own
-    fork tarball (npm ci checks it against the lockfile integrity), and the data and web folders are
-    built the way layout A builds them: deploy.py's map without its package roles, then the
-    production capture with its module mtimes. The config is generated with layout A's profile."""
+    stage1: B-stage1, the Stage 1 fork as production runs it after the cutover. The package is the
+    wrapper's own fork tarball (npm ci checks it against the lockfile integrity), and the data and web
+    folders are built the way layout A builds them (deploy.py's map without its package roles, then the
+    production capture), minus the data-dir shadow cores the cutover removes (D18), so the cores and
+    their release-dated module versions come from the package. The config uses layout A's profile."""
     if stage1 == (tgz is not None):
         raise DupError("layout B needs exactly one of a tarball or the Stage 1 variant")
     root = layout_root("B")
@@ -582,8 +618,12 @@ def build_layout_b(tgz=None, stage1=False):
     record["tree_equals_tarball"] = verify_package_equals_tarball(root, tgz)
     if stage1:
         record["publish"] = publish_locally("B", include_package=False)
-        record["capture"] = extract_production_capture("B")
-        record["module_timestamps"] = overlay_module_timestamps("B")
+        record["capture"] = extract_production_capture("B", without_shadow_cores=True)
+        shadows = sorted(p.relative_to(root).as_posix() for p in (root / "meshcentral-data").rglob("*")
+                         if p.is_file() and is_shadow_core(p.relative_to(root).as_posix()))
+        if shadows:
+            raise DupError(f"B-stage1 must hold no data-dir shadow cores (D18): {shadows[:5]}")
+        record["shadow_cores_left_out"] = sorted(set(record["publish"]["skipped_shadow_cores"]) | set(record["capture"]["skipped"]))
         # deploy.py's package roles were left out, so the package must still equal the tarball.
         verify_package_equals_tarball(root, tgz)
     else:
