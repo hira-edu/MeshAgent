@@ -1,14 +1,17 @@
-name: Request coordinated production release
+name: Request coordinated release
+# A push to main (production channel) or preview (preview channel) asks hira-edu/hook for one coordinated
+# release of that channel. hook resolves MeshCentral and hook to the same channel's branch, builds, pins,
+# smoke-tests and, for preview, deploys; production deploys only from an operator's manual run in hook.
 on:
   push:
-    branches: [main]
+    branches: [main, preview]
   pull_request:
-    branches: [main]
+    branches: [main, preview]
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: request-coordinated-release-${{ github.event_name == 'pull_request' && github.ref || 'production' }}
+  group: request-coordinated-release-${{ github.event_name == 'pull_request' && github.ref || github.ref_name }}
   cancel-in-progress: false
 jobs:
   validate:
@@ -32,11 +35,20 @@ jobs:
     needs: validate
     if: >-
       github.event_name != 'pull_request' &&
-      github.ref == 'refs/heads/main' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/preview') &&
       github.event.repository.default_branch == 'main'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: Require the release app credential
+        env:
+          RELEASE_APP_ID: ${{ vars.RELEASE_APP_ID }}
+          RELEASE_APP_PRIVATE_KEY_SET: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [ -z "$RELEASE_APP_ID" ] || [ "$RELEASE_APP_PRIVATE_KEY_SET" != true ]; then
+            echo "::error title=Release dispatch::Set repository variable RELEASE_APP_ID and repository secret RELEASE_APP_PRIVATE_KEY (the release app, installed on hook) to request the coordinated release"
+            exit 1
+          fi
       - name: Create a short-lived dispatch token
         id: app
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
@@ -54,6 +66,7 @@ jobs:
           python - <<'PY' > request.json
           import json, os
           print(json.dumps({'event_type': 'sibling-source-updated', 'client_payload': {
-              'repository': os.environ['GITHUB_REPOSITORY'], 'sha': os.environ['GITHUB_SHA']}}))
+              'repository': os.environ['GITHUB_REPOSITORY'], 'sha': os.environ['GITHUB_SHA'],
+              'branch': os.environ['GITHUB_REF_NAME']}}))
           PY
           gh api --method POST "repos/$COORDINATOR/dispatches" --input request.json

@@ -9,14 +9,134 @@ credentials, deployment snapshots, or migration history.
 ## Coordinated GitHub releases
 
 `hook/.github/workflows/coordinated-release.yml` is the private release coordinator.
-Pushes to the default branch of MeshAgent, MeshCentral, or hook request one release.
-MeshAgent uses `build-release.yml` and MeshCentral uses `request-release.yml` to
-notify hook. Provisioned binaries, manifests, build logs, and release bundles are
-kept in hook because the other two repositories are public. A resolver freezes
-all three default-branch commit SHAs before any native build starts. Every build
-leg uses those exact SHAs; a final check refuses a release superseded while it
-was building or awaiting environment approval. GitHub concurrency coalesces
-pending requests to the latest state and never cancels an active deployment.
+It releases two channels: branch `main` of MeshAgent, MeshCentral and hook is the
+**production** channel, branch `preview` of the three is the **preview** channel
+(the preview server, see the "Preview instance" section). A push to either
+branch of any of the three repositories, or a manual run, requests one release of
+that channel. MeshAgent (`build-release.yml`) and MeshCentral
+(`request-release.yml`) dispatch `sibling-source-updated` with the pushed commit
+and its branch; hook's own push starts the release directly. Provisioned
+binaries, manifests, build logs, and release bundles are kept in hook because
+the other two repositories are public.
+
+A run of a channel takes each repository's branch of that channel. A repository
+without a `preview` branch contributes its `main`; the run summary names every
+such fallback. Dispatched runs execute hook main's workflow file and build the
+channel's hook commit; a push or manual run of hook builds the commit it runs.
+
+A **build run** (every push and dispatch, and a manual run without
+`deploy_digest`) runs in this order:
+
+1. **Resolve.** `tools/resolve_deploy_sources.py` freezes the channel's three
+   commits before anything is built, records the pushed commit as the trigger, and
+   writes all of them, with their branches, to the run summary. Every later job
+   uses exactly those commits. `tools/deployment/release_pins.py plan` then
+   decides the agent builds and states the fleet change (below).
+2. **Rebuild or reuse the agents.** The channel of a pinned build is the
+   `Release-Pipeline-Channel` trailer of the MeshCentral commit that pinned it (a
+   pin committed by hand counts as production's). The agents are rebuilt when the
+   pinned build is of the other channel, when the release's MeshAgent commit is
+   not the commit of the pinned build, or when its hook commit is not the hook
+   commit that built it (recorded in the pin commit, see step 3; a pin without
+   that record counts as changed). Production follows `AGENT_BUILD_POLICY`: with
+   `keep-pinned` it always reuses the pinned build, and stops with a named reason
+   if MeshCentral main pins a preview build (for example after merging MeshCentral
+   preview into main); the preview channel always rebuilds on change. A reused
+   build is fetched from its hook release and checked against the pins, never
+   rebuilt. A rebuild runs the x86/x64/ARM64 matrix for the channel's agent
+   variant (`MESHAGENT_CHANNEL` / `/p:MeshAgentChannel`; preview builds also run
+   `test/preview_channel_identity_contract.js`, so a MeshAgent commit without the
+   preview variant fails instead of building production identities), with the
+   channel's own branding and provisioning secrets, runtime validation when
+   enabled (production only: the validation server is production's), both
+   release gates, and publishes the gate-verified build as a hook release named
+   for its channel: `meshagent-<commit>-<pins hash>` for production,
+   `meshagent-preview-<commit>-<pins hash>` for preview (see
+   [Fork agent binaries in the MeshCentral package](#fork-agent-binaries-in-the-meshcentral-package)).
+3. **Pin and lock (`pin-release`, on Linux).** The channel's MeshCentral branch
+   must pin the build that ships and lock the tarball of a Linux pack.
+   `release_pins.py relock --channel <channel>` packs with `pack.js --agents` on
+   Node 24.22.1 and makes at most two commits, authored by the release app's bot
+   account:
+   - for a new build, `agents/agent-defaults.json` from the gate's
+     `meshcentral-agent-defaults.json`, with the trailers `Agent-Build-Release`
+     (the hook release tag), `Agent-Build-MeshAgent`, `Agent-Build-Runtime` (the
+     hook commit that built it), `Release-Pipeline-Run` and
+     `Release-Pipeline-Channel`;
+   - when the tarball differs from the one `deploy/package-lock.json` pins, a
+     lock commit that changes only the `node_modules/meshcentral` integrity
+     (trailers `Release-Pipeline-Lock`, `Release-Pipeline-Run`,
+     `Release-Pipeline-Channel`). A change to the package's dependencies,
+     version, `bin`, `engines` or license is refused: lock it with npm on Linux in
+     a reviewed MeshCentral commit.
+
+   The pin commit is packed first, so it dates the agent modules; the lock commit
+   is outside the package, and the tool packs again at it and requires the same
+   tarball. After checking that no source head of the channel moved, the job
+   pushes the commits to the channel's MeshCentral branch as a fast-forward of the
+   resolved commit (if the branch moved, the push is refused and the run fails)
+   and the run ends. A preview release whose MeshCentral fell back to main creates
+   MeshCentral `preview` with this push; preview pins never go to MeshCentral
+   main. That push starts the release that ships the commits, which finds pins
+   and lock consistent and commits nothing.
+4. **Image.** Only when nothing was committed. The image is built from the
+   MeshCentral commit and the pinned builds fetched from hook (see
+   [Image build context](#image-build-context)), smoke-tested by digest, and
+   labelled with the three source commits, the agent-build release and the
+   channel. The job writes the digest, the agent build, the fleet statement and,
+   for production, the exact `deploy_digest` and `fleet_update` values to start
+   the deployment with, to the run summary.
+5. **Preview deployment.** A preview build with the hook variable
+   `PREVIEW_AUTO_DEPLOY=true` continues in `deploy-preview` (environment
+   `preview`): it refuses sources that are no longer the channel's heads, then
+   promotes the digest with the controller's `deploy-preview` command
+   (`send_release.py` with `RELEASE_CHANNEL=preview`). A production build never
+   deploys.
+
+**Production deployment is a deploy run.** GitHub refuses required reviewers on
+environments of a private repository on hook's plan, so the approval is an
+explicit operator action: run the workflow manually on `main` with
+`deploy_digest` set to the digest a build run of the current heads published,
+and `fleet_update` set to `unchanged` or `changed` as that run stated. The run
+refuses requests started by an app (`[bot]` triggering actor), malformed
+digests and missing confirmations. `verify-requested-image` pulls the digest and
+`release_pins.py confirm` requires its labels to name this coordinator, the
+production channel, exactly the current MeshAgent, MeshCentral and hook heads, and
+the pinned agent build, and the confirmation to match the plan's fleet statement
+(`unknown`, when no production deployment of this pipeline is recorded, must be
+confirmed as `changed`); the exact image is smoke-tested again. Only then does
+`deploy-production` run in the `production` environment (deployment branches:
+`main`), re-check the heads and promote the digest with the controller's `deploy`
+command. The environment URL records the deployed MeshCentral commit. A manual
+run on `preview` with `deploy_digest` deploys that digest to the preview server
+the same way. If the plan is upgraded to one that offers environment reviewers,
+a required reviewer can be added to `production` on top of this; nothing else
+changes.
+
+The pipeline never writes MeshAgent or hook, and writes MeshCentral only with pin
+and lock commits that record their inputs and channel. `relock` refuses to pin a
+second build of the MeshAgent and hook commits for the same channel over its own
+pipeline pin, and refuses to re-lock over its own lock commit when the Linux pack
+does not reproduce. A release started by a pipeline commit therefore commits
+nothing, or stops and names the reason; deployments push nothing. Every missing
+setting, moved head, pin or lock mismatch, and gate failure stops the run; no job
+continues on error except the two failure-log uploads.
+
+GitHub concurrency coalesces requests per channel (deploy runs queue apart from
+build runs): a newer request replaces a queued one, and a running release is
+never cancelled. A deploy run whose sources were superseded stops at the image
+check or the source check; deploy the digest of the newer build instead.
+
+**Fleet statement.** `plan` compares the agent build pinned at the release's
+MeshCentral commit with the build pinned at the MeshCentral commit of the
+channel's last successful deployment (read from the `production` or `preview`
+environment URL). The run summary and a warning annotation say "FLEET UPDATE"
+when they differ, and "unknown" when no deployment of this pipeline is recorded.
+A changed build is a fleet rollout: the controller's existing
+`enable_fleet_update` policy decides whether connected agents are offered it (see
+the controller section). With `AGENT_BUILD_POLICY=rebuild-on-change`, every
+MeshAgent or hook push leads to a new build and therefore a fleet update when
+deployed.
 
 Production builds require real provisioning. Authenticode signing follows the
 existing branding policy; this installation currently permits unsigned agents.
@@ -61,12 +181,18 @@ location" in [testing](testing/README.md)), not the fork. In order:
 ### GitHub configuration
 
 Create a GitHub App installed only on MeshAgent, MeshCentral, and hook, with
-Contents read/write (dispatch requires write). Store its private key as
-`RELEASE_APP_PRIVATE_KEY` and its App ID as `RELEASE_APP_ID` in each repository.
-The coordinator requests read-only, short-lived installation tokens; sibling
-dispatch jobs request write access only to hook. No personal access token
-is needed for cross-repository dispatch. PR builds do not receive App, provisioning, signing, or live runtime-test credentials;
-private sibling builds require a trusted branch run.
+Contents read/write (dispatch to hook and the pin/lock push to MeshCentral
+require write). Store its private key as `RELEASE_APP_PRIVATE_KEY` and its App ID
+as `RELEASE_APP_ID` in each repository. Every token is a short-lived
+installation token limited to the repositories and permission one step needs:
+the dispatch jobs of MeshAgent and MeshCentral write hook only; the coordinator
+reads all three, and only its `pin-release` job mints a token that writes
+MeshCentral. The app has no Actions permission, so it cannot start a deploy run
+(and resolve refuses a `[bot]` triggering actor regardless). A missing variable,
+secret or installation fails the job and names it; no job falls back to another
+token. No personal access token is needed. PR builds do not receive App,
+provisioning, signing, or live runtime-test credentials; private sibling builds
+require a trusted branch run.
 
 One exception reads, never writes: MeshAgent's `contracts.yml` mints a
 short-lived token with Contents read on hook only, on every push and pull
@@ -77,30 +203,69 @@ Runs that GitHub gives no repository secrets, such as pull requests from forks
 and Dependabot, fail at "Check the agent-build store credential" and name the
 missing setting.
 
-Configure the private hook repository:
+MeshAgent and MeshCentral each need the `RELEASE_APP_ID` repository variable and
+the `RELEASE_APP_PRIVATE_KEY` repository secret; their dispatch job fails with
+"Release dispatch" when either is missing. Configure the private hook repository:
 
 | Setting | Location | Purpose |
 | --- | --- | --- |
-| `AUTO_DEPLOY=true` | Repository variable | Enable automatic default-branch deployment after setup |
+| `AGENT_BUILD_POLICY` | Repository variable, required | Production: `keep-pinned` (reuse the build MeshCentral pins) or `rebuild-on-change` (rebuild when MeshAgent or hook moved since it). Preview always rebuilds on change |
+| `PREVIEW_AUTO_DEPLOY` | Repository variable | `true` once the preview server exists: preview builds deploy automatically. Anything else: preview builds stop after the image |
 | `RELEASE_APP_ID` | Repository variable | GitHub App ID |
 | `RELEASE_APP_PRIVATE_KEY` | Repository secret | App authentication |
-| `BRANDING_CONFIG_JSON`, `PROVISIONING_MSH` | Repository secrets | Real native build/provisioning inputs |
+| `BRANDING_CONFIG_JSON`, `PROVISIONING_MSH` | Repository secrets | Production agents' native build/provisioning inputs |
+| `PREVIEW_BRANDING_CONFIG_JSON`, `PREVIEW_PROVISIONING_MSH` | Repository secrets | Preview agents' inputs (preview server URL and its certificate hash); a preview rebuild fails and names them when missing, never falling back to production's |
 | `CODE_SIGN_PFX_BASE64`, `CODE_SIGN_PASSWORD` | Repository secrets | Optional Authenticode signing when configured |
 | `CODE_SIGN_TIMESTAMP_URL` | Optional repository secret | Timestamp service override |
-| `SSH_HOST`, `SSH_PORT`, `SSH_USER` | `production` environment secrets | VPS route; user is the restricted `meshdeploy` account |
-| `SSH_PRIVATE_KEY` | `production` environment secret | Dedicated deployment key, not an administrator's personal key |
-| `SSH_KNOWN_HOSTS` | `production` environment secret | Host key verified out of band, including `[host]:port` for nonstandard ports |
+| `SSH_HOST`, `SSH_PORT`, `SSH_USER`, `SSH_KNOWN_HOSTS` | Secrets of the `production` and of the `preview` environment | VPS route (same host); user is the restricted `meshdeploy` account; host key verified out of band, including `[host]:port` for nonstandard ports |
+| `SSH_PRIVATE_KEY` | `production` environment secret | The production CI key, whose `authorized_keys` forced command allows `deploy` only (`meshcentral-ci-entry --only production`) |
+| `SSH_PRIVATE_KEY` | `preview` environment secret | A second key, forced command `meshcentral-ci-entry --only preview`: allows `deploy-preview` only |
 
-Protect the default branches and the `production` environment against arbitrary
-branch deployments. Require review for changes to workflows, deployment tools,
-source maps, and dependencies. Environment reviewers are optional for fully
-automatic releases; branch restrictions are not. Keep the GHCR
+The deploy secrets must be environment secrets, never repository secrets: any
+workflow of any hook branch can read repository secrets, while an environment's
+secrets reach only jobs that the environment's branch policy admits. Create the
+environments:
+
+- `production`: deployment branches `main` only. It cannot have a required
+  reviewer on this plan; the operator's deploy run (above) is the approval.
+- `preview`: deployment branches `main` and `preview` (dispatched preview
+  releases run hook main's workflow). No reviewer: preview deploys automatically.
+
+Two keys matter because preview deploys without anyone's action and the
+`preview` environment is reachable from the `preview` branch: with one shared key
+accepting both commands, a workflow change pushed to hook `preview` could send
+`deploy sha256:<digest>` to production. With the preview key limited to
+`deploy-preview`, the production key exists only in the `production`
+environment, which only `main` can use.
+
+Protect the default branches against force pushes and deletion, and require
+review for changes to workflows, deployment tools, source maps, and
+dependencies. Only the operator should hold write access to hook: anyone who can
+push to hook `main` can change the deploy run itself.
+
+The pipeline pushes its pin and lock commits straight to the channel's
+MeshCentral branch (`main` or `preview`; fast-forward only, unsigned, authored by
+the app's bot account). If that branch is protected by a branch rule or ruleset
+that requires pull requests, signed commits, or status checks, add the release
+app, and only it, to that rule's bypass list; keep force pushes and deletions
+blocked for everyone. A push the rule refuses fails `pin-release` and is not
+retried. Merging MeshCentral `preview` into `main` brings the preview pins along:
+restore main's pins in the merge, or let a `rebuild-on-change` production release
+rebuild (under `keep-pinned` the release stops and says so).
+
+Keep `AGENT_BUILD_POLICY=keep-pinned` through the first fork release, so the
+cutover serves the builds production already runs and offers the fleet nothing
+new. Switching to `rebuild-on-change` makes the next MeshAgent or hook push, and
+every later one, a new pinned build and a fleet update when deployed. Making
+hook's releases immutable (repository setting) keeps every pinned build
+unchangeable. Keep the GHCR
 `meshcentral-release` package private because it contains provisioned agents.
-The deploy job forwards its short-lived, package-read GitHub token over SSH stdin.
+The deploy jobs forward their short-lived, package-read GitHub token over SSH stdin.
 Systemd supplies it as a private service credential; Docker login state is
 temporary and removed after the pull. No persistent registry token is required. Optional destructive
 runtime validation still requires approved test endpoints and its existing
-runtime secrets; if requested, its failure blocks promotion.
+runtime secrets; if requested, it runs for a new production agent build and its
+failure blocks pinning that build, so the build never reaches promotion.
 
 ### VPS controller installation
 
@@ -316,8 +481,12 @@ token from `AGENT_BUILDS_TOKEN` and never prints it.
   It verifies every file against the pins first, uploads to a draft, publishes
   it, then fetches it back and verifies it. A failed upload deletes the draft. A
   release that already exists for the same pins is verified, never replaced.
-  Pin a build in MeshCentral only from its published release's
-  `meshcentral-agent-defaults.json`, so every pin can be fetched.
+  The coordinated release then pins the published build in MeshCentral itself
+  (`pin-release`, see [Coordinated GitHub releases](#coordinated-github-releases)).
+  Pin a build by hand only from its published release's
+  `meshcentral-agent-defaults.json`, so every pin can be fetched; a pin made by
+  hand has no pipeline record, so under `AGENT_BUILD_POLICY=rebuild-on-change`
+  the next release rebuilds.
 - **Fetch.** `python tools/deployment/agent_build_release.py fetch --store hira-edu/hook
   --pins <MeshCentral>/agents/agent-defaults.json --output <new folder>` writes a
   file only after its size and SHA384 match the pin. A missing release or asset,
@@ -590,7 +759,10 @@ release. In order, on the VPS, as root:
    (`meshcentral_shadow_check.py --root /opt/meshcentral --manifest <manifest>`)
    until it passes; the promotion runs the same check, and the configuration path
    check, before stopping anything.
-8. Deploy the image digest. On success the controller moves the host's
+8. Deploy the image digest: run hook's coordinated release manually on `main`
+   with the `deploy_digest` and `fleet_update` its last green build run
+   published (the first deployment of this pipeline states the fleet as
+   unknown, so `fleet_update` is `changed`). On success the controller moves the host's
    `harden-image-size.js` and `30-harden-image-size.conf` to
    `/var/lib/meshcentral-deploy/retired-host-preload/<stamp>/` and reloads
    systemd; the deployment log names both files with their sha256.

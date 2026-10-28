@@ -136,6 +136,15 @@ class PinsTests(Fixture):
         build, pins = TOOL.parse_pins(pins_document(rebuilt), 'rebuild')
         self.assertNotEqual(TOOL.release_tag(build, pins), self.tag)
 
+    def test_preview_builds_have_their_own_tag_namespace(self):
+        preview = TOOL.release_tag(self.build, self.pins, 'preview')
+        self.assertRegex(preview, r'^meshagent-preview-' + COMMIT + r'-[0-9a-f]{16}$')
+        # Same pins hash; only the prefix names the channel, and production's tag is unchanged.
+        self.assertEqual(preview.rsplit('-', 1)[1], self.tag.rsplit('-', 1)[1])
+        self.assertEqual(TOOL.release_tag(self.build, self.pins, 'production'), self.tag)
+        with self.assertRaisesRegex(TOOL.AgentBuildError, 'unknown build channel'):
+            TOOL.release_tag(self.build, self.pins, 'staging')
+
     def test_invalid_pins_are_refused(self):
         cases = {
             'pins no agent binary': dict(pins_document(), build=None, files=[]),
@@ -274,6 +283,22 @@ class CommandLineTests(Fixture):
             status = TOOL.main(argv, environ, store_factory=lambda repository, token: store)
         self.stdout = stdout.getvalue()
         return status, stderr.getvalue()
+
+    def test_channels_never_fetch_each_others_release(self):
+        store = FakeStore()
+        tag = TOOL.publish(store, self.build, self.pins, self.build_folder(), log=self.log, channel='preview')
+        self.assertTrue(tag.startswith('meshagent-preview-'))
+        TOOL.fetch(store, self.build, self.pins, self.root / 'preview', log=self.log, channel='preview')
+        with self.assertRaisesRegex(TOOL.AgentBuildError, 'has no release ' + self.tag + ' for the pinned production'):
+            TOOL.fetch(store, self.build, self.pins, self.root / 'production', log=self.log)
+        environ = {TOOL.TOKEN_VARIABLE: TOKEN}
+        pins = self.write_pins(pins_document())
+        status, error = self.run_main(['fetch', '--store', STORE, '--pins', str(pins), '--output', str(self.root / 'cli'),
+                                       '--channel', 'preview'], environ, store)
+        self.assertEqual((status, error), (0, ''))
+        with self.assertRaises(SystemExit):
+            self.run_main(['fetch', '--store', STORE, '--pins', str(pins), '--output', str(self.root / 'bad'),
+                           '--channel', 'staging'], environ, store)
 
     def test_failure_is_annotated_under_github_actions(self):
         pins = self.write_pins(pins_document())

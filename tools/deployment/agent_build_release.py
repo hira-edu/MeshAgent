@@ -3,18 +3,24 @@
 MeshCentral pins the fork's Windows service builds in agents/agent-defaults.json (schema
 meshcentral-fork-agents/1: the MeshAgent build commit plus size and SHA384 per file). The binaries are
 provisioned, so they never enter the public MeshAgent or MeshCentral git history; they are stored as
-assets of a release in the private hook repository. The release tag is derived from the pins alone:
+assets of a release in the private hook repository. The release tag is derived from the pins and the
+build channel (MESHAGENT_CHANNEL of the build: production, or preview for the agent variant whose
+machine-wide identities are suffixed so it coexists with a production agent):
 
-    meshagent-<build commit>-<first 16 hex of the SHA256 of the canonical pins>
+    production  meshagent-<build commit>-<first 16 hex of the SHA256 of the canonical pins>
+    preview     meshagent-preview-<build commit>-<first 16 hex of the SHA256 of the canonical pins>
 
-so every pinned build has exactly one release, a rebuild of the same commit gets its own, and a reader
-holding only agents/agent-defaults.json knows where its bytes are. The release carries each pinned file
+so every pinned build has exactly one release, a rebuild of the same commit gets its own, the two
+channels' releases never share a tag, and a reader holding agents/agent-defaults.json and knowing its
+channel (MeshCentral main = production, MeshCentral preview = preview) knows where its bytes are. The release carries each pinned file
 under its pinned name plus meshcentral-agent-defaults.json (the pins).
 
     python tools/deployment/agent_build_release.py fetch --store hira-edu/hook \
-        --pins <MeshCentral>/agents/agent-defaults.json --output <empty folder>
+        --pins <MeshCentral>/agents/agent-defaults.json --output <empty folder> [--channel preview]
     python tools/deployment/agent_build_release.py publish --store hira-edu/hook \
-        --pins <meshcentral-agent-defaults.json> --directory <folder with the pinned files>
+        --pins <meshcentral-agent-defaults.json> --directory <folder with the pinned files> [--channel preview]
+
+--channel defaults to production.
 
 The token comes from AGENT_BUILDS_TOKEN (contents read for fetch, contents write for publish) and is
 never printed. fetch writes a file only after its size and SHA384 match the pin; any missing release,
@@ -45,6 +51,8 @@ CHUNK = 1024 * 1024
 MAX_FILE_SIZE = 512 * 1024 * 1024
 SAFE_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
 STORE_NAME = re.compile(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')
+CHANNELS = ('production', 'preview')
+TAG_PREFIX = {'production': 'meshagent-', 'preview': 'meshagent-preview-'}
 
 
 class AgentBuildError(Exception):
@@ -109,9 +117,11 @@ def canonical_pins(build, pins):
     return {'schema': SCHEMA, 'build': dict(build), 'files': [dict(pin) for pin in pins]}
 
 
-def release_tag(build, pins):
+def release_tag(build, pins, channel='production'):
+    if channel not in TAG_PREFIX:
+        raise AgentBuildError(f'unknown build channel {channel!r}; expected one of {", ".join(CHANNELS)}')
     text = json.dumps(canonical_pins(build, pins), sort_keys=True, separators=(',', ':'))
-    return f'meshagent-{build["commit"]}-{hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]}'
+    return f'{TAG_PREFIX[channel]}{build["commit"]}-{hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]}'
 
 
 def pins_asset_bytes(build, pins):
@@ -234,16 +244,16 @@ def _describe(build, tag, store):
     return f'{build["repository"]} {build["commit"]} (release {tag} in {store.repository})'
 
 
-def fetch(store, build, pins, output, log=print):
+def fetch(store, build, pins, output, log=print, channel='production'):
     """Download every pinned file into output (new or empty) and verify it; returns the release tag."""
-    tag = release_tag(build, pins)
+    tag = release_tag(build, pins, channel)
     output = Path(output)
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise AgentBuildError(f'output folder {output} must be new or empty')
     store.check_access()
     release = store.release(tag)
     if release is None:
-        raise AgentBuildError(f'{store.repository} has no release {tag} for the pinned build '
+        raise AgentBuildError(f'{store.repository} has no release {tag} for the pinned {channel} build '
                               f'{build["repository"]} {build["commit"]}; publish it with '
                               f'"agent_build_release.py publish" from the build the pins were taken from')
     if release.get('draft'):
@@ -297,13 +307,13 @@ def fetch(store, build, pins, output, log=print):
     return tag
 
 
-def _verify_round_trip(store, build, pins, log):
+def _verify_round_trip(store, build, pins, log, channel):
     with tempfile.TemporaryDirectory(prefix='agent-builds-verify-') as folder:
-        fetch(store, build, pins, Path(folder) / 'fetched', log=lambda _message: None)
+        fetch(store, build, pins, Path(folder) / 'fetched', log=lambda _message: None, channel=channel)
     log('verified the published release by fetching it back')
 
 
-def publish(store, build, pins, directory, log=print):
+def publish(store, build, pins, directory, log=print, channel='production'):
     """Store the pinned files from directory as the release for these pins; returns the release tag."""
     directory = Path(directory)
     problems = []
@@ -313,14 +323,14 @@ def publish(store, build, pins, directory, log=print):
             problems.append(f'{directory / pin["filename"]}: {problem}')
     if problems:
         raise AgentBuildError('the local files do not match the pins:\n' + '\n'.join(problems))
-    tag = release_tag(build, pins)
+    tag = release_tag(build, pins, channel)
     store.check_access()
     if store.release(tag) is not None:
         log(f'{store.repository} already has release {tag}; verifying it instead of replacing it')
-        _verify_round_trip(store, build, pins, log)
+        _verify_round_trip(store, build, pins, log, channel)
         return tag
-    title = f'MeshAgent build {build["commit"][:12]}'
-    notes = '\n'.join([f'Windows service builds of {build["repository"]} {build["commit"]}, pinned by '
+    title = f'MeshAgent {"preview " if channel == "preview" else ""}build {build["commit"][:12]}'
+    notes = '\n'.join([f'{channel.capitalize()} Windows service builds of {build["repository"]} {build["commit"]}, pinned by '
                        f'MeshCentral agents/agent-defaults.json as in {PINS_ASSET}.', ''] +
                       [f'- `{pin["filename"]}` {pin["size"]} bytes, SHA384 `{pin["sha384"]}`' for pin in pins])
     draft = store.create_draft(tag, title, notes)
@@ -347,7 +357,7 @@ def publish(store, build, pins, directory, log=print):
                                   f'({cleanup}); delete it in {store.repository}') from None
         raise
     log(f'Published {len(pins)} pinned builds of {_describe(build, tag, store)}')
-    _verify_round_trip(store, build, pins, log)
+    _verify_round_trip(store, build, pins, log, channel)
     return tag
 
 
@@ -366,6 +376,8 @@ def main(argv=None, environ=None, store_factory=GitHubStore):
     for sub in (fetch_parser, publish_parser):
         sub.add_argument('--store', required=True, help='private repository holding the builds (owner/name)')
         sub.add_argument('--pins', required=True, help='a meshcentral-fork-agents/1 manifest')
+        sub.add_argument('--channel', choices=CHANNELS, default='production',
+                         help='build channel of the pinned files (names the release tag)')
     args = parser.parse_args(argv)
     try:
         build, pins = load_pins(args.pins)
@@ -375,9 +387,9 @@ def main(argv=None, environ=None, store_factory=GitHubStore):
                                   f'(fetch) or write (publish) the releases of {args.store}')
         store = store_factory(args.store, token.strip())
         if args.command == 'fetch':
-            fetch(store, build, pins, args.output)
+            fetch(store, build, pins, args.output, channel=args.channel)
         else:
-            publish(store, build, pins, args.directory)
+            publish(store, build, pins, args.directory, channel=args.channel)
     except AgentBuildError as error:
         message = f'agent builds: {error}'
         print(message, file=sys.stderr)
