@@ -403,21 +403,8 @@ that account's GitHub authentication with the minimum repository permissions.
 Edit source there, commit to a branch, push, and merge through the same required
 checks as workstation changes. A default-branch push automatically requests the
 coordinated release. Changes to the running read-only image are not supported.
-
-For the existing manual installation, export the supported tracked source map
-before migration. This reads only explicit JavaScript/plugin/public override
-paths; it never exports production config, certificates, databases, manifests,
-or uploaded files:
-
-```powershell
-python tools/export_vps_source.py --output artifacts/validation/vps-source-review
-```
-
-Review the exported differences in a MeshCentral branch and push that branch to
-GitHub. The export does not silently overwrite a checkout or auto-commit server
-content. Changes outside the supported source map need an explicit reviewed
-addition to the package/source map; blindly mirroring `/opt/meshcentral` is not
-a safe source synchronization mechanism.
+Do not mirror `/opt/meshcentral` back into a checkout; it is not a safe source
+synchronization mechanism.
 
 On the workstation or VPS source checkout, pull the sibling repositories through
 GitHub with:
@@ -775,6 +762,20 @@ When anything is missing, the command fails and names it. There is no remote
 fallback, and the login key is held only in a local temporary file that is
 deleted afterwards. `--dry-run` lists the online targets without submitting
 updates; it still fetches the login key over SSH.
+
+After submitting, the command watches for `--wait-seconds` (default 90) for
+each targeted agent to reconnect. It succeeds only when every targeted agent
+reconnected. Agents still pending at the end are listed, and the command exits
+with status 1. `--wait-seconds 0` only submits the update and does not watch.
+
+`--native-activate` is a break-glass repair and is off by default. For each
+pending agent it looks for a staged `*.update.exe` payload, writes
+`deploy-activate.ini` in the lifecycle state directory, and runs the installed
+service DLL's `MeshLifecycleHostW` through `rundll32` with a remote command. It
+then watches again for `--activation-wait-seconds` (default 180). Use it only
+for an agent whose own update has stalled. The fix for a stalled update belongs
+in the agent's update path. Agents still pending after the repair also fail
+the command.
 
 ## macOS release
 
