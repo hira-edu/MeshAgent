@@ -15,7 +15,7 @@ const scriptsDir = path.join(meshcentralRoot(), 'public', 'scripts');
 // upstream package is checked separately, hunk by hunk, by meshcentral_upstream_base_contract.js,
 // so an upstream change stays visible there.
 const viewsDir = path.join(meshcentralRoot(), 'views');
-const PINNED_MESHCENTRAL = '1.2.5';
+const PINNED_MESHCENTRAL = '1.3.1';
 
 function hex(packet) { return packet.map(b => b.toString(16).padStart(2, '0')).join(''); }
 
@@ -311,7 +311,8 @@ const EXPECTED = {
         scrollOffset: ['0002000a000000320050'],
         swapped: ['0002000a000800140028', '0002000a001000140028'],
         reversedWheel: ['0002000c000000140028ff87'],
-        rotatedMove: ['0002000a0000000f0035'],
+        // #8089 (1.3.0): a rotated view maps the pointer back to desktop coordinates, as amt-desktop does.
+        rotatedMove: ['0002000a000000350249'],
         viewOnly: []
     },
     'default3': {

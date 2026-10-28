@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { meshcentralRoot } = require('./lib/meshcentral_paths');
 
-const PINNED_MESHCENTRAL = '1.2.5';
+const PINNED_MESHCENTRAL = '1.3.1';
 // The fork's own package source: since Stage 2 the fork serves its own views (the production
 // overrides are retired, D16, and #8104 is a fork commit). How these files differ from the pinned
 // upstream package is checked separately, hunk by hunk, by meshcentral_upstream_base_contract.js,
