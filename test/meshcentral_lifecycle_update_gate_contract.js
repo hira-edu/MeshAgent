@@ -8,6 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
 const { forkFile } = require('./lib/meshcentral_paths');
+const { readArchitectureTable } = require('./lib/meshcentral_architecture_table');
 
 function read(filePath) {
     return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
@@ -30,19 +31,8 @@ const server = read(forkFile('meshagent.js'));
 const agentcore = read(path.join(repo, 'meshcore', 'agentcore.c'));
 const agentcoreHeader = read(path.join(repo, 'meshcore', 'agentcore.h'));
 
-// The architecture table the Windows helpers derive from (SRV-10), read from the fork's meshcentral.js.
-function readArchitectureTable() {
-    const source = read(forkFile('meshcentral.js'));
-    const signature = 'obj.meshAgentsArchitectureNumbers = {';
-    const start = source.indexOf(signature);
-    assert(start >= 0, 'meshcentral.js must define meshAgentsArchitectureNumbers');
-    let depth = 0;
-    for (let i = start + signature.length - 1; i < source.length; ++i) {
-        if (source[i] === '{') depth++;
-        if (source[i] === '}' && --depth === 0) return new Function('return ' + source.slice(start + signature.length - 1, i + 1) + ';')();
-    }
-    throw new Error('unterminated meshAgentsArchitectureNumbers');
-}
+// The architecture table the Windows helpers derive from (SRV-10): the fork's agenttypes.js, which
+// meshcentral.js loads (MeshCentral 1.3.1).
 const meshAgentsArchitectureNumbers = readArchitectureTable();
 
 // Agent side: the facts the gate relies on.

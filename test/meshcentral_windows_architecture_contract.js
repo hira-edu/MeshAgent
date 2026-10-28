@@ -1,6 +1,6 @@
 'use strict';
 // SRV-10 (S10): meshagent.js decides which agents are Windows agents, and which of those are service
-// agents, from MeshCentral's architecture table (meshAgentsArchitectureNumbers in meshcentral.js), not
+// agents, from MeshCentral's architecture table (meshAgentsArchitectureNumbers, agenttypes.js since 1.3.1), not
 // from a second hand-kept id list. Windows agents are the win32 entries; service agents are the
 // MeshService binaries among them. Id 34 is the MeshCentral Assistant (platform 'assistant'), not a
 // Windows agent. The update gate, the native update route and agentupdate requests use these sets.
@@ -8,6 +8,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const { forkFile } = require('./lib/meshcentral_paths');
+const { readArchitectureTable } = require('./lib/meshcentral_architecture_table');
 
 function read(filePath) { return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n'); }
 
@@ -24,7 +25,7 @@ function extractBraced(source, signature) {
 }
 
 const server = read(forkFile('meshagent.js'));
-const architectures = new Function('return ' + extractBraced(read(forkFile('meshcentral.js')), 'obj.meshAgentsArchitectureNumbers = {').replace('obj.meshAgentsArchitectureNumbers = ', '') + ';')();
+const architectures = readArchitectureTable(); // agenttypes.js, as meshcentral.js loads it (MeshCentral 1.3.1)
 const helpers = new Function('parent', [
     extractBraced(server, 'function isWindowsServiceAgentArchitecture(agentId)'),
     extractBraced(server, 'function isWindowsAgentArchitecture(agentId)'),
