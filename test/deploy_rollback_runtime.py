@@ -10,7 +10,19 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from deploy_fake_remote import DeployFixture, deploy, deploy_args, rollback_args, run_quiet  # noqa: E402
 
-NEW_IN_RELEASE = "modules_meshcore/clipboard.js"
+# The release adds an agent payload the server lacks. MeshCentral files are refused since Stage 1,
+# so the seeded MeshCentral copies must come through every deploy and rollback untouched.
+NEW_IN_RELEASE = "service_bundle.dll"
+NEW_ROLES = ("signed", "module")
+
+
+def added_paths():
+    return [deploy.get_publish_path(role, NEW_IN_RELEASE) for role in NEW_ROLES]
+
+
+def meshcentral_paths():
+    return [deploy.get_core_publish_path(role, relative)
+            for relative, roles in DeployFixture.CORE.values() for role in roles]
 
 
 def diff(before, after):
@@ -25,6 +37,10 @@ def deploy_release(fixture, adds_files=True):
     fixture.stage()
     ok, output = run_quiet(deploy.cmd_deploy, deploy_args())
     assert ok is True, output
+    assert "[REFUSED]" in output and deploy.MESHCENTRAL_PUBLISH_DOC in output, output
+    after = fixture.remote.snapshot()
+    for path in meshcentral_paths():
+        assert after[path] == before[path], f"refused MeshCentral file changed: {path}"
     return before
 
 
@@ -36,16 +52,13 @@ def test_backup_records_every_target_including_absent():
         entries = {entry["path"]: entry for entry in manifest["entries"]}
         assert manifest["schema"] == deploy.BACKUP_MANIFEST_SCHEMA
 
-        added = [
-            deploy.get_core_publish_path(role, NEW_IN_RELEASE)
-            for role in ("data-core", "module-core")
-        ]
+        added = added_paths()
         for path in added:
             assert entries[path] == {"path": path, "state": "absent"}, entries[path]
         for path in deploy.get_stray_agent_payload_paths():
             assert entries[path]["state"] == "absent"
         for path, data in before.items():
-            if path == deploy.CONFIG_FILE:
+            if path == deploy.CONFIG_FILE or path in meshcentral_paths():
                 continue
             entry = entries[path]
             assert entry["state"] == "present", entry
@@ -53,7 +66,9 @@ def test_backup_records_every_target_including_absent():
             assert copy == data, path
             assert entry["size"] == len(data)
         assert deploy.CONFIG_FILE not in entries
-        assert set(entries) == set(before) - {deploy.CONFIG_FILE} | set(added) | set(deploy.get_stray_agent_payload_paths())
+        # The release touches agent folders only; the refused MeshCentral files are not part of it.
+        expected = set(before) - {deploy.CONFIG_FILE} - set(meshcentral_paths())
+        assert set(entries) == expected | set(added) | set(deploy.get_stray_agent_payload_paths())
 
 
 def test_restore_returns_every_path_to_its_recorded_state():
@@ -61,7 +76,7 @@ def test_restore_returns_every_path_to_its_recorded_state():
         before = deploy_release(fixture)
         after_deploy = fixture.remote.snapshot()
         assert diff(before, after_deploy), "the release changed nothing"
-        assert fixture.remote.exists(deploy.get_core_publish_path("module-core", NEW_IN_RELEASE))
+        assert all(fixture.remote.exists(path) for path in added_paths())
 
         # The restore needs only the backup: the local build and the artifact map are gone.
         fixture.remove_local_build()
@@ -107,7 +122,7 @@ def test_backup_refuses_an_existing_backup_directory():
         fixture.remote.write(f"{backup}/marker", "existing")
         agents = deploy.get_agent_publish_artifacts(deploy.get_present_local_artifacts())
         result, output = run_quiet(
-            deploy.backup_current_agents, backup, agents, [], deploy.get_present_local_core_artifacts()
+            deploy.backup_current_agents, backup, agents, [], []
         )
         assert result is None
         assert "backup directory already exists" in output, output
@@ -129,7 +144,7 @@ def test_rollback_after_a_successful_deploy():
 def test_rollback_removes_files_the_release_added():
     with DeployFixture() as fixture:
         before = deploy_release(fixture)
-        added = [deploy.get_core_publish_path(role, NEW_IN_RELEASE) for role in ("data-core", "module-core")]
+        added = added_paths()
         assert all(fixture.remote.exists(path) for path in added)
         # Rollback needs only the backup manifest, not the local build.
         fixture.remove_local_build()
@@ -177,9 +192,9 @@ def stage_release(fixture):
 def test_partial_publish_is_restored_automatically():
     with DeployFixture() as fixture:
         before = stage_release(fixture)
-        # Break the publish on the last core copy: every agent copy, meshagent.js and the new
-        # data-core module have already been written by then.
-        late_target = deploy.get_core_publish_path("module-core", NEW_IN_RELEASE)
+        # Break the publish on the last copy: every other agent copy and the new payload's signed
+        # copy have already been written by then.
+        late_target = deploy.get_publish_path(NEW_ROLES[-1], NEW_IN_RELEASE)
         fixture.remote.fail_cp_to(late_target[len(deploy.MESHCENTRAL_BASE):])
         ok, output = run_quiet(deploy.cmd_deploy, deploy_args())
         assert ok is False, output

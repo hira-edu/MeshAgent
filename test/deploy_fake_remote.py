@@ -342,10 +342,10 @@ class DeployFixture:
             raise RuntimeError("fixture hashagents refresh failed")
 
     def stage(self):
-        """Stage the local release on the fake server exactly as cmd_stage leaves it."""
+        """Stage the local release on the fake server exactly as cmd_stage leaves it: agent binaries
+        only, because MeshCentral files are refused (deploy.MESHCENTRAL_PUBLISH_REFUSAL)."""
         local_artifacts = deploy.get_present_local_artifacts()
-        core_artifacts = deploy.get_present_local_core_artifacts()
-        entries = deploy.get_agent_publish_artifacts(local_artifacts) + core_artifacts
+        entries = deploy.get_agent_publish_artifacts(local_artifacts)
         for entry in entries:
             self.remote.write(
                 f"{deploy.STAGING_DIR}/{deploy.get_staging_filename(entry)}",

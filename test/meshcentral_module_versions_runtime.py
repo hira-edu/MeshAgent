@@ -15,18 +15,11 @@ import meshcentral_paths  # noqa: E402
 spec = importlib.util.spec_from_file_location("deployment", root / "deploy.py")
 deployment = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(deployment)
-# The patches are checked on stock upstream: since Stage 1 the installed package is the fork,
-# whose committed meshcentral.js must already be upstream plus exactly these patches.
+# deploy.py's patch helpers (still used by tools/prepare_release_image.py and the duplicate's layout A,
+# which rebuilds production's loader) are checked on the pinned stock upstream loader.
 source = (meshcentral_paths.upstream_package_dir() / "meshcentral.js").read_text(encoding="utf-8")
 patched = deployment.align_proxy_certificate_sni(deployment.version_meshcentral_module_loader(source))
 assert deployment.version_meshcentral_module_loader(patched) == patched
-fork_bytes = meshcentral_paths.fork_file("meshcentral.js").read_bytes()
-fork_source = fork_bytes.decode("utf-8")
-assert deployment.align_proxy_certificate_sni(deployment.version_meshcentral_module_loader(fork_source)) == fork_source, \
-    "the fork meshcentral.js must already carry the module-version and SNI changes"
-# Production's copy was patched in two steps, so line endings on the patched lines differ.
-assert fork_source.replace("\r\n", "\n") == patched.replace("\r\n", "\n"), \
-    "the fork meshcentral.js must equal upstream plus exactly the module-version and SNI changes"
 older_versioned = re.sub(r"(?m)^\s*const preferredModule = moduleName[^\n]+\n\s*if \(modulesDir\[i\] !== preferredModule[^\n]+\n", "", patched, count=1)
 assert older_versioned != patched
 assert deployment.version_meshcentral_module_loader(older_versioned) == patched
@@ -84,51 +77,44 @@ for name in ("clipboard", "process-manager", "service-manager", "user-sessions",
     assert f"modules_meshcore/{name}.js" in deployment.CORE_ARTIFACTS
     assert f"modules_meshcore_min/{name}.min.js" in deployment.CORE_ARTIFACTS
 
-# Stage 1: deploy.py stages the fork's committed loader as is. Nothing is read from the server
-# to build it, and it may only replace a loader of the same package version.
-assert deployment.CORE_ARTIFACTS["meshcentral.js"]["local_path"] == "../MeshCentral/meshcentral.js"
+# Since Stage 1 deploy.py refuses every MeshCentral publish role before any SSH: the fork's loader
+# needs the release manifest only the packed tarball carries, and data-dir copies would be shadow
+# cores (D18). The map still declares the files; agent binaries are still published.
 assert deployment.CORE_ARTIFACTS["meshcentral.js"]["publish_targets"] == ("module-root",)
-assert not hasattr(deployment, "prepare_versioned_core_loader"), "the loader is no longer patched at stage time"
-fork_version = json.loads(meshcentral_paths.fork_file("package.json").read_text(encoding="utf-8"))["version"]
+assert not hasattr(deployment, "prepare_versioned_core_loader"), "the loader is not patched at stage time"
+assert deployment.MESHCENTRAL_PUBLISH_ROLES == frozenset(deployment.CORE_PUBLISH_ROLE_DIRS)
+refused = dict(deployment.declared_meshcentral_refusals())
+assert set(refused) == set(deployment.CORE_ARTIFACTS), "every declared MeshCentral file is refused"
+assert "Stage 4 tarball install" in deployment.MESHCENTRAL_PUBLISH_REFUSAL and "docs/DEPLOYMENT.md" in deployment.MESHCENTRAL_PUBLISH_REFUSAL
 
 
-def no_server(*unused):
-    raise AssertionError("building the staged loader must not contact the server")
+def no_server(*unused, **unused_keywords):
+    raise AssertionError("a refused MeshCentral publish must not contact the server")
 
 
 with tempfile.TemporaryDirectory() as temp:
-    local_repo, fork_repo = Path(temp) / "MeshAgent", Path(temp) / "MeshCentral"
-    local_repo.mkdir()
-    fork_repo.mkdir()
-    (fork_repo / "meshcentral.js").write_bytes(fork_bytes)
-    (fork_repo / "package.json").write_text(json.dumps({"name": "meshcentral", "version": fork_version}), encoding="utf-8")
-    deployment.LOCAL_REPO, deployment.LOCAL_MESHCENTRAL_REPO = local_repo, fork_repo
-    deployment.ssh_cmd = deployment.run_remote_process = no_server
-    entry = next(item for item in deployment.build_local_core_artifact_entries() if item["name"] == "meshcentral.js")
-    assert entry["present"] and Path(entry["local_path"]) == (fork_repo / "meshcentral.js").resolve()
-    assert entry["sha384"] == hashlib.sha384(fork_bytes).hexdigest()
-    assert entry["package_version"] == fork_version and "source_sha384" not in entry
-    assert deployment.build_stage_manifest_artifacts([entry])[0]["package_version"] == fork_version
-    # Status/deploy metadata must leave the staged bytes intact.
-    before = (fork_repo / "meshcentral.js").stat().st_mtime_ns
-    deployment.build_local_core_artifact_entries()
-    assert (fork_repo / "meshcentral.js").stat().st_mtime_ns == before
-    assert (fork_repo / "meshcentral.js").read_bytes() == fork_bytes
-    package_path = deployment.get_core_publish_path("module-root", "package.json")
+    staged = Path(temp) / "meshcentral.js"
+    staged.write_bytes(patched.encode("utf-8"))
+    entry = {"name": "meshcentral.js", "remote_filename": "meshcentral.js", "remote_relative_path": "meshcentral.js",
+             "staging_filename": "meshcentral.js", "local_path": str(staged), "present": True,
+             "publish_targets": ("module-root",), "size_bytes": staged.stat().st_size,
+             "sha384": hashlib.sha384(staged.read_bytes()).hexdigest()}
+    saved = {name: getattr(deployment, name) for name in ("ssh_cmd", "run_remote_process", "run_remote_script", "collect_remote_file_metadata")}
+    for name in saved:
+        setattr(deployment, name, no_server)
+    assert not deployment.publish_staged_payloads([], core_artifacts=[entry])
+    errors = deployment.verify_remote_core_publish([entry])
+    assert errors and deployment.MESHCENTRAL_PUBLISH_REFUSAL in errors[0], errors
+    state = deployment.get_core_publish_state([entry])
+    assert state[0]["refused"] is True and deployment.get_core_publish_state_errors(state) == []
+    # The agent-binary path still publishes, with no MeshCentral copy among its commands.
     writes = []
     deployment.run_remote_script = lambda commands: writes.append(commands) or "ok"
-    deployment.load_remote_json = lambda path: {"name": "meshcentral", "version": fork_version} if path == package_path else None
-    assert deployment.publish_staged_payloads([], core_artifacts=[entry])
-    assert writes, "a matching installed package version publishes the loader"
-    writes.clear()
-    for installed in ({"name": "meshcentral", "version": fork_version + "-other"}, {"name": "other", "version": fork_version}, None, []):
-        deployment.load_remote_json = lambda path, installed=installed: installed
-        assert not deployment.publish_staged_payloads([], core_artifacts=[entry])
-        assert not writes, f"installed package {installed!r} must stop before any payload mutation"
-    (fork_repo / "package.json").write_text("{", encoding="utf-8")
-    try:
-        deployment.build_local_core_artifact_entries()
-        raise AssertionError("an unreadable fork package version must abort staging")
-    except RuntimeError:
-        pass
+    agent = {"name": "MeshService64.exe", "remote_filename": "MeshService64.exe", "staging_filename": "MeshService64.exe",
+             "publish_targets": ("data", "signed", "module")}
+    assert deployment.publish_staged_payloads([agent], core_artifacts=[])
+    copies = [command for command in writes[0] if command.startswith("cp -f")]
+    assert len(copies) == 3 and all("MeshService64.exe" in command for command in copies), copies
+    for name, value in saved.items():
+        setattr(deployment, name, value)
 print("PASS source override deployment manifest and loader versioning")
