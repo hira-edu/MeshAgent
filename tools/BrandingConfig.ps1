@@ -95,6 +95,109 @@ function Resolve-BrandingConfigPath {
     throw "No branding configuration found. Create branding_config.local.json (preferred) or branding_config.json."
 }
 
+function Resolve-MeshAgentChannel {
+    param([Parameter()][string]$Channel)
+
+    if ([string]::IsNullOrWhiteSpace($Channel)) {
+        $Channel = [Environment]::GetEnvironmentVariable('MESHAGENT_CHANNEL')
+    }
+    if ([string]::IsNullOrWhiteSpace($Channel)) { $Channel = 'production' }
+    $Channel = $Channel.Trim().ToLowerInvariant()
+    if ($Channel -ne 'production' -and $Channel -ne 'preview') {
+        throw "unknown build channel '$Channel'; expected production or preview"
+    }
+    return $Channel
+}
+
+function script:Add-PreviewToken([string]$value, [string]$suffix) {
+    if ([string]::IsNullOrWhiteSpace($value)) { return $value }
+    return $value + $suffix
+}
+
+function script:Insert-PreviewBeforeExt([string]$name, [string]$token) {
+    if ([string]::IsNullOrWhiteSpace($name)) { return $name }
+    $dot = $name.LastIndexOf('.')
+    if ($dot -le 0) { return $name + $token }
+    return $name.Substring(0, $dot) + $token + $name.Substring($dot)
+}
+
+<#
+    Mirror of tools/generate_branding_assets.py apply_channel(). production leaves
+    the config untouched; preview derives a distinct, visibly-labelled identity.
+    Kept in lockstep with the Python generator (which is the build authority);
+    the identity contract test asserts the two agree.
+#>
+function ConvertTo-MeshAgentChannelConfig {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Config,
+
+        [Parameter()]
+        [string]$Channel = 'production'
+    )
+
+    $Channel = Resolve-MeshAgentChannel -Channel $Channel
+    if ($Channel -ne 'preview' -or $null -eq $Config) { return $Config }
+
+    $identity = '2'
+    $visible = ' (Preview)'
+    $product = ' Preview'
+
+    # Deep copy so the caller's object is untouched.
+    $cfg = ($Config | ConvertTo-Json -Depth 64) | ConvertFrom-Json
+
+    $b = Get-BrandingOptionalValue -Source $cfg -PropertyName 'branding'
+    if ($null -ne $b) {
+        if (-not [string]::IsNullOrWhiteSpace($b.serviceName)) { $b.serviceName = $b.serviceName + $identity }
+        if ($b.PSObject.Properties['displayName']) { $b.displayName = Add-PreviewToken $b.displayName $visible }
+        if ($b.PSObject.Properties['productName']) { $b.productName = Add-PreviewToken $b.productName $product }
+        if ($b.PSObject.Properties['description']) { $b.description = Add-PreviewToken $b.description $visible }
+        if ($b.PSObject.Properties['binaryName'] -and -not [string]::IsNullOrWhiteSpace($b.binaryName)) { $b.binaryName = Insert-PreviewBeforeExt $b.binaryName $identity }
+        if ($b.PSObject.Properties['serviceDllName'] -and -not [string]::IsNullOrWhiteSpace($b.serviceDllName)) { $b.serviceDllName = Insert-PreviewBeforeExt $b.serviceDllName $identity }
+
+        $oldRoot = $b.installRoot
+        if (-not [string]::IsNullOrWhiteSpace($oldRoot)) {
+            $newRoot = ($oldRoot.TrimEnd('/','\')) + $identity
+            $b.installRoot = $newRoot
+            if ($b.PSObject.Properties['logPath'] -and -not [string]::IsNullOrWhiteSpace($b.logPath)) {
+                if ($b.logPath -eq $oldRoot -or $b.logPath.StartsWith($oldRoot + '/') -or $b.logPath.StartsWith($oldRoot + '\')) {
+                    $b.logPath = $newRoot + $b.logPath.Substring($oldRoot.Length)
+                } else {
+                    $b.logPath = ($b.logPath.TrimEnd('/','\')) + $identity
+                }
+            }
+        }
+
+        $vi = Get-BrandingOptionalValue -Source $b -PropertyName 'versionInfo'
+        if ($null -ne $vi) {
+            if ($vi.PSObject.Properties['fileDescription']) { $vi.fileDescription = Add-PreviewToken $vi.fileDescription $visible }
+            if ($vi.PSObject.Properties['internalName'] -and -not [string]::IsNullOrWhiteSpace($vi.internalName)) { $vi.internalName = Insert-PreviewBeforeExt $vi.internalName $identity }
+            if ($vi.PSObject.Properties['originalFilename'] -and -not [string]::IsNullOrWhiteSpace($vi.originalFilename)) { $vi.originalFilename = Insert-PreviewBeforeExt $vi.originalFilename $identity }
+        }
+    }
+
+    $art = Get-BrandingOptionalValue -Source $cfg -PropertyName 'artifacts'
+    if ($null -ne $art) {
+        foreach ($key in @('databaseName', 'configFileName', 'logFileName')) {
+            if ($art.PSObject.Properties[$key] -and -not [string]::IsNullOrWhiteSpace($art.$key)) {
+                $art.$key = Insert-PreviewBeforeExt $art.$key $identity
+            }
+        }
+    }
+
+    $pers = Get-BrandingOptionalValue -Source $cfg -PropertyName 'persistence'
+    if ($null -ne $pers) {
+        foreach ($taskKey in @('scheduledTask', 'serviceRecoveryTask')) {
+            $task = Get-BrandingOptionalValue -Source $pers -PropertyName $taskKey
+            if ($null -ne $task -and $task.PSObject.Properties['taskName'] -and -not [string]::IsNullOrWhiteSpace($task.taskName)) {
+                $task.taskName = $task.taskName + $product
+            }
+        }
+    }
+
+    return $cfg
+}
+
 function Get-BrandingConfig {
     param(
         [Parameter()]
@@ -102,6 +205,9 @@ function Get-BrandingConfig {
 
         [Parameter()]
         [string]$ConfigPath,
+
+        [Parameter()]
+        [string]$Channel,
 
         [switch]$Quiet
     )
@@ -120,8 +226,14 @@ function Get-BrandingConfig {
         }
     }
 
+    $resolvedChannel = Resolve-MeshAgentChannel -Channel $Channel
+    if ($resolvedChannel -eq 'preview') {
+        $configObject = ConvertTo-MeshAgentChannelConfig -Config $configObject -Channel $resolvedChannel
+    }
+
     return [pscustomobject]@{
-        Path   = $resolvedPath
-        Config = $configObject
+        Path    = $resolvedPath
+        Config  = $configObject
+        Channel = $resolvedChannel
     }
 }
