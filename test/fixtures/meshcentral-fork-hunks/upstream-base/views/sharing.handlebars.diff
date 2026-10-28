@@ -1,0 +1,18 @@
+--- a/views/sharing.handlebars
++++ b/views/sharing.handlebars
+@@ -18,6 +18,7 @@
+     <script type="text/javascript" src="scripts/agent-redir-ws-0.1.1{{{min}}}.js"></script>
+     <script type="text/javascript" src="scripts/agent-redir-rtc-0.1.0{{{min}}}.js"></script>
+     <script type="text/javascript" src="scripts/agent-desktop-0.0.2{{min}}.js"></script>
++    <script type="text/javascript" src="scripts/agent-desktop-audio-control-0.0.1.js"></script>
+     <script type="text/javascript" src="scripts/amt-desktop-0.0.2{{min}}.js"></script>
+     <script type="text/javascript" src="scripts/amt-terminal-0.0.2{{min}}.js"></script>
+     <script type="text/javascript" src="scripts/zlib{{min}}.js"></script>
+@@ -52,6 +53,7 @@
+                     <div class='deskareaicon' title="Toggle View Mode" onclick="toggleAspectRatio(1)">&#8690;</div>
+                     <div class='deskareaicon' title="Rotate Left" onclick="drotate(-1)">&olarr;</div>
+                     <div class='deskareaicon' title="Rotate Right" onclick="drotate(1)">&orarr;</div>
++                    <span id="deskAudioMount" hidden></span>
+                     <input id="deskActionsSettings" type="button" value="Settings..." title="Edit remote desktop settings" onkeypress="return false" onkeydown="return false" onclick="showDesktopSettings()" class="mR" />
+                     <div id="desktopCustomUiButtons" style="float:left"></div>
+                     <div id="deskRecordIcon" class='deskareaicon' title="Server is recording this session" style="display:none;background-color:red;width:12px;height:12px;border-radius:6px;margin-top:5px"></div>

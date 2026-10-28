@@ -1,0 +1,18 @@
+--- a/views/default.handlebars
++++ b/views/default.handlebars
+@@ -31,6 +31,7 @@
+     <script type="text/javascript" src="scripts/agent-redir-ws-0.1.1{{{min}}}.js"></script>
+     <script type="text/javascript" src="scripts/agent-redir-rtc-0.1.0{{{min}}}.js"></script>
+     <script type="text/javascript" src="scripts/agent-desktop-0.0.2{{{min}}}.js"></script>
++    <script type="text/javascript" src="scripts/agent-desktop-audio-control-0.0.1.js"></script>
+     <script type="text/javascript" src="scripts/agent-rdp-0.0.1{{{min}}}.js"></script>
+     <script type="text/javascript" src="scripts/qrcode.min.js"></script>
+     <script type="text/javascript" src="scripts/xterm{{{min}}}.js"></script>
+@@ -773,6 +774,7 @@
+                             <div class='deskareaicon' title="Rotate Left" onclick="drotate(-1)">&olarr;</div>
+                             <div class='deskareaicon' title="Rotate Right" onclick="drotate(1)">&orarr;</div>
+                             <div id="deskRecordIcon" class='deskareaicon' title="Server is recording this session" style="display:none;background-color:red;width:12px;height:12px;border-radius:6px;margin-top:5px"></div>
++                            <span id="deskAudioMount" hidden></span>
+                             <input id="deskFocusBtn" type="button" title="Toggle focus mode, when active only the region around the mouse is updated" onkeypress="return false" onkeydown="return false" value="Focus All" onclick="deskToggleFocus()" style="margin-right:3px;display:none" />
+                             <input id="deskActionsBtn" type=button title="Perform power actions on the device" onkeypress="return false" onkeydown="return false" value=Actions onclick=deviceActionFunction() class="mR" />
+                             <input id="deskActionsSettings" type="button" value="Settings..." title="Edit remote desktop settings" onkeypress="return false" onkeydown="return false" onclick="showDesktopSettings()" class="mR" />

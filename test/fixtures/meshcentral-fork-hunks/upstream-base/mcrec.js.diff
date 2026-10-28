@@ -1,0 +1,115 @@
+--- a/mcrec.js
++++ b/mcrec.js
+@@ -16,6 +16,41 @@
+ function log2() { if (directRun) { console.log(...arguments); } else { process.send(...arguments); } /*else { if (worker != null) { worker.parentPort.postMessage({ msg: arguments[0] }); } } */ }
+ if (directRun && (NodeJSVer >= 12)) { const xworker = require('worker_threads'); try { if (xworker.isMainThread == false) { worker = xworker; } } catch (ex) { log(ex); } }
+ 
++// Width and height of a remote desktop tile image, or null.
++// Agents encode tiles as JPEG, or PNG when a viewer asks for it, and the bytes come from the agent. Only these
++// two formats are read: the format is not sniffed, so no other image parser ever sees agent data. Anything
++// else, and any truncated or malformed image, returns null. Every loop step moves forward through the buffer.
++function readImageSize(data) {
++    if (!Buffer.isBuffer(data)) return null;
++    if ((data.length >= 24) && (data.readUInt32BE(0) == 0x89504E47) && (data.readUInt32BE(4) == 0x0D0A1A0A)) {
++        // PNG: the first chunk is a 13 byte IHDR that starts with the width and height.
++        if ((data.readUInt32BE(8) != 13) || (data.toString('latin1', 12, 16) != 'IHDR')) return null;
++        return imageDimensions(data.readUInt32BE(16), data.readUInt32BE(20));
++    }
++    if ((data.length < 4) || (data[0] != 0xFF) || (data[1] != 0xD8)) return null;
++    // JPEG: walk the marker segments after the start of image to the first start of frame.
++    var i = 2;
++    while (i + 1 < data.length) {
++        if (data[i] != 0xFF) return null;
++        var marker = data[i + 1];
++        if (marker == 0xFF) { i++; continue; } // Fill byte before a marker
++        if ((marker == 0x01) || ((marker >= 0xD0) && (marker <= 0xD7))) { i += 2; continue; } // Markers without a segment
++        if ((marker == 0x00) || (marker == 0xD8) || (marker == 0xD9) || (marker == 0xDA)) return null; // No frame before the scan or the end
++        if (i + 4 > data.length) return null;
++        var length = data.readUInt16BE(i + 2);
++        if (length < 2) return null;
++        if ((marker >= 0xC0) && (marker <= 0xCF) && (marker != 0xC4) && (marker != 0xC8) && (marker != 0xCC)) {
++            // Start of frame: length, precision, height, width
++            if ((length < 8) || (i + 9 > data.length)) return null;
++            return imageDimensions(data.readUInt16BE(i + 7), data.readUInt16BE(i + 5));
++        }
++        i += 2 + length;
++    }
++    return null;
++}
++
++function imageDimensions(width, height) { return ((width > 0) && (height > 0)) ? { width: width, height: height } : null; }
++
+ function indexFile(infile) {
+     var state = { recFileName: null, recFile: null, recFileSize: 0, recFilePtr: 0 };
+     if (fs.existsSync(infile) == false) { log2("Missing file: " + infile); return; }
+@@ -122,7 +157,8 @@
+                         if (state.swidth == null) { break; }
+                         var x = block.data.readUInt16BE(4);
+                         var y = block.data.readUInt16BE(6);
+-                        var dimensions = require('image-size').imageSize(block.data.slice(8));
++                        var dimensions = readImageSize(block.data.slice(8));
++                        if (dimensions == null) { log('Skipping an unreadable tile at ' + block.ptr); break; }
+                         //log("Tile", x, y, dimensions.width, dimensions.height, block.ptr);
+                         //console.log(elapseSeconds);
+ 
+@@ -277,48 +313,6 @@
+ function isNumber(x) { return (('' + parseInt(x)) === x) || (('' + parseFloat(x)) === x); }
+ function format(format) { var args = Array.prototype.slice.call(arguments, 1); return format.replace(/{(\d+)}/g, function (match, number) { return typeof args[number] != 'undefined' ? args[number] : match; }); };
+ 
+-// Check if a list of modules are present and install any missing ones
+-var InstallModuleChildProcess = null;
+-var previouslyInstalledModules = {};
+-function InstallModules(modules, func) {
+-    var missingModules = [];
+-    if (previouslyInstalledModules == null) { previouslyInstalledModules = {}; }
+-    if (modules.length > 0) {
+-        for (var i in modules) {
+-            try {
+-                var xxmodule = require(modules[i]);
+-            } catch (e) {
+-                if (previouslyInstalledModules[modules[i]] !== true) { missingModules.push(modules[i]); }
+-            }
+-        }
+-        if (missingModules.length > 0) { InstallModule(missingModules.shift(), InstallModules, modules, func); } else { func(); }
+-    }
+-}
+-
+-// Check if a module is present and install it if missing
+-function InstallModule(modulename, func, tag1, tag2) {
+-    log('Installing ' + modulename + '...');
+-    var child_process = require('child_process');
+-    var parentpath = __dirname;
+-
+-    // Get the working directory
+-    if ((__dirname.endsWith('/node_modules/meshcentral')) || (__dirname.endsWith('\\node_modules\\meshcentral')) || (__dirname.endsWith('/node_modules/meshcentral/')) || (__dirname.endsWith('\\node_modules\\meshcentral\\'))) { parentpath = require('path').join(__dirname, '../..'); }
+-
+-    // Looks like we need to keep a global reference to the child process object for this to work correctly.
+-    InstallModuleChildProcess = child_process.exec('npm install --no-optional --save ' + modulename, { maxBuffer: 512000, timeout: 300000, cwd: parentpath }, function (error, stdout, stderr) {
+-        InstallModuleChildProcess = null;
+-        if ((error != null) && (error != '')) {
+-            log('ERROR: Unable to install required module "' + modulename + '". May not have access to npm, or npm may not have suffisent rights to load the new module. Try "npm install ' + modulename + '" to manualy install this module.\r\n');
+-            process.exit();
+-            return;
+-        }
+-        previouslyInstalledModules[modulename] = true;
+-        func(tag1, tag2);
+-        return;
+-    });
+-}
+-
+-function setup() { InstallModules(['image-size'], start); }
+ function start() { startEx(process.argv); }
+ function startEx(argv) {
+     if (argv.length > 2) { indexFile(argv[2]); } else {
+@@ -328,8 +322,9 @@
+         log("  Usage: node mcrec [file]");
+     }
+ }
+-if (directRun) { setup(); }
++if (directRun) { start(); }
+ 
+ // Export table
+ module.exports.startEx = startEx;
++module.exports.readImageSize = readImageSize;
+ module.exports.indexFile = indexFile;
+\ No newline at end of file

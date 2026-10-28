@@ -1,596 +1,69 @@
 --- a/public/scripts/agent-redir-ws-0.1.1.js
 +++ b/public/scripts/agent-redir-ws-0.1.1.js
-@@ -155,7 +155,7 @@
+@@ -31,6 +31,8 @@
+     obj.serverIsRecording = false;
+     obj.urlname = 'meshrelay.ashx';
+     obj.latency = { lastSend: null, current: -1, callback: null };
++    obj.connectTimeout = 60000; // Last resort: how long a deferring module may wait, with no reply from the agent, for its stream to start
++    var connectTimer = null;
+     if (domainUrl == null) { domainUrl = '/'; }
+ 
+     // Console Message
+@@ -41,6 +43,11 @@
+     obj.metadata = null;
+     obj.onMetadataChange = null;
+ 
++    // Observers of the agent's control messages (ctrlChannel 102938), for example the desktop audio
++    // control. Each is called with the parsed message before the transport handles it.
++    obj.controlListeners = [];
++    obj.addControlListener = function (fn) { if ((typeof fn == 'function') && (obj.controlListeners.indexOf(fn) < 0)) { obj.controlListeners.push(fn); } }
++
+     // Private method
+     //obj.debug = function (msg) { console.log(msg); }
+ 
+@@ -102,8 +109,13 @@
+         try { controlMsg = JSON.parse(msg); } catch (e) { return; }
+         if (controlMsg.ctrlChannel != '102938') { if (obj.m.ProcessData) { obj.m.ProcessData(msg); } else { console.log(msg); } return; }
+         if ((typeof args != 'undefined') && args.redirtrace) { console.log('RedirRecv', controlMsg); }
++        var listeners = obj.controlListeners.slice();
++        for (var i = 0; i < listeners.length; i++) { try { listeners[i](controlMsg); } catch (ex) { console.log('Control listener error', ex); } }
+         if (controlMsg.type == 'console') {
+             obj.setConsoleMessage(controlMsg.msg, controlMsg.msgid, controlMsg.msgargs, controlMsg.timeout);
++            // Before a deferring module has connected, the agent's reply decides: an error (msgid 2) ends the session,
++            // a consent prompt (msgid 1) leaves the wait to the agent's consent timeout, and any other reply restarts it.
++            if ((obj.State == 2) && (obj.m.deferConnectedState === true)) { if (controlMsg.msgid == 2) { obj.Stop(); } else { setConnectTimer(controlMsg.msgid != 1); } }
+         } else if (controlMsg.type == 'metadata') {
+             obj.metadata = controlMsg;
+             if (obj.onMetadataChange) obj.onMetadataChange(obj.metadata);
+@@ -136,6 +148,14 @@
+         if (obj.onConsoleMessageChange) { obj.onConsoleMessageChange(obj, obj.consoleMessage, obj.consoleMessageId); }
+     }
+ 
++    // A module that sets deferConnectedState (the remote desktop) declares the end-to-end connection itself, once its
++    // stream has started, instead of the relay accepting the tunnel.
++    obj.connected = function () { setConnectTimer(false); if (obj.State == 2) { obj.xxStateChange(3); } }
++    function setConnectTimer(on) {
++        if (connectTimer != null) { clearTimeout(connectTimer); connectTimer = null; }
++        if (on) { connectTimer = setTimeout(function () { connectTimer = null; obj.setConsoleMessage('Timeout', 4); obj.Stop(); }, obj.connectTimeout); }
++    }
++
+     obj.sendCtrlMsg = function (x) { if (obj.ctrlMsgAllowed == true) { if ((typeof args != 'undefined') && args.redirtrace) { console.log('RedirSend', typeof x, x); } try { obj.socket.send(x); } catch (ex) { } } }
+ 
+     function performWebRtcSwitch() {
+@@ -155,7 +175,7 @@
                  if (e.data == 'cr') { obj.serverIsRecording = true; }
                  if (obj.options != null) { delete obj.options.action; obj.options.type = 'options'; try { obj.sendCtrlMsg(JSON.stringify(obj.options)); } catch (ex) { } }
                  try { obj.socket.send(obj.protocol); } catch (ex) { }
 -                obj.xxStateChange(3);
-+                if (obj.protocol != 2) { obj.xxStateChange(3); }
++                if (obj.m.deferConnectedState === true) { setConnectTimer(true); } else { obj.xxStateChange(3); }
  
                  if (obj.attemptWebRTC == true) {
                      // Try to get WebRTC setup
-@@ -323,3 +323,584 @@
+@@ -304,6 +324,7 @@
  
-     return obj;
- }
-+
-+// BEGIN GENERATED DESKTOP AUDIO CONTROL
-+;(function () {
-+  'use strict';
-+  if (typeof window === 'undefined' || typeof document === 'undefined' || typeof document.createElement !== 'function') return;
-+  if (window.__meshDesktopAudioControl) return; // install once per page
-+  window.__meshDesktopAudioControl = true;
-+
-+  var CTRL_CHANNEL = '102938';
-+  var AUDIO_PROTOCOL = 20;
-+  var DESKTOP_PROTOCOL = 2;
-+
-+  // Resolve sibling script URLs relative to this custom.js so they load from
-+  // the same meshcentral-web scripts/ directory on every page.
-+  var scriptsBase = '';
-+  try {
-+    var selfSrc = (document.currentScript && document.currentScript.src) || '';
-+    if (selfSrc) { scriptsBase = selfSrc.substring(0, selfSrc.lastIndexOf('/') + 1); }
-+  } catch (ex) { scriptsBase = ''; }
-+  var PLAYER_URL = scriptsBase ? (scriptsBase + 'agent-desktop-audio-0.0.1.js') : 'scripts/agent-desktop-audio-0.0.1.js';
-+  var DECODER_URL = scriptsBase ? (scriptsBase + 'opus-decoder-0.7.11.min.js') : 'scripts/opus-decoder-0.7.11.min.js';
-+
-+  // ---- Lazy load of the player module -----------------------------------
-+  var playerModulePromise = null;
-+  function loadPlayerModule() {
-+    if (window.MeshDesktopAudio) { return Promise.resolve(window.MeshDesktopAudio); }
-+    if (playerModulePromise) { return playerModulePromise; }
-+    playerModulePromise = new Promise(function (resolve, reject) {
-+      var s = document.createElement('script');
-+      s.src = PLAYER_URL;
-+      s.async = true;
-+      s.onload = function () { if (window.MeshDesktopAudio) { resolve(window.MeshDesktopAudio); } else { reject(new Error('audio player did not register')); } };
-+      s.onerror = function () { reject(new Error('failed to load audio player')); };
-+      document.head.appendChild(s);
-+    }).catch(function (err) { playerModulePromise = null; throw err; });
-+    return playerModulePromise;
-+  }
-+
-+  // ---- Controller --------------------------------------------------------
-+  // Bound to the single desktop viewer tunnel (canvas id 'Desk'), tracked via
-+  // a tiny state machine from the player module when it is available. Before
-+  // the player loads we keep a minimal local mirror so the icon still works.
-+  var boundDesktop = null;   // the desktop redir object that advertised audio
-+  var audioRedir = null;     // the protocol-20 relay tunnel
-+  var player = null;         // MeshDesktopAudio player instance
-+  var audioCtx = null;       // AudioContext created inside the click that started the session
-+  var stateMachine = null;   // player state machine (loaded lazily)
-+  var uiState = { available: false, state: 'off', reason: '' };
-+
-+  function getStateApi() {
-+    if (stateMachine) { return stateMachine; }
-+    if (window.MeshDesktopAudio && window.MeshDesktopAudio.createAudioStateMachine) {
-+      stateMachine = window.MeshDesktopAudio.createAudioStateMachine();
-+      // Re-apply current availability so the machine matches the UI.
-+      if (uiState.available) { stateMachine.onAvailable(); }
-+    }
-+    return stateMachine;
-+  }
-+
-+  function applySnapshot(snap) {
-+    if (!snap) return;
-+    uiState = { available: snap.available, state: snap.state, reason: snap.reason };
-+    renderControl();
-+  }
-+
-+  // ---- Toolbar control ---------------------------------------------------
-+  // A speaker button and a volume slider, grouped as the first button of the desktop toolbar's
-+  // right-hand group (.toright2), left of Actions / Settings. The group is sized to the 22px
-+  // toolbar row, the slider shows only while audio is connecting or playing, and the sound waves
-+  // animate only while audio is actually flowing (not on silence).
-+  var controlEl = null;      // #mc-desk-audio group
-+  var buttonEl = null;       // #mc-desk-audio-btn
-+  var sliderEl = null;       // #mc-desk-audio-vol
-+  var STYLE_ID = 'mc-desk-audio-style';
-+  var VOLUME_KEY = 'meshDesktopAudioVolume';
-+  var volumePercent = loadVolume();
-+  var audioFlowing = false;
-+
-+  // The level is a per-browser convenience; storage can be unavailable (private mode, blocked
-+  // site data), in which case the session simply starts at full volume.
-+  function loadVolume() {
-+    var stored = null;
-+    try { stored = window.localStorage.getItem(VOLUME_KEY); } catch (ex) { stored = null; }
-+    var value = (stored == null) ? 100 : parseInt(stored, 10);
-+    return (isFinite(value) && value >= 0 && value <= 100) ? value : 100;
-+  }
-+  function saveVolume(value) { try { window.localStorage.setItem(VOLUME_KEY, String(value)); } catch (ex) { } }
-+
-+  function ensureStyle() {
-+    if (document.getElementById(STYLE_ID)) return;
-+    var css = ''
-+      // Group: one inline row the height of the toolbar's buttons, spaced like the stock .mR buttons.
-+      // 'middle' centres the box itself, independent of whether the slider is showing (a baseline
-+      // offset would move with the first visible child) and of the share page's 24px line height;
-+      // with the stock 13.33px button font it lands ~1px low, hence the 1px optical lift.
-+      + '#mc-desk-audio{display:inline-flex;align-items:center;gap:4px;height:22px;margin:0 3px 0 0;vertical-align:middle;position:relative;top:-1px;white-space:nowrap;line-height:normal;text-align:left}'
-+      + '#mc-desk-audio[hidden]{display:none}'
-+      // Button: icon-only, same 22px box as the toolbar inputs; colour follows the bar (day black, night #CCC).
-+      + '#mc-desk-audio-btn{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;width:22px;height:22px;'
-+      + 'margin:0;padding:0;border:1px solid transparent;border-radius:3px;background:transparent;color:inherit;font:inherit;'
-+      + 'cursor:pointer;-webkit-appearance:none;appearance:none}'
-+      + '#mc-desk-audio-btn:hover{background:rgba(0,0,0,.08);border-color:rgba(0,0,0,.2)}'
-+      + '.night #mc-desk-audio-btn:hover{background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.25)}'
-+      + '#mc-desk-audio-btn:focus,#mc-desk-audio-vol:focus{outline:none}'
-+      + '#mc-desk-audio-btn:focus-visible,#mc-desk-audio-vol:focus-visible{outline:2px solid #1a5fb4;outline-offset:1px}'
-+      + '.night #mc-desk-audio-btn:focus-visible,.night #mc-desk-audio-vol:focus-visible{outline-color:#8ab4f8}'
-+      + '#mc-desk-audio-btn svg{display:block;width:18px;height:18px;fill:currentColor;overflow:visible;transform:scaleX(-1)}'
-+      + '#mc-desk-audio .mcaudio-line{fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round}'
-+      // State colours keep at least 3:1 contrast on the day (#C0C0C0) and night (#333) bars.
-+      + '#mc-desk-audio[data-state="playing"] #mc-desk-audio-btn{color:#176428}'
-+      + '#mc-desk-audio[data-state="connecting"] #mc-desk-audio-btn{color:#8a4b00}'
-+      + '#mc-desk-audio[data-state="unavailable"] #mc-desk-audio-btn,#mc-desk-audio[data-state="error"] #mc-desk-audio-btn{color:#a61b1b}'
-+      + '.night #mc-desk-audio[data-state="playing"] #mc-desk-audio-btn{color:#5fd27a}'
-+      + '.night #mc-desk-audio[data-state="connecting"] #mc-desk-audio-btn{color:#f0b44c}'
-+      + '.night #mc-desk-audio[data-state="unavailable"] #mc-desk-audio-btn,.night #mc-desk-audio[data-state="error"] #mc-desk-audio-btn{color:#ff7b72}'
-+      // Animations: spinner while connecting, staggered waves while audio flows.
-+      + '#mc-desk-audio .mcaudio-spin{transform-origin:15px 10px;animation:mcaudiospin 1s linear infinite}'
-+      + '#mc-desk-audio.mcaudio-flowing .mcaudio-wave{animation:mcaudiowave 1.2s ease-in-out infinite}'
-+      + '#mc-desk-audio.mcaudio-flowing .mcaudio-wave2{animation-delay:.2s}'
-+      + '@keyframes mcaudiospin{to{transform:rotate(360deg)}}'
-+      + '@keyframes mcaudiowave{0%,100%{opacity:1}50%{opacity:.25}}'
-+      // Volume: native range input, tinted to the playing colour.
-+      + '#mc-desk-audio-vol{box-sizing:border-box;width:72px;height:22px;margin:0;padding:0;background:transparent;cursor:pointer;accent-color:#176428;border-radius:2px}'
-+      + '.night #mc-desk-audio-vol{accent-color:#5fd27a}'
-+      + '#mc-desk-audio[data-mobile="true"]{height:28px;top:0}'
-+      + '#mc-desk-audio[data-mobile="true"] #mc-desk-audio-btn{width:28px;height:28px;touch-action:manipulation}'
-+      + '#mc-desk-audio[data-mobile="true"] #mc-desk-audio-vol{width:52px;height:28px}'
-+      + '@media (max-width:800px){#mc-desk-audio-vol{width:52px}}'
-+      + '@media (prefers-reduced-motion:reduce){#mc-desk-audio .mcaudio-spin,#mc-desk-audio .mcaudio-wave{animation:none}}';
-+    var st = document.createElement('style');
-+    st.id = STYLE_ID;
-+    st.appendChild(document.createTextNode(css));
-+    (document.head || document.documentElement).appendChild(st);
-+  }
-+
-+  // Speaker body plus sound waves (playing), a cross (muted), a slash (unavailable/error) or a
-+  // spinner (connecting). Off shows the bare speaker. The glyph is drawn facing right and mirrored
-+  // by CSS so the speaker and its waves face the volume slider on its left.
-+  function iconSvg(glyph) {
-+    var body = '<path d="M3 7h3.4L11 3v14l-4.6-4H3z"/>';
-+    var inner = body;
-+    if (glyph === 'playing') {
-+      inner += '<path class="mcaudio-line mcaudio-wave mcaudio-wave1" d="M13.6 7.2a3.4 3.4 0 0 1 0 5.6"/>'
-+        + '<path class="mcaudio-line mcaudio-wave mcaudio-wave2" d="M15.6 4.9a6.3 6.3 0 0 1 0 10.2"/>';
-+    } else if (glyph === 'muted') {
-+      inner += '<path class="mcaudio-line" d="M13.5 7.5l5 5M18.5 7.5l-5 5"/>';
-+    } else if (glyph === 'connecting') {
-+      inner += '<g class="mcaudio-spin"><circle class="mcaudio-line" cx="15" cy="10" r="3.1" stroke-dasharray="14 6"/></g>';
-+    } else if (glyph === 'unavailable' || glyph === 'error') {
-+      inner += '<path class="mcaudio-line" d="M13 5l5 10"/>';
-+    }
-+    return '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">' + inner + '</svg>';
-+  }
-+
-+  function tooltipFor(state, reason, muted) {
-+    switch (state) {
-+      case 'playing': return muted ? 'Device audio muted (volume 0); click to stop listening' : (audioFlowing ? 'Playing device audio; click to stop listening' : 'Listening; no audible signal detected; click to stop');
-+      case 'connecting': return 'Connecting device audio... click to cancel';
-+      case 'unavailable': return reason || 'Device audio is unavailable';
-+      case 'error': return (reason || 'Device audio error') + '; click to retry';
-+      default: return 'Listen to device audio';
-+    }
-+  }
-+
-+  function renderControl() {
-+    if (!controlEl) return;
-+    var state = uiState.state;
-+    var muted = (state === 'playing') && (volumePercent === 0);
-+    var glyph = muted ? 'muted' : state;
-+    controlEl.hidden = !uiState.available;
-+    controlEl.setAttribute('data-state', state);
-+    controlEl.className = (state === 'playing' && audioFlowing && !muted) ? 'mcaudio-flowing' : '';
-+    // Rebuild the glyph only when it changes so a running animation is not restarted on every update.
-+    if (buttonEl.getAttribute('data-glyph') !== glyph) {
-+      buttonEl.innerHTML = iconSvg(glyph);
-+      buttonEl.setAttribute('data-glyph', glyph);
-+    }
-+    var tip = tooltipFor(state, uiState.reason, muted);
-+    buttonEl.title = tip;
-+    buttonEl.setAttribute('aria-label', tip);
-+    buttonEl.setAttribute('aria-pressed', (state === 'playing' || state === 'connecting') ? 'true' : 'false');
-+    sliderEl.hidden = !(state === 'playing' || state === 'connecting');
-+    if (String(volumePercent) !== sliderEl.value) { sliderEl.value = String(volumePercent); }
-+    sliderEl.title = 'Device audio volume ' + volumePercent + '%';
-+    sliderEl.setAttribute('aria-valuetext', volumePercent + '%');
-+  }
-+
-+  function setVolumePercent(value) {
-+    var v = parseInt(value, 10);
-+    if (!isFinite(v)) { return; }
-+    volumePercent = Math.min(100, Math.max(0, v));
-+    if (player && typeof player.setVolume === 'function') { player.setVolume(volumePercent / 100); }
-+    renderControl();
-+  }
-+
-+  // While a desktop session has input control, the page forwards every key to the device from
-+  // document-level handlers. Keys typed on this control stay here; a pointer click hands focus
-+  // back to the page so typing after clicking the speaker still reaches the device.
-+  function keepKeysLocal(el) {
-+    var stop = function (e) { e.stopPropagation(); };
-+    el.addEventListener('keydown', stop);
-+    el.addEventListener('keyup', stop);
-+    el.addEventListener('keypress', stop);
-+  }
-+
-+  function createControl() {
-+    ensureStyle();
-+    var group = document.createElement('span');
-+    group.id = 'mc-desk-audio';
-+    group.hidden = true;
-+    group.setAttribute('role', 'group');
-+    group.setAttribute('aria-label', 'Device audio');
-+
-+    var button = document.createElement('button');
-+    button.type = 'button';
-+    button.id = 'mc-desk-audio-btn';
-+    button.addEventListener('click', function (e) {
-+      e.preventDefault();
-+      if (e.detail > 0) { button.blur(); }
-+      onIconActivate();
-+    });
-+
-+    var slider = document.createElement('input');
-+    slider.type = 'range';
-+    slider.id = 'mc-desk-audio-vol';
-+    slider.min = '0';
-+    slider.max = '100';
-+    slider.step = '1';
-+    slider.value = String(volumePercent);
-+    slider.hidden = true;
-+    slider.setAttribute('aria-label', 'Device audio volume');
-+    slider.addEventListener('input', function () { setVolumePercent(slider.value); });
-+    slider.addEventListener('change', function () { saveVolume(volumePercent); });
-+    slider.addEventListener('pointerup', function () { slider.blur(); });
-+
-+    keepKeysLocal(group);
-+    // The slider sits left of the button: the group is right-aligned beside Actions, so the button
-+    // keeps its position when the slider appears and a second click lands on it again.
-+    group.appendChild(slider);
-+    group.appendChild(button);
-+    controlEl = group;
-+    buttonEl = button;
-+    sliderEl = slider;
-+    renderControl();
-+    return group;
-+  }
-+
-+  // Mount as the first button of the toolbar's right-hand group: inline, directly before its first
-+  // input (Focus/Actions on the main page, Settings on share links), followed by a space so the gap
-+  // matches the stock buttons (.mR margin plus inline whitespace). Floats would leave free space
-+  // between them and the right-aligned buttons. The mount is re-checked periodically.
-+  var spacerEl = null;
-+  function findMountAnchor() {
-+    var settings = document.getElementById('deskActionsSettings');
-+    var group = settings ? settings.parentNode : null;
-+    // Both mobile viewer templates use Full Screen in their top toolbar.
-+    if (!group) return document.getElementById('deskFullScreen');
-+    for (var el = group.firstElementChild; el != null; el = el.nextElementSibling) {
-+      if (el.tagName === 'INPUT') { return el; }
-+    }
-+    return null;
-+  }
-+  function ensureControlMounted() {
-+    var anchor = findMountAnchor();
-+    if (!anchor) return;
-+    if (!controlEl) { createControl(); spacerEl = document.createTextNode(' '); }
-+    controlEl.setAttribute('data-mobile', document.getElementById('deskActionsSettings') ? 'false' : 'true');
-+    if (controlEl.parentNode !== anchor.parentNode || controlEl.nextSibling !== spacerEl || spacerEl.nextSibling !== anchor) {
-+      anchor.parentNode.insertBefore(controlEl, anchor);
-+      anchor.parentNode.insertBefore(spacerEl, anchor);
-+      renderControl();
-+    }
-+  }
-+
-+  // ---- Desktop binding / availability ------------------------------------
-+  function isSingleDesktopViewer(module) {
-+    try {
-+      var desk = document.getElementById('Desk');
-+      return !!(desk && module && module.CanvasId === desk);
-+    } catch (ex) { return false; }
-+  }
-+
-+  function bindDesktop(desktopRedir) {
-+    if (boundDesktop === desktopRedir) return;
-+    stopAudio('rebind');
-+    boundDesktop = desktopRedir;
-+    var api = getStateApi();
-+    if (api) { applySnapshot(api.onAvailable()); }
-+    else { uiState.available = true; renderControl(); }
-+  }
-+
-+  function onDesktopAudioAvailable(desktopRedir) {
-+    ensureControlMounted();
-+    bindDesktop(desktopRedir);
-+  }
-+
-+  function onDesktopClosed(desktopRedir) {
-+    if (boundDesktop !== desktopRedir) return;
-+    stopAudio('desktop-closed');
-+    boundDesktop = null;
-+    var api = getStateApi();
-+    if (api) { applySnapshot(api.onDesktopClosed()); }
-+    else { uiState = { available: false, state: 'off', reason: '' }; renderControl(); }
-+  }
-+
-+  // ---- Start / stop ------------------------------------------------------
-+  function onIconActivate() {
-+    if (!boundDesktop) return;
-+    if (uiState.state === 'connecting' || uiState.state === 'playing') { stopAudio('user'); return; }
-+    startAudio();
-+  }
-+
-+  // Autoplay policy lets only a user gesture start audio, and the player script may still have to load
-+  // asynchronously, so the AudioContext is created and resumed here, synchronously inside the click.
-+  // The player then verifies that it actually runs before the control shows Playing.
-+  function createGestureAudioContext() {
-+    var Ctor = window.AudioContext || window.webkitAudioContext;
-+    if (!Ctor) { throw new Error('This browser cannot play audio (Web Audio is unavailable)'); }
-+    var ctx;
-+    try { ctx = new Ctor({ latencyHint: 'interactive', sampleRate: 48000 }); }
-+    catch (ex) { ctx = new Ctor(); } // engines that reject these options; 48 kHz buffers are resampled
-+    if (ctx.state !== 'running' && typeof ctx.resume === 'function') {
-+      // The player re-checks the outcome; this call only has to happen inside the gesture.
-+      try { var resumed = ctx.resume(); if (resumed && typeof resumed.catch === 'function') { resumed.catch(function () { }); } } catch (ex2) { }
-+    }
-+    return ctx;
-+  }
-+
-+  function onPlayerPlayback(transition, reason) {
-+    var api = getStateApi();
-+    if (transition === 'ready') {
-+      if (api) { applySnapshot(api.onPlaybackReady()); }
-+      return;
-+    }
-+    // 'blocked' or 'suspended': the browser produces no sound, so end the session instead of claiming playback.
-+    if (api) { applySnapshot(api.onLocalError(reason)); }
-+    else { uiState.state = 'error'; uiState.reason = reason || 'Audio playback stopped'; renderControl(); }
-+    stopTunnelOnly();
-+  }
-+
-+  function startAudio() {
-+    var desktop = boundDesktop;
-+    if (!desktop) return;
-+    var api = getStateApi();
-+    if (api) { applySnapshot(api.onStartRequested()); }
-+    else { uiState.state = 'connecting'; uiState.reason = ''; renderControl(); }
-+
-+    var ctx;
-+    try { ctx = createGestureAudioContext(); }
-+    catch (ex) { handleAgentStatus('error', ex.message); return; }
-+    audioCtx = ctx;
-+
-+    loadPlayerModule().then(function (mod) {
-+      if (boundDesktop !== desktop || audioCtx !== ctx) { return; } // stopped or rebound while loading
-+      if (!stateMachine && mod.createAudioStateMachine) { stateMachine = mod.createAudioStateMachine(); stateMachine.onAvailable(); stateMachine.onStartRequested(); }
-+      player = mod.createMeshDesktopAudioPlayer({
-+        audioContext: ctx,
-+        decoderScriptUrl: DECODER_URL,
-+        onStatus: function (st) { if (audioCtx === ctx && st && st.state === 'error') { handleAgentStatus('error', st.reason); } },
-+        onError: function (message) { if (audioCtx === ctx) { handleAgentStatus('error', message); } },
-+        onActivity: function (flowing) { if (audioCtx === ctx) { audioFlowing = flowing; renderControl(); } },
-+        onPlayback: function (transition, reason) { if (audioCtx === ctx) { onPlayerPlayback(transition, reason); } },
-+        volume: volumePercent / 100
-+      });
-+      player.start(); // attaches to the click-created context and watches whether it really runs
-+      if (player) { openAudioTunnel(desktop); } // start() may already have reported the context as blocked
-+    }).catch(function (err) {
-+      if (audioCtx === ctx) { handleAgentStatus('error', (err && err.message) ? err.message : 'audio unavailable'); }
-+    });
-+  }
-+
-+  function openAudioTunnel(desktop) {
-+    var make = window.CreateAgentRedirect;
-+    if (typeof make !== 'function') { handleAgentStatus('error', 'relay unavailable'); return; }
-+    var module = {
-+      protocol: AUDIO_PROTOCOL,
-+      parent: null,
-+      ProcessBinaryData: function (u8) { if (audioRedir === redir && player) { if (player.handlePacket(u8) === false) { stopTunnelOnly(); } } },
-+      ProcessData: function () { /* protocol 20 carries no inner string data */ },
-+      xxStateChange: function () { /* redir drives state; see onStateChanged */ }
-+    };
-+    var meshserver = desktop.meshserver != null ? desktop.meshserver : null;
-+    var authCookie = desktop.authCookie != null ? desktop.authCookie : window.authCookie;
-+    var rauthCookie = desktop.rauthCookie != null ? desktop.rauthCookie : window.authRelayCookie;
-+    var nodeid = desktop.nodeid != null ? desktop.nodeid : (window.desktopNode && window.desktopNode._id != null ? window.desktopNode._id : null);
-+    var redir;
-+    try {
-+      redir = make(meshserver, module, window.serverPublicNamePort, authCookie, rauthCookie, window.domainUrl);
-+    } catch (ex) { handleAgentStatus('error', 'relay error'); return; }
-+    audioRedir = redir;
-+    redir.options = {};
-+    var tsid = desktop.__mcAudioTsid ? desktop.__mcAudioTsid.value : (desktop.options ? desktop.options.tsid : null);
-+    if (tsid != null) { redir.options.tsid = tsid; }
-+    redir.onStateChanged = function (obj, state) { if (state === 0 && audioRedir === redir) { onAudioTunnelClosed(); } };
-+    attachAudioCtrlObserver(redir);
-+    try { redir.Start(nodeid); } catch (ex2) { handleAgentStatus('error', 'relay error'); }
-+  }
-+
-+  function onAudioTunnelClosed() {
-+    // Unexpected close while active becomes an error; an intentional stop has
-+    // already cleared audioRedir/player before the socket closes.
-+    if (!audioRedir && !player) return;
-+    var api = getStateApi();
-+    if (api && api.isActive()) { applySnapshot(api.onTunnelClosed()); }
-+    stopTunnelOnly();
-+  }
-+
-+  function handleAgentStatus(agentState, reason) {
-+    var api = getStateApi();
-+    if (api) { applySnapshot(api.onAgentStatus(agentState, reason)); }
-+    else {
-+      // Capture starting on the device is not playback in the browser; only the player's 'ready' is.
-+      uiState.state = (agentState === 'started') ? 'connecting' : (agentState === 'stopped' ? 'off' : (agentState === 'error' ? 'error' : 'unavailable'));
-+      uiState.reason = reason || '';
-+      renderControl();
-+    }
-+    if (agentState === 'stopped' || agentState === 'unavailable' || agentState === 'nodesktop' || agentState === 'denied' || agentState === 'error') {
-+      stopTunnelOnly();
-+    }
-+  }
-+
-+  // Tear down only the tunnel + player, leaving the icon state as set by the
-+  // caller (used after a terminal agent status or a local error).
-+  function stopTunnelOnly() {
-+    if (audioRedir) { var r = audioRedir; audioRedir = null; try { r.onStateChanged = null; } catch (ex) { } try { r.Stop(); } catch (ex2) { } }
-+    if (player) { var p = player; player = null; try { p.stop(); } catch (ex3) { } }
-+    // The player does not own the click-created context, so the controller closes it.
-+    if (audioCtx) {
-+      var c = audioCtx; audioCtx = null;
-+      try { var closing = c.close(); if (closing && typeof closing.catch === 'function') { closing.catch(function () { }); } } catch (ex4) { }
-+    }
-+    audioFlowing = false;
-+  }
-+
-+  // Full stop initiated by the user or by desktop teardown.
-+  function stopAudio(cause) {
-+    stopTunnelOnly();
-+    var api = getStateApi();
-+    if (api) { applySnapshot(api.onStopRequested()); }
-+    else { uiState.state = 'off'; uiState.reason = ''; renderControl(); }
-+  }
-+
-+  // ---- Ctrl-message observation ------------------------------------------
-+  // Wrap a redir object's xxOnControlCommand to surface ctrlChannel 102938
-+  // "audio" messages, then delegate to the original handler unchanged.
-+  function wrapCtrl(redir, onAudioMsg) {
-+    if (!redir || redir.__mcAudioCtrlWrapped) return;
-+    function observe(handler) {
-+      if (typeof handler !== 'function') return handler;
-+      return function (msg) {
-+        try {
-+          var m = JSON.parse(msg);
-+          if (m && String(m.ctrlChannel) === CTRL_CHANNEL && m.type === 'audio') { onAudioMsg(m); }
-+        } catch (ex) { /* not JSON / not ours */ }
-+        return handler.apply(this, arguments);
-+      };
-+    }
-+    var wrapped = observe(redir.xxOnControlCommand);
-+    // Custom redirectors assign module.parent before initializing this handler.
-+    // Observe subsequent assignments so constructor initialization retains the hook.
-+    try {
-+      Object.defineProperty(redir, 'xxOnControlCommand', {
-+        configurable: true,
-+        enumerable: true,
-+        get: function () { return wrapped; },
-+        set: function (handler) { if (handler !== wrapped) { wrapped = observe(handler); } }
-+      });
-+    } catch (ex) { redir.xxOnControlCommand = wrapped; }
-+    redir.__mcAudioCtrlWrapped = true;
-+  }
-+
-+  function attachDesktopCtrlObserver(redir) {
-+    wrapCtrl(redir, function (m) {
-+      if (m.state === 'available' && (m.protocol == null || m.protocol === AUDIO_PROTOCOL)) {
-+        // The agent names the session its desktop tunnel streams; with desktop multiplexing that is the
-+        // first viewer's session, which may differ from this page's own selection.
-+        if (Object.prototype.hasOwnProperty.call(m, 'tsid')) { redir.__mcAudioTsid = { value: m.tsid }; }
-+        onDesktopAudioAvailable(redir);
-+      }
-+    });
-+  }
-+
-+  function attachAudioCtrlObserver(redir) {
-+    wrapCtrl(redir, function (m) {
-+      if (audioRedir === redir && m.state) { handleAgentStatus(m.state, m.reason); }
-+    });
-+  }
-+
-+  // Chain onStateChanged so we observe desktop disconnects without clobbering
-+  // the page's own handler (which it assigns after CreateAgentRedirect returns).
-+  function chainDesktopStateChanged(redir) {
-+    if (redir.__mcAudioStateChained) return;
-+    redir.__mcAudioStateChained = true;
-+    var pageHandler = redir.onStateChanged;
-+    function chained(obj, state) {
-+      if (typeof pageHandler === 'function') { try { pageHandler(obj, state); } catch (ex) { } }
-+      if (state === 0) { onDesktopClosed(redir); }
-+    }
-+    try {
-+      Object.defineProperty(redir, 'onStateChanged', {
-+        configurable: true,
-+        get: function () { return chained; },
-+        set: function (fn) { pageHandler = fn; }
-+      });
-+    } catch (ex) { redir.onStateChanged = chained; }
-+  }
-+
-+  // ---- Hook the factory --------------------------------------------------
-+  function observeDesktopModule(module) {
-+    if (!module || module.__mcAudioModuleObserved) return;
-+    module.__mcAudioModuleObserved = true;
-+    var parentRedir = module.parent || null;
-+    try {
-+      Object.defineProperty(module, 'parent', {
-+        configurable: true,
-+        enumerable: true,
-+        get: function () { return parentRedir; },
-+        set: function (redir) {
-+          parentRedir = redir;
-+          try {
-+            if (redir && module.protocol === DESKTOP_PROTOCOL && isSingleDesktopViewer(module)) {
-+              attachDesktopCtrlObserver(redir);
-+              chainDesktopStateChanged(redir);
-+            }
-+          } catch (ex) { /* never break tunnel creation */ }
-+        }
-+      });
-+    } catch (ex) { }
-+  }
-+
-+  function hookCreateAgentRemoteDesktop() {
-+    if (typeof window.CreateAgentRemoteDesktop !== 'function' || window.CreateAgentRemoteDesktop.__mcAudioHooked) return;
-+    var originalDesktop = window.CreateAgentRemoteDesktop;
-+    var wrappedDesktop = function () {
-+      var module = originalDesktop.apply(this, arguments);
-+      try {
-+        if (module && isSingleDesktopViewer(module)) { observeDesktopModule(module); }
-+      } catch (ex) { }
-+      return module;
-+    };
-+    wrappedDesktop.__mcAudioHooked = true;
-+    window.CreateAgentRemoteDesktop = wrappedDesktop;
-+  }
-+
-+  function hookCreateAgentRedirect() {
-+    hookCreateAgentRemoteDesktop();
-+    if (typeof window.CreateAgentRedirect !== 'function' || window.CreateAgentRedirect.__mcAudioHooked) return;
-+    var original = window.CreateAgentRedirect;
-+    var wrapped = function (meshserver, module) {
-+      var redir = original.apply(this, arguments);
-+      try {
-+        // Both desktop pages: the main UI and guest share links (meshserver == null). Share links reach
-+        // the agent only because the fork's meshrelay.js admits protocol 20 alongside desktop.
-+        if (redir && module && module.protocol === DESKTOP_PROTOCOL && isSingleDesktopViewer(module)) {
-+          attachDesktopCtrlObserver(redir);
-+          chainDesktopStateChanged(redir);
-+        }
-+      } catch (ex) { /* never break tunnel creation */ }
-+      return redir;
-+    };
-+    wrapped.__mcAudioHooked = true;
-+    window.CreateAgentRedirect = wrapped;
-+  }
-+
-+  function init() {
-+    hookCreateAgentRedirect();
-+    // The redir script may load after custom.js in some templates; re-hook and
-+    // keep the control mounted on a light interval, matching the idiom used above.
-+    setInterval(function () { hookCreateAgentRedirect(); if (uiState.available) { ensureControlMounted(); } }, 1500);
-+  }
-+  hookCreateAgentRedirect();
-+  if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', init); } else { init(); }
-+
-+  // Expose a tiny surface for tests / debugging without leaking internals.
-+  window.MeshDesktopAudioControl = {
-+    _getUiState: function () { return { available: uiState.available, state: uiState.state, reason: uiState.reason }; },
-+    _hasIcon: function () { return !!document.getElementById('mc-desk-audio-btn'); },
-+    _getVolume: function () { return volumePercent; },
-+    _getDiagnostics: function () { return player ? player.getDiagnostics() : null; }
-+  };
-+})();
+         // Clean up WebRTC
+         obj.xxCloseWebRTC();
++        setConnectTimer(false);
+         
+         // clear RTT timer
+         obj.latency.current = -1;

@@ -1,0 +1,18 @@
+--- a/views/sharing-mobile.handlebars
++++ b/views/sharing-mobile.handlebars
+@@ -21,6 +21,7 @@
+     <script type="text/javascript" src="scripts/meshcentral{{{min}}}.js"></script>
+     <script type="text/javascript" src="scripts/agent-redir-ws-0.1.1{{{min}}}.js"></script>
+     <script type="text/javascript" src="scripts/agent-desktop-0.0.2{{{min}}}.js"></script>
++    <script type="text/javascript" src="scripts/agent-desktop-audio-control-0.0.1.js"></script>
+     <script type="text/javascript" src="scripts/amt-0.2.0{{{min}}}.js"></script>
+     <script type="text/javascript" src="scripts/amt-redir-ws-0.1.0{{{min}}}.js"></script>
+     <script type="text/javascript" src="scripts/amt-desktop-0.0.2{{{min}}}.js"></script>
+@@ -495,6 +496,7 @@
+                             <div style="padding-top:2px;padding-bottom:2px;background:#C0C0C0;height:32px">
+                                 <div style="float:right;text-align:right">
+                                     <span id="p14power"></span>&nbsp;
++                                    <span id="deskAudioMount" data-mobile="true" hidden></span>
+                                     <input type=button id=deskFullScreen value="Full Screen" onclick=deskToggleFull(event) onkeypress="return false" onkeydown="return false" disabled="disabled" style="height:28px;margin-right:3px;">
+                                 </div>
+                                 <div style="margin-left:3px">

@@ -1,6 +1,22 @@
 --- a/views/default3.handlebars
 +++ b/views/default3.handlebars
-@@ -11087,6 +11087,14 @@
+@@ -35,6 +35,7 @@
+     <script type="text/javascript" src="scripts/agent-redir-ws-0.1.1{{{min}}}.js"></script>
+     <script type="text/javascript" src="scripts/agent-redir-rtc-0.1.0{{{min}}}.js"></script>
+     <script type="text/javascript" src="scripts/agent-desktop-0.0.2{{{min}}}.js"></script>
++    <script type="text/javascript" src="scripts/agent-desktop-audio-control-0.0.1.js"></script>
+     <script type="text/javascript" src="scripts/agent-rdp-0.0.1{{{min}}}.js"></script>
+     <script type="text/javascript" src="scripts/qrcode.min.js"></script>
+     <script type="text/javascript" src="scripts/xterm{{{min}}}.js"></script>
+@@ -1153,6 +1154,7 @@
+                         <div class="d-flex align-items-center ms-auto">
+                             <div id="desktopCustomUiButtons" style="float:left"></div>
+                             <div id="desktopCustomUpperRight" style="float:left;margin-right:6px"></div>
++                            <span id="deskAudioMount" hidden></span>
+                             <input type="button" class="btn btn-primary btn-sm" title="Change the power state of the remote machine" onkeypress="return false" onkeydown="return false" value="Power Actions..." onclick="showPowerActionDlg()" style="display:none" />
+                             <input id="deskActionsBtn" type=button class="btn btn-primary btn-sm me-1" title="Perform power actions on the device" onkeypress="return false" onkeydown="return false" value=Actions onclick=deviceActionFunction() class="mR" />
+                             <input id="deskActionsSettings" type="button" class="btn btn-primary btn-sm me-1" value="Settings" title="Edit remote desktop settings" onkeypress="return false" onkeydown="return false" onclick="showDesktopSettings()" class="mR" />
+@@ -11087,6 +11089,14 @@
                          desktop.m.GrabMouseInput = function() {
                              _origGrab.call(desktop.m);
                              var c = desktop.m.CanvasId;
@@ -15,7 +31,7 @@
                              c.ontouchstart = null;
                              c.ontouchmove = null;
                              c.ontouchend = null;
-@@ -11384,26 +11392,37 @@
+@@ -11384,26 +11394,37 @@
                          deskLastClipboardSent = null;
                      }
                      if (updateSessionTimer == null) { updateSessionTimer = setInterval(updateSessionTime, 1000); }

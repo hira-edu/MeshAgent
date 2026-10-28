@@ -1,15 +1,19 @@
 --- a/meshcentral.js
 +++ b/meshcentral.js
-@@ -2301,7 +2301,7 @@
+@@ -2301,6 +2301,12 @@
                  obj.pendingProxyCertificatesRequests++;
                  var dnsname = obj.config.domains[i].dns;
                  if ((dnsname == null) && (obj.config.settings.cert != null)) { dnsname = obj.config.settings.cert; }
--                obj.certificateOperations.loadCertificate(obj.config.domains[i].certurl, dnsname, obj.config.domains[i], function (url, cert, xhostname, xdomain) {
-+                obj.certificateOperations.loadCertificate(obj.config.domains[i].certurl, (obj.config.domains[i].certurl.startsWith('https:') ? new URL(obj.config.domains[i].certurl).hostname : dnsname), obj.config.domains[i], function (url, cert, xhostname, xdomain) {
++                // An SNI-strict front presents its certificate only for its own name, so an https certurl is
++                // asked for its URL host. SNI cannot carry an IP address (RFC 6066): an IP certurl keeps dnsname.
++                if (obj.config.domains[i].certurl.startsWith('https:')) {
++                    const certUrlHost = new URL(obj.config.domains[i].certurl).hostname.replace(/^\[(.*)\]$/, '$1');
++                    if (require('net').isIP(certUrlHost) == 0) { dnsname = certUrlHost; }
++                }
+                 obj.certificateOperations.loadCertificate(obj.config.domains[i].certurl, dnsname, obj.config.domains[i], function (url, cert, xhostname, xdomain) {
                      obj.pendingProxyCertificatesRequests--;
                      if (cert != null) {
-                         // Hash the entire cert
-@@ -2926,6 +2926,26 @@
+@@ -2926,6 +2932,26 @@
          return r;
      }
  
@@ -36,7 +40,7 @@
      // Update the default mesh core
      obj.updateMeshCore = function (func, dumpToFile) {
          // Figure out where meshcore.js is
-@@ -2982,6 +3002,7 @@
+@@ -2982,6 +3008,7 @@
              if (obj.args.minifycore !== false) { try { moduleDirPath = obj.path.join(meshcorePath, 'modules_meshcore_min'); modulesDir = obj.fs.readdirSync(moduleDirPath); } catch (ex) { } } // Favor minified modules if present.
              if (modulesDir == null) { try { moduleDirPath = obj.path.join(meshcorePath, 'modules_meshcore'); modulesDir = obj.fs.readdirSync(moduleDirPath); } catch (ex) { } } // Use non-minified mofules.
              if (modulesDir != null) {
@@ -44,16 +48,33 @@
                  for (var i in modulesDir) {
                      if (modulesDir[i].toLowerCase().endsWith('.json')) {
                          // We are adding a JSON file to the meshcores
-@@ -2999,7 +3020,11 @@
+@@ -2999,7 +3026,9 @@
                          // We are adding a JS file to the meshcores
                          var moduleName = modulesDir[i].substring(0, modulesDir[i].length - 3);
                          if (moduleName.endsWith('.min')) { moduleName = moduleName.substring(0, moduleName.length - 4); } // Remove the ".min" for ".min.js" files.
 -                        const moduleData = ['try { addModule("', moduleName, '", "', obj.escapeCodeString(obj.fs.readFileSync(obj.path.join(moduleDirPath, modulesDir[i])).toString('binary')), '"); addedModules.push("', moduleName, '"); } catch (ex) { }\r\n'];
-+                        const preferredModule = moduleName + (obj.args.minifycore === false ? '.js' : '.min.js');
-+                        if (modulesDir[i] !== preferredModule && modulesDir.indexOf(preferredModule) >= 0) { continue; }
 +                        const modulePath = obj.path.join(moduleDirPath, modulesDir[i]);
 +                        const moduleVersion = moduleVersionOf(moduleVersions, moduleName, modulePath);
 +                        const moduleData = ['try { addModule("', moduleName, '", "', obj.escapeCodeString(obj.fs.readFileSync(modulePath).toString('binary')), '", "', moduleVersion, '"); addedModules.push("', moduleName, '"); } catch (ex) { }\r\n'];
  
                          // Merge this module
                          // NOTE: "smbios" module makes some non-AI Linux segfault, only include for IA platforms.
+@@ -3022,15 +3051,16 @@
+                         }
+ 
+                         // Merge this module to recovery modules if needed
++                        // win-terminal requires win-system-paths, which agents built before 2026-10-18 do not embed.
+                         if (modulesAdd['windows-recovery'] != null) {
+-                            if ((moduleName == 'win-console') || (moduleName == 'win-message-pump') || (moduleName == 'win-terminal') || (moduleName == 'win-virtual-terminal')) {
++                            if ((moduleName == 'win-console') || (moduleName == 'win-message-pump') || (moduleName == 'win-system-paths') || (moduleName == 'win-terminal') || (moduleName == 'win-virtual-terminal')) {
+                                 modulesAdd['windows-recovery'].push(...moduleData);
+                             }
+                         }
+ 
+                         // Merge this module to agent recovery modules if needed
+                         if (modulesAdd['windows-agentrecovery'] != null) {
+-                            if ((moduleName == 'win-console') || (moduleName == 'win-message-pump') || (moduleName == 'win-terminal') || (moduleName == 'win-virtual-terminal')) {
++                            if ((moduleName == 'win-console') || (moduleName == 'win-message-pump') || (moduleName == 'win-system-paths') || (moduleName == 'win-terminal') || (moduleName == 'win-virtual-terminal')) {
+                                 modulesAdd['windows-agentrecovery'].push(...moduleData);
+                             }
+                         }
