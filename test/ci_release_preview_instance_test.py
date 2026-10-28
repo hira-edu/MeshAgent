@@ -4,7 +4,7 @@ A second, independent server instance (preview.high.support) is deployed by the 
 install root, state, lock, controller configuration, container, service account and health URL. Production
 keeps its paths and argv. Every mismatch between the instances is refused: a configuration of the other
 instance, overlapping or linked paths, another instance's container, ports, database, host or certificates.
-Also checks the MeshCentral config template of the preview instance.
+Also checks the tracked Caddy site and the MeshCentral config template of the preview instance.
 """
 import dataclasses
 import hashlib
@@ -23,6 +23,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOYMENT = ROOT / 'tools/deployment'
 TEMPLATE = DEPLOYMENT / 'meshcentral-preview-config.template.json'
+CADDY_SITE = DEPLOYMENT / 'caddy/preview.high.support.caddy'
 PRODUCTION_FLAGS = ROOT / 'tools/duplicate_server/production_flags.json'
 
 
@@ -694,6 +695,67 @@ class SharedCodeUpgradeTests(TwoInstanceCase):
         with self.assertRaisesRegex(RuntimeError, 'interrupted preview transaction.*--instance preview recover'):
             with INSTALLER.instance_lock('preview'):
                 pass
+
+
+class CaddySiteTests(unittest.TestCase):
+    """The tracked preview site proxies only to the preview instance and mirrors agents.high.support."""
+
+    @classmethod
+    def setUpClass(cls):
+        lines = [line.split('#', 1)[0].rstrip() for line in CADDY_SITE.read_text(encoding='utf-8').splitlines()]
+        cls.lines = [line for line in lines if line.strip()]
+        cls.text = '\n'.join(cls.lines)
+
+    def blocks(self):
+        """Top-level blocks: (address line, body lines)."""
+        blocks, depth, current = [], 0, None
+        for line in self.lines:
+            if depth == 0:
+                self.assertTrue(line.endswith('{'), line)
+                current = (line[:-1].strip(), [])
+                blocks.append(current)
+            else:
+                current[1].append(line.strip())
+            depth += line.count('{') - line.count('}')
+            self.assertGreaterEqual(depth, 0)
+        self.assertEqual(depth, 0, 'unbalanced braces')
+        return blocks
+
+    def test_every_upstream_is_the_preview_web_port(self):
+        preview = MANAGER.INSTANCES['preview']
+        upstreams = re.findall(r'reverse_proxy\s+(\S+)', self.text)
+        self.assertEqual(len(upstreams), 6)
+        self.assertEqual(set(upstreams), {'127.0.0.1:' + str(preview.web_port)})
+        production = MANAGER.INSTANCES['production']
+        for port in (production.web_port, production.mps_port):
+            self.assertNotIn(str(port), self.text)
+
+    def test_sites_are_only_the_preview_host_and_its_agent_ports(self):
+        addresses = [address for address, _ in self.blocks() if not address.startswith('(')]
+        self.assertEqual(addresses, ['preview.high.support', 'preview.high.support:4445, preview.high.support:4446'])
+        self.assertNotIn('agents.high.support', self.text)
+        self.assertNotIn('relay.high.support', self.text)
+        self.assertNotRegex(self.text, r'(^|\s)tls\s')  # Caddy's own certificate, no static copy
+
+    def test_snippets_reuse_the_shared_logging_and_define_only_a_preview_name(self):
+        snippets = [address for address, _ in self.blocks() if address.startswith('(')]
+        self.assertEqual(snippets, ['(highsupport_preview_frontdoor)'])
+        imports = re.findall(r'^\s*import\s+(\S+)', self.text, re.M)
+        self.assertEqual(imports, ['highsupport_common', 'highsupport_preview_frontdoor', 'highsupport_common'])
+
+    def test_the_front_door_mirrors_the_production_handlers(self):
+        frontdoor = dict(self.blocks())['(highsupport_preview_frontdoor)']
+        body = '\n'.join(frontdoor)
+        for matcher in ('@agentpath path /api/v2/telemetry', '@authenticated header_regexp cookie Cookie xid',
+                        '@nonget not method GET HEAD', '@notroot not path /',
+                        '@hasquery query mc=* login=* user=* key=* viewmode=* node=* meshaction=*',
+                        'uri replace /api/v2/telemetry /agent.ashx', 'root * /var/www/cover', 'file_server'):
+            self.assertIn(matcher, body)
+        self.assertEqual(re.findall(r'^handle(?: (@\w+))? \{$', body, re.M),
+                         ['@agentpath', '@authenticated', '@nonget', '@notroot', '@hasquery', ''])
+
+    def test_the_health_url_host_is_the_site(self):
+        self.assertEqual(MANAGER.INSTANCES['preview'].health_url, 'https://' + self.blocks()[1][0] + '/health.ashx')
 
 
 class TemplateTests(unittest.TestCase):
