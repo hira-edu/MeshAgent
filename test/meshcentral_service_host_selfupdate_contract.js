@@ -148,14 +148,15 @@ function updaterCases(source) {
             assert.strictEqual(u.log.failures, 1);
             assert(!u.log.fs.some((op) => op[0] === 'createWriteStream'), 'nothing is staged');
         },
-        otherPlatformsDeleteTheStagedFileAndRefuse() {
-            const u = updater(source, 'darwin');
-            u.start('*/meshagents?id=16', { hash: VALID_HASH });
-            respond(u, 200, VALID_HASH);
-            assert(u.log.console.includes('Self Update disabled for this platform; native service lifecycle is required.'));
-            assert.deepStrictEqual(replacedExecutable(u), []);
-            assert(u.log.fs.some((op) => op[0] === 'unlinkSync' && op[1] === u.staged), 'the staged file is removed');
-            assert.strictEqual(u.log.failures, 1);
+        otherPlatformsRefuseBeforeAnyRequestOrFile() {
+            for (const platform of ['darwin', 'android']) {
+                const u = updater(source, platform);
+                u.start('*/meshagents?id=16', { hash: VALID_HASH });
+                assert(u.log.console.includes('Self Update disabled for this platform; native service lifecycle is required.'), platform);
+                assert.deepStrictEqual(u.log.requests, [], platform + ': no download');
+                assert.deepStrictEqual(u.log.fs, [], platform + ': no file access');
+                assert.strictEqual(u.log.failures, 1, platform + ': the failure is reported to the server');
+            }
         },
         noLegacyWindowsUpdater() {
             const hits = LEGACY_UPDATER_TOKENS.filter((token) => source.includes(token));
