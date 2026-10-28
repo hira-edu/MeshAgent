@@ -15,6 +15,12 @@ function extract(name) {
 }
 const agent = crypto.generateKeyPairSync('rsa', {modulusLength: 2048});
 const current = crypto.randomBytes(48).toString('binary');
+// The four hashes stock MeshCentral admits: the current key and full-certificate hashes and the
+// default certificate's two hashes.
+const currentFull = crypto.randomBytes(48).toString('binary');
+const defaultKey = crypto.randomBytes(48).toString('binary');
+const defaultFull = crypto.randomBytes(48).toString('binary');
+const hex = hash => Buffer.from(hash, 'binary').toString('hex');
 const historical = crypto.randomBytes(48).toString('binary');
 const historicalHex = Buffer.from(historical, 'binary').toString('hex');
 const other = crypto.randomBytes(48).toString('binary');
@@ -22,13 +28,13 @@ const common = {ShortToStr: n => String.fromCharCode(n >> 8, n & 255)};
 const requestStart = source.indexOf('            if (cmd == 1) {');
 const requestEnd = source.indexOf('\n            else if (cmd == 2)', requestStart);
 assert(requestStart >= 0 && requestEnd > requestStart);
-const functions = ['getWebCertHash', 'getWebCertFullHash', 'isHistoricalWebCertHash', 'processAgentSignature'].map(extract).join('\n');
+const functions = ['getWebCertHash', 'getWebCertFullHash', 'isServerWebCertHash', 'isHistoricalWebCertHash', 'processAgentSignature'].map(extract).join('\n');
 
 function fixture(pins) {
     const sent = [], issues = [], audits = [];
     const domain = {id: 'test', agentwebcerthashes: pins};
-    const parent = {crypto, webCertificateHashs: {}, webCertificateFullHashs: {}, webCertificateHash: current, webCertificateFullHash: current,
-        defaultWebCertificateHash: current, defaultWebCertificateFullHash: current, agentCertificateAsn1: 'certificate', agentStats: {},
+    const parent = {crypto, webCertificateHashs: {}, webCertificateFullHashs: {}, webCertificateHash: current, webCertificateFullHash: currentFull,
+        defaultWebCertificateHash: defaultKey, defaultWebCertificateFullHash: defaultFull, agentCertificateAsn1: 'certificate', agentStats: {},
         setAgentIssue: (obj, issue) => issues.push(issue), parent: {supportsProxyCertificatesRequest: false, debug() {},
             certificateOperations: {acceleratorPerformSignature(id, data, tag, callback) { callback(tag, 'server-proof'); }}}};
     const obj = {nonce: crypto.randomBytes(48).toString('binary'), receivedCommands: 0, authenticated: 0, remoteaddrport: 'probe',
@@ -50,6 +56,19 @@ for (const hash of [current, historical]) {
     assert.equal(f.context.processAgentSignature(signature.toString('binary')), true);
     assert.equal(f.obj.authenticated, 1);
     assert.equal(f.audits.filter(x => x.startsWith('[AGENT_CERT_COMPAT]')).length, hash === historical ? 1 : 0);
+}
+// SRV-14: [AGENT_CERT_COMPAT] counts the agents the pin list alone admits. A hash that stock
+// MeshCentral already accepts is not a compatibility admission, even when it is also pinned.
+for (const hash of [current, currentFull, defaultKey, defaultFull, historical]) {
+    const f = fixture([historicalHex, hex(current), hex(currentFull), hex(defaultKey), hex(defaultFull)]);
+    const nonce = crypto.randomBytes(48).toString('binary');
+    f.context.request(common.ShortToStr(1) + hash + nonce);
+    assert.equal(f.sent.length, 2, 'pinned and stock hashes are both admitted');
+    const signature = crypto.sign('sha384', Buffer.from(hash + f.obj.nonce + nonce, 'binary'), agent.privateKey);
+    assert.equal(f.context.processAgentSignature(signature.toString('binary')), true);
+    const audits = f.audits.filter(x => x.startsWith('[AGENT_CERT_COMPAT]'));
+    assert.equal(audits.length, hash === historical ? 1 : 0, hash === historical ? 'a pin-only admission is audited' : 'a stock match is not audited although it is pinned');
+    if (hash === historical) { assert(audits[0].includes('node=known-agent') && audits[0].includes('webHash=' + historicalHex), 'the audit names the node and the pinned hash'); }
 }
 for (const pins of [undefined, true, '*', ['*'], [null], [historicalHex.slice(2)], ['0'.repeat(96)], [other]]) {
     const f = fixture(pins);
@@ -74,4 +93,4 @@ replay.context.request(msg); replay.context.request(msg);
 assert.equal(replay.sent.length, 2, 'duplicate authentication request remains blocked');
 assert.equal(replay.context.isHistoricalWebCertHash(replay.domain, '\0'.repeat(48)), false);
 assert.equal(replay.context.isHistoricalWebCertHash(replay.domain, historical + 'x'), false);
-console.log('PASS: current/historical TLS admission, actual RSA proof, invalid signatures, unknown/malformed/zero pins, domain isolation and replay guard');
+console.log('PASS: current/historical TLS admission, audit only for pin-only admissions, actual RSA proof, invalid signatures, unknown/malformed/zero pins, domain isolation and replay guard');
