@@ -34,9 +34,6 @@ env:
   MESHCENTRAL_UPSTREAM_TAGS: >-
     1.2.1=a2876029077b04a1708e2c92cbba96831f791b6a
     1.2.5=b09b1d60328de8e2d2f7387561ed51c64011c82a
-  # Optional override for the wrapper folder inside the MeshCentral checkout ('.' or
-  # 'deploy'). When unset, the folder is detected; see "Install MeshCentral wrapper".
-  MESHCENTRAL_WRAPPER_DIR: ${{ vars.MESHCENTRAL_WRAPPER_DIR }}
   # Node matches the duplicate server and production (SSOT D20). Python matches the
   # release workflow.
   NODE_VERSION: '20.20.2'
@@ -127,27 +124,12 @@ jobs:
         id: wrapper
         run: |
           set -euo pipefail
-          # The deployment wrapper is the package.json named meshcentral-deploy. It sits at
-          # the repository root today and moves to deploy/ in Stage 1 (SSOT D1).
-          is_wrapper() {
-            local manifest="$MESHCENTRAL_ROOT/$1/package.json"
-            [ -f "$manifest" ] && [ "$(node -p 'require(process.argv[1]).name' "$manifest")" = meshcentral-deploy ]
-          }
-          if [ -n "${MESHCENTRAL_WRAPPER_DIR:-}" ]; then
-            dir="$MESHCENTRAL_WRAPPER_DIR"
-            is_wrapper "$dir" || { echo "::error::MESHCENTRAL_WRAPPER_DIR=$dir has no package.json named meshcentral-deploy"; exit 1; }
-          else
-            found=()
-            for candidate in . deploy; do
-              if is_wrapper "$candidate"; then found+=("$candidate"); fi
-            done
-            if [ "${#found[@]}" -ne 1 ]; then
-              echo "::error::Expected exactly one meshcentral-deploy package.json in MeshCentral (root or deploy/), found ${#found[@]}: ${found[*]:-none}. Set the MESHCENTRAL_WRAPPER_DIR variable."
-              exit 1
-            fi
-            dir="${found[0]}"
-          fi
-          wrapper="$(cd "$MESHCENTRAL_ROOT/$dir" && pwd)"
+          # The deployment wrapper is deploy/package.json, named meshcentral-deploy (Stage 1, SSOT D1).
+          wrapper="$MESHCENTRAL_ROOT/deploy"
+          manifest="$wrapper/package.json"
+          [ -f "$manifest" ] || { echo "::error::$manifest missing: MeshCentral $MESHCENTRAL_REF does not have the Stage 1 layout"; exit 1; }
+          name="$(node -p 'require(process.argv[1]).name' "$manifest")"
+          [ "$name" = meshcentral-deploy ] || { echo "::error::$manifest is named $name, not meshcentral-deploy"; exit 1; }
           test -f "$wrapper/package-lock.json" || { echo "::error::$wrapper/package-lock.json missing; npm ci needs it"; exit 1; }
           echo "MeshCentral wrapper: $wrapper"
           echo "MESHCENTRAL_WRAPPER_PATH=$wrapper" >> "$GITHUB_ENV"
@@ -273,20 +255,12 @@ jobs:
           done
           finish_group deploy
 
-      - name: MeshCentral tests (node --test tests/*.test.js)
+      - name: MeshCentral tests (node --test deploy/tests/*.test.js)
         if: ${{ !cancelled() && steps.wrapper.outcome == 'success' }}
         run: |
           source "$RUNNER_TEMP/test-runner.sh"
-          # tests/ is at the MeshCentral root today; Stage 1 may move it beside the wrapper.
-          dirs=()
-          for candidate in tests deploy/tests; do
-            if [ -d "$MESHCENTRAL_ROOT/$candidate" ]; then dirs+=("$candidate"); fi
-          done
-          [ "${#dirs[@]}" -gt 0 ] || { echo "::error::No tests/ or deploy/tests/ folder in $MESHCENTRAL_ROOT"; exit 1; }
-          for d in "${dirs[@]}"; do
-            tests="$(cd "$MESHCENTRAL_ROOT" && expand "$d/*.test.js")" || exit 1
-            while IFS= read -r t; do run_test meshcentral "$t" "$MESHCENTRAL_ROOT" node --test "$t"; done <<< "$tests"
-          done
+          tests="$(cd "$MESHCENTRAL_ROOT" && expand 'deploy/tests/*.test.js')" || exit 1
+          while IFS= read -r t; do run_test meshcentral "$t" "$MESHCENTRAL_ROOT" node --test "$t"; done <<< "$tests"
           finish_group meshcentral
 
       - name: Summarise results

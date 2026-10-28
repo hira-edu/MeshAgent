@@ -91,11 +91,13 @@ MeshCentral contracts and runtime tests find MeshCentral through
   generators), `deploy/meshcentral-web/public/scripts/custom.js` (the served
   `custom.js`) and `deploy/meshcentral-data` (local server state). A test that
   reads a wrapper file fails on a checkout without it.
-- The installed package: exactly one of `deploy/node_modules/meshcentral` or a
-  root `node_modules/meshcentral` left from the old wrapper layout. Neither or
-  both fails; delete the stale root `node_modules` if both exist. Install it in
+- The installed package: `deploy/node_modules/meshcentral`. Install it in
   `deploy/` with `npm run pack` (packs the fork into `deploy/dist/`, which the
-  wrapper lockfile pins) and then `npm ci`.
+  wrapper lockfile pins) and then `npm ci`. A root `node_modules/meshcentral` is
+  a stale install from before Stage 1 and fails with `Stale pre-Stage-1
+  meshcentral install`, whether the checkout came from `MESHCENTRAL_ROOT` or the
+  sibling fallback. Point `MESHCENTRAL_ROOT` at a checkout or worktree without a
+  root `node_modules`, or remove it.
 - The pinned upstream reference: the stock npm package named in
   `test/lib/meshcentral_upstream_reference.json` (`meshcentral` 1.2.5), which
   tests compare the fork with. Tests never download it. Populate it once per
