@@ -56,21 +56,32 @@ def main():
     if env['GITHUB_REPOSITORY'] != runtime_repository:
         raise ValueError('Run the coordinator in the private runtime repository')
     runtime_sha = env['GITHUB_SHA']
+    trigger_repository, trigger_sha = env['GITHUB_REPOSITORY'], runtime_sha
+    if env['GITHUB_EVENT_NAME'] == 'repository_dispatch':
+        payload = event.get('client_payload', {})
+        if (payload.get('repository') not in (repository, agent_repository) or
+                not re.fullmatch(r'[0-9a-f]{40}', payload.get('sha', ''))):
+            raise ValueError('Dispatch must identify an approved sibling and a commit SHA')
+        # Dispatch delivery order is not guaranteed. Treat it as a wake-up signal;
+        # build the frozen current heads even when an older notification arrives last.
+        trigger_repository, trigger_sha = payload['repository'], payload['sha']
     if deploy:
-        if env['GITHUB_EVENT_NAME'] == 'repository_dispatch':
-            payload = event.get('client_payload', {})
-            expected = {repository: central_sha, agent_repository: agent_sha}
-            if payload.get('repository') not in expected or not re.fullmatch(r'[0-9a-f]{40}', payload.get('sha', '')):
-                raise ValueError('Dispatch must identify an approved sibling and a commit SHA')
-            # Dispatch delivery order is not guaranteed. Treat it as a wake-up signal;
-            # build the frozen current heads even when an older notification arrives last.
         if head(runtime_repository) != runtime_sha or head(agent_repository) != agent_sha:
             raise ValueError('Refusing a stale coordinated release')
+    trigger = env['GITHUB_EVENT_NAME'] + ' ' + trigger_repository + '@' + trigger_sha
     with open(env['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
         stream.write('deploy_requested=' + str(deploy).lower() + '\n')
         stream.write('meshagent_sha=' + agent_sha + '\n')
         stream.write('meshcentral_sha=' + central_sha + '\n')
         stream.write('runtime_sha=' + runtime_sha + '\n')
+        stream.write('trigger=' + trigger + '\n')
+    if env.get('GITHUB_STEP_SUMMARY'):
+        # Every later job uses exactly these commits; pinning and deployment check they are still the heads.
+        with open(env['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as stream:
+            stream.write('### Release sources\n\n| Repository | Commit |\n| --- | --- |\n')
+            for name, sha in ((agent_repository, agent_sha), (repository, central_sha), (runtime_repository, runtime_sha)):
+                stream.write('| ' + name + ' | `' + sha + '` |\n')
+            stream.write('\nTriggered by ' + trigger + '; deployment requested: ' + str(deploy).lower() + '.\n\n')
 
 
 if __name__ == '__main__':

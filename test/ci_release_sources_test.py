@@ -75,6 +75,31 @@ class SourceSelectionTests(unittest.TestCase):
                                          'client_payload': {'repository': 'owner/MeshAgent', 'sha': 'd' * 40}}))
         self.invoke()
         self.assertIn('meshagent_sha=' + 'a' * 40, self.output.read_text())
+        # The notification is recorded as the trigger; the build uses the frozen heads.
+        self.assertIn('trigger=repository_dispatch owner/MeshAgent@' + 'd' * 40, self.output.read_text())
+
+    def test_trigger_and_frozen_sources_are_recorded_in_the_run_summary(self):
+        summary = self.root / 'summary'
+        with mock.patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(summary)}):
+            self.invoke()
+        self.assertIn('trigger=repository_dispatch owner/MeshAgent@' + 'a' * 40, self.output.read_text())
+        text = summary.read_text()
+        for name, sha in self.heads.items():
+            self.assertIn('| ' + name + ' | `' + sha + '` |', text)
+        self.assertIn('Triggered by repository_dispatch owner/MeshAgent@' + 'a' * 40, text)
+
+    def test_own_push_is_the_trigger(self):
+        self.event.write_text(json.dumps({'repository': {'default_branch': 'main'}}))
+        with mock.patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'push'}):
+            self.invoke()
+        self.assertIn('trigger=push owner/hook@' + 'c' * 40, self.output.read_text())
+
+    def test_invalid_dispatch_fails_even_without_a_deployment_request(self):
+        self.event.write_text(json.dumps({'repository': {'default_branch': 'main'},
+                                         'client_payload': {'repository': 'outside/repo', 'sha': 'c' * 40}}))
+        with mock.patch.dict(os.environ, {'AUTO_DEPLOY': 'false'}), self.assertRaisesRegex(ValueError, 'Dispatch'):
+            self.invoke()
+        self.assertFalse(self.output.exists())
 
     def test_each_newer_repository_head_blocks_stale_promotion(self):
         self.invoke('--check-current')
