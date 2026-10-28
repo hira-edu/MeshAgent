@@ -1,7 +1,8 @@
 # Deployment
 
 `deploy.py` is the repository's deployment interface for publishing reviewed
-MeshAgent builds and configured MeshCentral support files to the VPS. This page
+MeshAgent builds to the VPS. It no longer publishes MeshCentral files (see
+[MeshCentral files are not published by deploy.py](#meshcentral-files-are-not-published-by-deploypy)). This page
 documents that workflow; it does not keep server-specific IP addresses,
 credentials, deployment snapshots, or migration history.
 
@@ -23,7 +24,8 @@ If signing credentials are configured, signing failures block the build.
 Windows x86, x64, and ARM64 payloads are verified against their matching service
 DLLs. An Ubuntu build assembles the complete MeshCentral package with `npm ci`
 from the sibling lockfile, applies the manual deployment map, and packages the
-payloads into a private GHCR image. The Node/OS base and GitHub actions are pinned
+payloads into a private GHCR image; this build does not yet handle the MeshCentral
+fork's layout (see [Image build context](#image-build-context)). The Node/OS base and GitHub actions are pinned
 by digest/commit. BuildKit publishes provenance and an SBOM. Deployments promote
 the image digest; they do not rebuild or pull mutable tags on the VPS.
 
@@ -34,19 +36,25 @@ The VPS controller accepts only MeshCentral versions listed in the
 migrations are not run as an incidental part of a push.
 
 A MeshCentral version change must also be reviewed against the views the mobile
-trackpad mode is coupled to. In order:
-1. Run `test/meshcentral_trackpad_default3_coupling_contract.js`,
+trackpad mode is coupled to. These checks read the stock upstream package pinned
+in `test/lib/meshcentral_upstream_reference.json` (see "MeshCentral checkout
+location" in [testing](testing/README.md)), not the fork. In order:
+1. Point the pin at the new upstream release: `version`, `tarball` and npm's
+   sha512 `integrity`, then `treeDigest` and `fileCount` as printed by
+   `python test/lib/fetch_upstream_reference.py --print-tree-digest <extracted package folder>`.
+   Populate the cache with `python test/lib/fetch_upstream_reference.py`.
+2. Run `test/meshcentral_trackpad_default3_coupling_contract.js`,
    `test/meshcentral_trackpad_default_mobile_coupling_contract.js`,
    `test/meshcentral_trackpad_sharing_mobile_coupling_contract.js`,
    `test/meshcentral_trackpad_sharing_coupling_contract.js` and
    `test/meshcentral_desktop_pointer_baseline_runtime.js`; each fails on a
-   version it is not pinned to.
-2. Review the upstream diff of the desktop touch, trackpad, zoom and state code
+   version other than its `PINNED_MESHCENTRAL`.
+3. Review the upstream diff of the desktop touch, trackpad, zoom and state code
    in `default3.handlebars`, `default-mobile.handlebars`,
    `sharing-mobile.handlebars` and `sharing.handlebars`.
-3. Re-pin the baseline traces with `--print`, then update the contracts.
-4. Run the trackpad browser tests.
-5. Only then change the pin.
+4. Re-pin the baseline traces with `--print`, then update the contracts and
+   their `PINNED_MESHCENTRAL`.
+5. Run the trackpad browser tests.
 
 ### GitHub configuration
 
@@ -323,14 +331,30 @@ domain and run with the same `NODE_OPTIONS` preload, logging to `--server-log`.
 
 The image build's context root is the folder holding the `MeshCentral`,
 `MeshAgent`, and `artifacts` checkouts. `tools/deployment/Dockerfile.dockerignore`
-sends only what the Dockerfile copies. It drops MeshCentral's `node_modules`,
-`meshcentral-data`, `meshcentral-files`, `meshcentral-backups`,
+sends only what the Dockerfile copies. It drops MeshCentral's root
+`node_modules`, `meshcentral-data`, `meshcentral-files`, `meshcentral-backups`,
 `meshcentral-recordings`, `meshcentral-web`, and `server-backups`, every
 MeshAgent file except the three the build uses, and any other sibling folder.
-Local server state, keys, database dumps, and `branding_config.local.json` never
-enter the context. Only BuildKit (the default builder since Docker 23) reads a
+Only BuildKit (the default builder since Docker 23) reads a
 `<Dockerfile>.dockerignore` beside the Dockerfile. The legacy builder ignores
 it and would send the whole context, so build with BuildKit.
+
+The Dockerfile and these rules still follow the wrapper layout MeshCentral had
+before the fork, and do not work with the current MeshCentral checkout:
+
+- The Dockerfile runs `npm ci` on `MeshCentral/package.json` and
+  `package-lock.json`. In the fork these are the MeshCentral package's own
+  manifest, not the deployment wrapper (now under `MeshCentral/deploy/`), so no
+  `node_modules/meshcentral` is installed.
+- `tools/prepare_release_image.py` copies every MeshCentral file `deploy.py`
+  declares, and 20 of them (`agents/meshcore.min.js` and the
+  `agents/modules_meshcore_min/` copies) no longer exist in the fork.
+- The rules do not exclude `MeshCentral/deploy/node_modules` or
+  `MeshCentral/deploy/meshcentral-data`. A local `config.json` or keys there
+  enter the build context.
+
+A build from the current MeshCentral checkout therefore fails in
+`prepare_release_image.py`.
 
 The root-owned release controller runs as a systemd transient service and holds
 an exclusive VPS lock through staging, activation, checks, and rollback. It
@@ -525,15 +549,17 @@ deployment tool uses these Windows paths when it performs remote native update
 activation. Keep local identity and credential files out of version control.
 
 `stage` validates required local MeshAgent artifacts, checks embedded service
-bundle parity and the DLL's `ServiceHost_ServiceMain` export, selects configured
-MeshCentral and optional UserModeHook files, creates a digest manifest, uploads
+bundle parity and the DLL's `ServiceHost_ServiceMain` export, lists every
+declared MeshCentral file as refused, selects the agent payloads and the
+optional UserModeHook `MasterService.exe`, creates a digest manifest, uploads
 the bundle, and verifies the staged bytes.
 The script's artifact mappings in `deploy.py` are the source of truth for
 staging names and destinations.
 
 When TLS terminates at a proxy, the domain's `certUrl` must identify the HTTPS
-endpoint used by agents. Staging aligns the certificate loader's TLS SNI with
-that URL's hostname, including when the console and agent endpoints differ.
+endpoint used by agents. The fork's `meshcentral.js` aligns the certificate
+loader's TLS SNI with that URL's hostname, including when the console and agent
+endpoints differ. Staging no longer patches the server's loader.
 Enable agent hash checking by setting `ignoreAgentHashCheck` to `false` and
 removing any domain or IP exceptions that skip the check.
 
@@ -614,7 +640,7 @@ python .\deploy.py health
 
 Before copying files, `deploy.py deploy` verifies the staged manifest against
 the current local artifacts. It backs up every path the release will write or
-remove, deploys the staged agent and server-support files, refreshes
+remove, deploys the staged agent files, refreshes
 MeshCentral's `hashagents.json`, verifies published bytes, restarts MeshCentral,
 and verifies the published state again after the restart.
 
@@ -655,7 +681,8 @@ The refusal is explicit, and nothing is silently dropped:
 - `status`, `health` and `repair-hashagents` report the MeshCentral files as refused and read
   nothing about them over SSH.
 - `CORE_ARTIFACTS` stays declared, so backups, restores and rollbacks of earlier releases
-  still cover those paths.
+  still cover those paths. This includes `meshcore.min.js` and the `modules_meshcore_min`
+  copies, which the fork no longer has (D24).
 
 ### Backups and automatic restore
 
@@ -730,10 +757,20 @@ uploaded. After the upload the tool asks before restarting MeshCentral.
 ### Online agent updates
 
 `update-online` runs MeshCentral's `meshctrl.js` and
-`tools/meshcentral_update_agents.js` on the workstation, against the sibling
-`../MeshCentral` checkout. Before fetching the server's login key it requires
-`node` on `PATH`, `MeshCentral/meshctrl.js`, and the `minimist` and `ws` modules
-in `MeshCentral/node_modules`. Run `npm ci` in the MeshCentral checkout first.
+`tools/meshcentral_update_agents.js` on the workstation, from the deployment
+wrapper of the sibling `../MeshCentral` checkout (`MESHCENTRAL_ROOT` does not
+apply here). Before fetching the server's login key it requires `node` on
+`PATH`, the installed package's
+`MeshCentral/deploy/node_modules/meshcentral/meshctrl.js`, the `minimist` and
+`ws` modules in `MeshCentral/deploy/node_modules`, and the update helper. The
+wrapper installs the fork package from a tarball it packs itself, so set it up
+in `MeshCentral/deploy` with:
+
+```powershell
+npm run pack
+npm ci
+```
+
 When anything is missing, the command fails and names it. There is no remote
 fallback, and the login key is held only in a local temporary file that is
 deleted afterwards. `--dry-run` lists the online targets without submitting
@@ -742,11 +779,12 @@ updates; it still fetches the login key over SSH.
 ## macOS release
 
 A Mac releases the macOS agent with the `macos` profile; the Windows workstation
-keeps releasing the Windows payloads and the shared MeshCentral core and modules.
-The profile stages only `meshagent_osx-arm-64` (published to
-`meshcentral-data/agents`) and the macOS installer builder `macosinstaller.js`. It
-needs no Windows artifacts or branding, uses its own staging directory, and tags
-its backups with `-macos`. Pass the profile before the command:
+keeps releasing the Windows payloads. The profile stages only
+`meshagent_osx-arm-64` (published to `meshcentral-data/agents`). It still
+declares the macOS installer builder `macosinstaller.js`, which is refused like
+every MeshCentral file. The profile needs no Windows artifacts or branding, uses
+its own staging directory, and tags its backups with `-macos`. Pass the profile
+before the command:
 
 ```sh
 export MESHCENTRAL_SERVER="<vps-host>"
