@@ -799,40 +799,32 @@ function main() {
                 'mscoree.dll',
                 'pshost.out'
             ]).length === 0,
+        // Structure only. The bridge and run-command behaviour is executed by
+        // test/windows_terminal_failure_runtime.js and MeshCentral deploy/tests/runcommands-terminal-output.test.js.
         terminalUsesConsoleBridge:
             sources.terminal.includes("require('win-system-paths').system32Path('rundll32.exe')") &&
-            sources.terminal.includes('MeshConsoleBridge_') &&
             sources.terminal.includes("serviceDllPath + ',MeshConsoleBridgeW'") &&
             !sources.terminal.includes('",MeshConsoleBridgeW') &&
             sources.terminal.includes('childProcess.execFile(runtimeHostPath, args)') &&
             sources.terminal.includes('resolveInstalledServiceDllPath') &&
-            sources.terminal.includes('StartAsUser') &&
-            sources.terminal.includes('StartPowerShellAsUser') &&
-            sources.terminal.includes('function chunkToInputData(chunk)') &&
-            sources.terminal.includes("if (typeof(chunk) == 'string')") &&
-            sources.terminal.includes("data = Buffer.from(chunk, 'utf8');") &&
-            sources.terminal.includes('try { data = Buffer.from(chunk); }') &&
-            sources.terminal.includes('return ({ payload: data, length: data.length });') &&
-            sources.terminal.includes("textValue != null && textValue.length > 0 && textValue != '[object Object]'") &&
-            sources.terminal.includes("data = Buffer.from(textValue, 'utf8');") &&
-            sources.terminal.includes('write: function write(chunk, encoding, flush)') &&
-            sources.terminal.includes("if (typeof(encoding) == 'function' && flush == null) { flush = encoding; }") &&
-            sources.terminal.includes('return (self.writeInput(chunk, flush));') &&
-            sources.terminal.includes('var input = chunkToInputData(chunk);') &&
-            sources.terminal.includes("fallbackText = '' + chunk.toString();") &&
-            sources.terminal.includes('input = chunkToInputData(fallbackText);') &&
-            sources.terminal.includes("if (typeof(flush) != 'function') { flush = null; }") &&
-            sources.terminal.includes('this.pendingWrites.push({ chunk: input.payload, flush: flush });') &&
-            sources.terminal.includes('this.inputSocket.write(input.payload);') &&
-            sources.terminal.includes('this.stream._meshTerminalLastWriteBytes = input.length;') &&
-            sources.terminal.includes('return (true);') &&
-            sources.terminal.includes('return (false);') &&
             sources.terminal.includes('this.inputServer.listen(this.inputPipeName);\n    this.outputServer.listen(this.outputPipeName);\n    try { self.launchBridge(); }') &&
-            !sources.terminal.includes('this.inputServer.listen(this.inputPipeName, function onInputListening()') &&
-            !sources.terminal.includes('function onOutputListening()') &&
             !sources.terminal.includes('BRIDGE_LAUNCH_MAX_ATTEMPTS') &&
             !sources.terminal.includes('retryLaunchBridge') &&
             !sources.terminal.includes('BRIDGE_LAUNCH_RETRY_DELAY_MS') &&
+            sources.terminal.includes("var BRIDGE_READY_MARKER = '\\x1b]MeshConsoleBridgeReady\\x07';") &&
+            sources.terminal.includes("args.push('token=' + this.tokenMode);") &&
+            sources.terminal.includes("if (this.mode == 'exec') { args.push('mode=exec'); }") &&
+            sources.terminal.includes('windowsTerminal.prototype.RunCommand = function RunCommand(script, options, callback)') &&
+            !sources.terminal.includes('_meshTerminal') &&
+            sources.terminal.includes("var SHELL_COMMAND = 'cmd';") &&
+            sources.terminal.includes("var SHELL_AUTOMATION = 'powershell';") &&
+            !sources.terminal.includes("var SHELL_COMMAND = 'powershell';") &&
+            !sources.terminal.includes('Windows terminal support is disabled until') &&
+            !sources.terminal.includes('disabledWindowsTerminal') &&
+            !sources.terminal.includes('commandHostPath()') &&
+            !sources.terminal.includes('powerShellPath()') &&
+            !sources.terminal.includes("['cmd']") &&
+            !sources.terminal.includes("['powershell") &&
             sources.runtimeHostContractImpl.includes('MeshConsoleBridge_CreateShellProcessW') &&
             !sources.runtimeHostContractImpl.includes('MeshConsoleBridge_CreateShellProcessWithRetryW') &&
             !sources.runtimeHostContractImpl.includes('Falling back to bridge token') &&
@@ -853,53 +845,6 @@ function main() {
             sources.runtimeHostContractImpl.includes('MeshConsoleBridge_ClosePseudoConsole(&pseudoConsole, conptyApi.ClosePseudoConsoleFn,') &&
             sources.runtimeHostContractImpl.includes('MeshConsoleBridge_ClosePseudoConsoleThread') &&
             sources.runtimeHostContractImpl.includes('_wcsicmp(optionText, L"mode=exec") == 0') &&
-            sources.terminal.includes("try { if (stream.createEvent) { stream.createEvent('ready'); } } catch (ex) { }") &&
-            sources.terminal.includes("var BRIDGE_READY_MARKER = '\\x1b]MeshConsoleBridgeReady\\x07';") &&
-            sources.terminal.includes('this.readyCallbacks = [];') &&
-            sources.terminal.includes('this.dataCallbacks = [];') &&
-            sources.terminal.includes('ConsoleBridgeTerminal.prototype.processOutputChunk = function processOutputChunk(chunk)') &&
-            sources.terminal.includes('markerIndex = this.readyBuffer.indexOf(BRIDGE_READY_MARKER);') &&
-            sources.terminal.includes('stream.onBridgeReady = function onBridgeReady(callback)') &&
-            sources.terminal.includes('stream.onBridgeData = function onBridgeData(callback)') &&
-            sources.terminal.includes('ConsoleBridgeTerminal.prototype.onReady = function onReady(callback)') &&
-            sources.terminal.includes('ConsoleBridgeTerminal.prototype.onData = function onData(callback)') &&
-            sources.terminal.includes('this.readyCallbacks.push(callback);') &&
-            sources.terminal.includes('this.dataCallbacks.push(callback);') &&
-            sources.terminal.includes('this.dataCallbacks[i](chunk);') &&
-            sources.terminal.includes('Windows terminal bridge exited before ready handshake through MeshConsoleBridgeW.') &&
-            sources.terminal.includes('Windows terminal bridge did not become ready within') &&
-            sources.terminal.includes('stream.isBridgeReady = function isBridgeReady()') &&
-            sources.terminal.includes('stream._meshTerminalBridgeLaunched = false') &&
-            sources.terminal.includes('stream._meshTerminalReadyMarkerProtocol = true') &&
-            sources.terminal.includes('stream._meshTerminalPipesConnected = false') &&
-            sources.terminal.includes('stream._meshTerminalInputConnected = false') &&
-            sources.terminal.includes('stream._meshTerminalInputClosed = false') &&
-            sources.terminal.includes('stream._meshTerminalOutputConnected = false') &&
-            sources.terminal.includes('stream._meshTerminalWriteCount = 0') &&
-            sources.terminal.includes('stream._meshTerminalLastWriteBytes = 0') &&
-            sources.terminal.includes("stream._meshTerminalLastChunkType = '';") &&
-            sources.terminal.includes('stream._meshTerminalLastChunkLength = -1') &&
-            sources.terminal.includes('stream._meshTerminalLastChunkTextLength = -1') &&
-            sources.terminal.includes('stream._meshTerminalOutputChunks = 0') &&
-            sources.terminal.includes('stream._meshTerminalOutputBytes = 0') &&
-            sources.terminal.includes('stream._meshTerminalHandshakeBytes = 0') &&
-            sources.terminal.includes('if (this.readyEmitted == false) { return; }') &&
-            sources.terminal.includes('if (this.readyEmitted == false || this.inputSocket == null)') &&
-            sources.terminal.includes("this.stream.emit('ready')") &&
-            sources.terminal.includes("this.mode = (mode == 'exec') ? 'exec' : 'pty';") &&
-            sources.terminal.includes("if (this.mode == 'exec') { args.push('mode=exec'); }") &&
-            sources.terminal.includes("args.push('token=' + this.tokenMode);") &&
-            sources.terminal.includes('ConsoleBridgeTerminal.prototype.closeInput = function closeInput()') &&
-            sources.terminal.includes("socket.on('close', function onInputClose()") &&
-            sources.terminal.includes('self.inputEnded = true;') &&
-            sources.terminal.includes('self.endInputWhenConnected = false;') &&
-            sources.terminal.includes('self.stream._meshTerminalInputClosed = true;') &&
-            sources.terminal.includes("socket.on('close', function onOutputClose()") &&
-            sources.terminal.includes('Windows terminal bridge output closed before ready handshake through MeshConsoleBridgeW.') &&
-            !sources.terminal.includes("if (self.mode != 'exec') { self.finish(); }") &&
-            sources.terminal.includes('stream.writeBridgeInput = function writeBridgeInput(chunk, flush)') &&
-            sources.terminal.includes('return (self.writeInput(chunk, flush));') &&
-            sources.terminal.includes('windowsTerminal.prototype.RunPowerShellCommand = function RunPowerShellCommand') &&
             sources.meshcentralCore.includes('function formatUncaughtException(ex)') &&
             sources.meshcentralCore.includes('function sendMeshCoreConsole(text, sessionid)') &&
             sources.meshcentralCore.includes("var agent = require('MeshAgent');") &&
@@ -907,44 +852,13 @@ function main() {
             sources.meshcentralCore.includes("sendMeshCoreConsole('uncaughtException1: ' + formatUncaughtException(ex));") &&
             sources.meshcentralCore.includes('try { console.error(text); } catch (consoleEx) { }') &&
             !sources.meshcentralCore.includes("require('MeshAgent').SendCommand({ action: 'msg', type: 'console', value: \"uncaughtException1: \" + ex });") &&
-            sources.meshcentralCore.includes("var runMethod = (data.runAsUser > 0 && targetSessionId != null) ? 'RunPowerShellCommandAsUser' : 'RunPowerShellCommand';") &&
-            sources.meshcentralCore.includes('var runCommandInputSent = false;') &&
-            sources.meshcentralCore.includes('if (mesh.cmdchild.onBridgeData) { mesh.cmdchild.onBridgeData(appendRunCommandOutput); }') &&
-            sources.meshcentralCore.includes("else { mesh.cmdchild.on('data', appendRunCommandOutput); }") &&
-            sources.meshcentralCore.includes("var runCommandBridgeMarker = '\\x1b]MeshConsoleBridgeReady\\x07';") &&
-            sources.meshcentralCore.includes('var runCommandBridgeMarkerSeen = false;') &&
-            sources.meshcentralCore.includes('function filterRunCommandBridgeMarker(text)') &&
-            sources.meshcentralCore.includes('markerIndex = runCommandBridgeBuffer.indexOf(runCommandBridgeMarker);') &&
-            sources.meshcentralCore.includes('text = filterRunCommandBridgeMarker(text);') &&
-            sources.meshcentralCore.includes('function sendRunCommandInput()') &&
-            sources.meshcentralCore.includes("term.writeBridgeInput(commandText + '\\r\\n', function ()") &&
-            sources.meshcentralCore.includes('try { if (term.closeInput) { term.closeInput(); } } catch (ex) { }') &&
-            sources.meshcentralCore.includes('function registerRunCommandInputOnBridgeReady(term)') &&
-            sources.meshcentralCore.includes('if (term == null || term._meshTerminalReadyMarkerProtocol !== true) { return; }') &&
-            sources.meshcentralCore.includes('if (term.onBridgeReady) { term.onBridgeReady(sendRunCommandInput); return; }') &&
-            sources.meshcentralCore.includes('if (term.isBridgeReady && term.isBridgeReady()) { sendRunCommandInput(); }') &&
-            sources.meshcentralCore.includes('registerRunCommandInputOnBridgeReady(mesh.cmdchild);') &&
-            sources.meshcentralCore.includes('function completeRunCommand()') &&
-            sources.meshcentralCore.includes('function appendRunCommandOutput(c)') &&
-            !sources.meshcentralCore.includes('MESH_RUN_COMMAND_DONE') &&
-            !sources.meshcentralCore.includes('buildRunCommandDoneMarkerCommand') &&
-            !sources.meshcentralCore.includes('[Console]::WriteLine') &&
-            sources.meshcentralCore.includes('function getRunCommandBridgeState()') &&
-            sources.meshcentralCore.includes('getRunCommandBridgeState()') &&
-            sources.meshcentralCore.includes("mode=' + mesh.cmdchild._meshTerminalMode") &&
-            sources.meshcentralCore.includes("tokenMode=' + mesh.cmdchild._meshTerminalTokenMode") &&
-            sources.meshcentralCore.includes("markerSeen=' + runCommandBridgeMarkerSeen") &&
-            sources.meshcentralCore.includes("writes=' + mesh.cmdchild._meshTerminalWriteCount") &&
-            sources.meshcentralCore.includes("lastWriteBytes=' + mesh.cmdchild._meshTerminalLastWriteBytes") &&
-            sources.meshcentralCore.includes("outputChunks=' + mesh.cmdchild._meshTerminalOutputChunks") &&
-            sources.meshcentralCore.includes("outputBytes=' + mesh.cmdchild._meshTerminalOutputBytes") &&
-            !sources.meshcentralCore.includes('function sendRunCommandWhenReady()') &&
-            !sources.meshcentralCore.includes("mesh.cmdchild.once('ready'") &&
-            !sources.meshcentralCore.includes('setTimeout(sendRunCommandWhenReady, 25);') &&
-            !sources.meshcentralCore.includes("term.write(commandText + '\\r\\n', function ()") &&
+            sources.meshcentralCore.includes("require('win-terminal').RunCommand(commandText, {") &&
             sources.meshcentralCore.includes("mesh.cmdchild.descriptorMetadata = 'UserCommandsPowerShell';") &&
+            !sources.meshcentralCore.includes('MeshConsoleBridgeReady') &&
+            !sources.meshcentralCore.includes('_meshTerminal') &&
+            !sources.meshcentralCore.includes('MESH_RUN_COMMAND_DONE') &&
+            !sources.meshcentralCore.includes('[Console]::WriteLine') &&
             sources.meshcentralCore.includes('function terminal_windows_start(protocol, cols, rows, targetSessionId)') &&
-            sources.meshcentralCore.includes("return require('win-terminal')[method](cols, rows, targetSessionId);") &&
             sources.meshcentralCore.includes('function terminal_windows_active_user_session_id(users)') &&
             sources.meshcentralCore.includes('terminal_windows_start(that.httprequest.protocol, this.cols, this.rows, targetSessionId)') &&
             sources.meshcentralCore.includes('terminal_windows_start(this.httprequest.protocol, cols, rows, null)') &&
@@ -952,15 +866,6 @@ function main() {
             !sources.meshcentralCore.includes("terminal_windows_dispatch_modules('win-terminal')") &&
             !sources.meshcentralCore.includes("require('win-dispatcher').dispatch({ user: username") &&
             !sources.meshcentralCore.includes("this.httprequest._dispatcher = require('win-dispatcher').dispatch({ modules: terminal_windows_dispatch_modules") &&
-            sources.terminal.includes("var SHELL_COMMAND = 'cmd';") &&
-            sources.terminal.includes("var SHELL_AUTOMATION = 'powershell';") &&
-            !sources.terminal.includes("var SHELL_COMMAND = 'powershell';") &&
-            !sources.terminal.includes('Windows terminal support is disabled until') &&
-            !sources.terminal.includes('disabledWindowsTerminal') &&
-            !sources.terminal.includes('commandHostPath()') &&
-            !sources.terminal.includes('powerShellPath()') &&
-            !sources.terminal.includes("['cmd']") &&
-            !sources.terminal.includes("['powershell") &&
             sources.virtualTerminal.includes("module.exports = require('win-terminal');") &&
             sources.virtualTerminal.includes('MeshConsoleBridgeW') &&
             !sources.virtualTerminal.includes('Windows virtual terminal support is disabled until') &&

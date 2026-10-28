@@ -49,7 +49,24 @@ async function main() {
     assert(fs.existsSync(dllPath), `bridge DLL not found at ${dllPath}`);
     assert(fs.existsSync(wrapperPath), `win-terminal wrapper not found at ${wrapperPath}`);
 
+    const report = {
+        generatedUtc: new Date().toISOString(),
+        dllPath,
+        wrapperPath,
+        output: '',
+        chunks: 0,
+        closed: false,
+        agentLog: [],
+        success: false
+    };
+
     Module._load = function patchedLoad(request, parent, isMain) {
+        if (request === '_agentNodeId') {
+            return { serviceName: function serviceName() { return 'MeshAgentSmoke'; } };
+        }
+        if (request === 'MeshAgent') {
+            return { log: function log(line) { report.agentLog.push(line); } };
+        }
         if (request === 'win-registry') {
             return {
                 HKEY: { LocalMachine: 0 },
@@ -65,37 +82,15 @@ async function main() {
         return originalLoad.apply(this, arguments);
     };
 
-    const report = {
-        generatedUtc: new Date().toISOString(),
-        dllPath,
-        wrapperPath,
-        output: '',
-        chunks: 0,
-        closed: false,
-        success: false
-    };
-
     try {
         delete require.cache[wrapperPath];
-        const terminal = require(wrapperPath).RunPowerShellCommand(80, 25, null);
-        assert(typeof(terminal.writeBridgeInput) === 'function', 'expected win-terminal exec stream to expose writeBridgeInput');
-        const closePromise = new Promise((resolve, reject) => {
-            terminal.on('data', (chunk) => {
-                report.chunks++;
-                report.output += chunk.toString();
-            });
-            terminal.on('error', reject);
-            terminal.on('close', () => {
-                report.closed = true;
-                resolve();
-            });
+        const result = await new Promise((resolve) => {
+            require(wrapperPath).RunCommand("Write-Output 'MESH_WRAPPER_EXEC_OK'; [Environment]::MachineName",
+                { targetSessionId: null, timeoutMs: 15000, onOutput: function onOutput() { report.chunks++; } }, resolve);
         });
-        terminal.writeBridgeInput("Write-Output 'MESH_WRAPPER_EXEC_OK'; [Environment]::MachineName\r\n", function noop() {});
-        terminal.closeInput();
-        await Promise.race([
-            closePromise,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('wrapper exec stream did not close within 15000ms')), 15000))
-        ]);
+        report.closed = true;
+        report.output = result.output;
+        assert(result.ok, `RunCommand failed: ${result.error}`);
         assert(report.output.indexOf('MESH_WRAPPER_EXEC_OK') >= 0, 'expected wrapper exec marker in output');
         assert(report.chunks > 0, 'expected at least one data chunk');
         report.success = true;
