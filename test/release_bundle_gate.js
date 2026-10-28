@@ -1,3 +1,4 @@
+const childProcess = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
@@ -82,6 +83,14 @@ const DEFAULT_EXPECTED_ARTIFACTS = [
         ]
     }
 ];
+
+// The MeshCentral fork serves these service builds from its own package, pinned by size and SHA384 in
+// MeshCentral agents/agent-defaults.json (Stage 6, D11/D12: agenttypes.js serves them unsigned). A passing gate
+// writes that manifest for them, from its own verified records, as meshcentral-agent-defaults.json.
+const MESHCENTRAL_SERVED_AGENTS = ['MeshService.exe', 'MeshService64.exe', 'MeshServiceARM64.exe'];
+const MESHCENTRAL_AGENT_MANIFEST = 'meshcentral-agent-defaults.json';
+const MESHCENTRAL_AGENT_SCHEMA = 'meshcentral-fork-agents/1';
+const DEFAULT_MESHAGENT_REPOSITORY = 'hira-edu/MeshAgent';
 
 const DEFAULT_RELEASE_DOCUMENTS = [
     'docs/README.md',
@@ -515,6 +524,50 @@ function writeZip(files, outputPath) {
     fs.closeSync(fd);
 }
 
+// The MeshCentral fork agent manifest for the served service builds, from verified artifact records only:
+// each must be present, a PE file of its expected machine type, and hashed. build names the MeshAgent
+// repository and the full commit the binaries were built from.
+function buildMeshCentralAgentManifest(artifactManifest, build) {
+    if (build == null || typeof build.repository !== 'string' || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(build.repository) ||
+        typeof build.commit !== 'string' || !/^[0-9a-f]{40}$/.test(build.commit)) {
+        throw new Error('the MeshCentral agent manifest needs the MeshAgent repository (owner/name) and the full commit of the build');
+    }
+    const files = MESHCENTRAL_SERVED_AGENTS.map((id) => {
+        const record = artifactManifest.find((artifact) => artifact.id === id);
+        if (record == null || record.found !== true || record.digests == null || record.file == null) {
+            throw new Error(`${id} is missing from the verified release artifacts`);
+        }
+        if (record.peArtifact !== true || record.signature == null || record.signature.isPe !== true || record.expectedMachine == null || record.machineMatches !== true) {
+            throw new Error(`${id} is not a verified PE build of its architecture`);
+        }
+        if (!Number.isSafeInteger(record.file.size) || record.file.size <= 0 || !/^[0-9a-f]{96}$/.test(String(record.digests.sha384))) {
+            throw new Error(`${id} has no valid size and SHA384`);
+        }
+        return { filename: id, size: record.file.size, sha384: record.digests.sha384 };
+    });
+    return { schema: MESHCENTRAL_AGENT_SCHEMA, build: { repository: build.repository, commit: build.commit }, files };
+}
+
+// The commit the gate's binaries were built from: --meshagent-commit, or HEAD when the tracked tree is clean.
+// A local build from a changed tree has no commit to name, so no manifest is written for it.
+function resolveMeshAgentBuild(args) {
+    const repository = typeof args['meshagent-repository'] === 'string' ? args['meshagent-repository'] : DEFAULT_MESHAGENT_REPOSITORY;
+    if (typeof args['meshagent-commit'] === 'string') {
+        return { build: { repository, commit: args['meshagent-commit'] }, reason: null };
+    }
+    const git = (gitArgs) => {
+        const result = childProcess.spawnSync('git', gitArgs, { cwd: REPO_ROOT, encoding: 'utf8', windowsHide: true });
+        if (result.error || result.status !== 0) {
+            throw new Error(`git ${gitArgs.join(' ')} failed: ${result.error ? result.error.message : result.stderr.trim()}`);
+        }
+        return result.stdout;
+    };
+    if (git(['status', '--porcelain', '--untracked-files=no']).trim() !== '') {
+        return { build: null, reason: 'tracked files differ from HEAD; pass --meshagent-commit <full sha> for the commit the binaries were built from' };
+    }
+    return { build: { repository, commit: git(['rev-parse', 'HEAD']).trim() }, reason: null };
+}
+
 function formatChecksums(artifactManifest) {
     const lines = [];
     for (const artifact of artifactManifest) {
@@ -588,6 +641,7 @@ function writeReportOutputs(evidenceDir, report, checklist, missingReleaseDocume
         `MISSING_RELEASE_DOCUMENT_COUNT=${missingReleaseDocuments.length}`,
         `BUNDLE=${relativeToRepo(bundlePath)}`,
         `BUNDLE_SHA256=${report.releaseBundle.sha256 || '(external-only-after-bundle-export)'}`,
+        `MESHCENTRAL_AGENT_MANIFEST=${report.meshcentralAgentManifest.written ? report.meshcentralAgentManifest.path : '(not written: ' + report.meshcentralAgentManifest.reason + ')'}`,
         `FAILURES=${report.failures.length > 0 ? report.failures.join('; ') : '(none)'}`
     ].join(os.EOL) + os.EOL);
 }
@@ -607,6 +661,9 @@ function main() {
     if (fileExists(bundlePath)) {
         fs.unlinkSync(bundlePath);
     }
+    // Pins from an earlier run never survive into this one's evidence or bundle.
+    const agentManifestPath = path.join(evidenceDir, MESHCENTRAL_AGENT_MANIFEST);
+    fs.rmSync(agentManifestPath, { force: true });
 
     const expectedArtifacts = resolveExpectedArtifacts(args.artifacts);
     const artifactManifest = collectArtifactManifest(expectedArtifacts, signingPolicy.enforceSigning);
@@ -638,8 +695,23 @@ function main() {
             selfHashNote: 'The bundle cannot contain its own final digest. The archive copy of this manifest uses a null sha256; the authoritative digest is written to the external manifest and summary after ZIP export.'
         },
         checklist,
-        failures
+        failures,
+        meshcentralAgentManifest: { path: relativeToRepo(agentManifestPath), written: false, build: null, reason: null }
     };
+
+    // The pins for MeshCentral come only from a passing gate.
+    if (checklist.release_ready) {
+        const resolved = resolveMeshAgentBuild(args);
+        if (resolved.build != null) {
+            writeJson(agentManifestPath, buildMeshCentralAgentManifest(artifactManifest, resolved.build));
+            report.meshcentralAgentManifest.written = true;
+            report.meshcentralAgentManifest.build = resolved.build;
+        } else {
+            report.meshcentralAgentManifest.reason = resolved.reason;
+        }
+    } else {
+        report.meshcentralAgentManifest.reason = 'the release gate did not pass';
+    }
 
     writeReportOutputs(evidenceDir, report, checklist, missingReleaseDocuments, artifactManifest, allowIncomplete, bundlePath);
     const bundleInputFiles = collectBundleFiles(evidenceDir);
@@ -651,6 +723,9 @@ function main() {
         report.success = false;
         report.releaseBundle.error = e && e.message ? e.message : String(e);
         report.failures = collectFailures(checklist);
+        fs.rmSync(agentManifestPath, { force: true });
+        report.meshcentralAgentManifest.written = false;
+        report.meshcentralAgentManifest.reason = 'the release bundle was not exported';
         writeReportOutputs(evidenceDir, report, checklist, missingReleaseDocuments, artifactManifest, allowIncomplete, bundlePath);
         throw e;
     }
@@ -674,7 +749,10 @@ if (require.main === module) {
 }
 
 module.exports = {
+    MESHCENTRAL_AGENT_MANIFEST,
+    MESHCENTRAL_SERVED_AGENTS,
     buildChecklist,
+    buildMeshCentralAgentManifest,
     collectFailures,
     parseSigningPolicy,
     signingRequiredForArtifact

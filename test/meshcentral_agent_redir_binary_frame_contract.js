@@ -2,8 +2,9 @@
 // Feeds binary frames into the fork's viewer redirector (agent-redir-ws-0.1.1.js and its -min
 // build) and checks what reaches the desktop module: whole frames pass through, a frame shorter
 // than its 4-byte header is ignored, a frame split over several messages is reassembled into one
-// command, and a jumbo frame (command 27) is unwrapped to its inner command with a 24-bit size, also
-// when split. Both files must behave the same. No browser or server is used.
+// command, a jumbo frame (command 27) is unwrapped to its inner command with a 24-bit size, also
+// when split, and a frame padded past its size is dispatched at once without the padding. Both files
+// must behave the same. No browser or server is used.
 const assert = require('assert');
 const vm = require('vm');
 const { forkFile } = require('./lib/meshcentral_paths');
@@ -96,6 +97,25 @@ function casesFor(CreateAgentRedirect) {
             assert.strictEqual(received[0].cmd, 3, 'the inner command is dispatched, not 27');
             assert.strictEqual(received[0].cmdsize, big.size, 'the 24-bit size is used');
             assert.deepStrictEqual(received[0].bytes, big.inner, 'the 8-byte jumbo header is removed');
+        },
+        // #8099 (1.2.6): the agent pads each message to an 8-byte boundary. A complete frame with
+        // trailing padding is dispatched at once, trimmed to its size, instead of waiting in the
+        // accumulator for the next message (which it then swallowed).
+        paddedFrameIsDispatchedAtOnce() {
+            const { received, deliver } = session(CreateAgentRedirect);
+            const bytes = frame(3, [1, 2, 3]);
+            deliver(bytes.concat([0]));
+            assert.deepStrictEqual(received, [{ cmd: 3, cmdsize: 7, bytes }], 'the padded frame is dispatched without its padding');
+            deliver(frame(5, [9, 9, 9, 9]));
+            assert.deepStrictEqual(received.map((r) => r.cmd), [3, 5], 'the next frame is not swallowed');
+        },
+        paddedJumboFrameIsDispatchedAtOnce() {
+            const { received, deliver } = session(CreateAgentRedirect);
+            const big = jumbo(3, 70001);
+            deliver(big.bytes.concat([0, 0, 0]));
+            assert.strictEqual(received.length, 1, 'the padded jumbo frame is dispatched when it arrives');
+            assert.strictEqual(received[0].cmdsize, big.size);
+            assert.deepStrictEqual(received[0].bytes, big.inner, 'the padding is trimmed');
         },
         splitJumboFrameIsReassembled() {
             const { received, deliver } = session(CreateAgentRedirect);

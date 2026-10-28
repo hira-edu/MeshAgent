@@ -7,6 +7,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const { forkFile } = require('./lib/meshcentral_paths');
+const { readArchitectureTable } = require('./lib/meshcentral_architecture_table');
 
 function read(filePath) { return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n'); }
 
@@ -23,7 +24,7 @@ function extractBraced(source, signature) {
 }
 
 const server = read(forkFile('meshagent.js'));
-const architectures = new Function('return ' + extractBraced(read(forkFile('meshcentral.js')), 'obj.meshAgentsArchitectureNumbers = {').replace('obj.meshAgentsArchitectureNumbers = ', '') + ';')();
+const architectures = readArchitectureTable(); // agenttypes.js, as meshcentral.js loads it (MeshCentral 1.3.1)
 const caseStart = server.indexOf("                case 'agentupdate': {");
 const caseEnd = server.indexOf("                case 'agentupdatefailure': {", caseStart);
 assert(caseStart >= 0 && caseEnd > caseStart, "the agent command switch must handle 'agentupdate'");

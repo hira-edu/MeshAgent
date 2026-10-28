@@ -187,6 +187,38 @@ function main() {
     desktop.ProcessPictureMsg(new Uint8Array(8), 16, 0);
     for (const tile of tiles) { tile.onload(); }
     const tileDrain = { drawn: drawn.length, tilesReceived: desktop.tilesReceived, tilesDrawn: desktop.TilesDrawn, pending: desktop.PendingOperations.length };
+    const drawState = () => ({ drawnX: drawn.map((d) => d[0]), tilesReceived: desktop.tilesReceived, tilesDrawn: desktop.TilesDrawn, pending: desktop.PendingOperations.length });
+    // #8195 (1.3.1): a tile that fails to decode still takes its turn, so the tiles behind it are drawn.
+    tiles.length = 0; drawn.length = 0;
+    desktop.resetDrawState();
+    for (let i = 0; i < 3; i++) { desktop.ProcessPictureMsg(new Uint8Array(8), i * 16, 0); }
+    tiles[0].onload(); tiles[1].onerror(); tiles[2].onload();
+    const tileError = drawState();
+    // The fork's generation check on top of #8195: a tile from before a stream reset that fails to decode is
+    // dropped, as its load would be, so it cannot take a turn in the new sequence and stall the tiles after it.
+    tiles.length = 0; drawn.length = 0;
+    desktop.resetDrawState();
+    desktop.ProcessPictureMsg(new Uint8Array(8), 0, 0); // old stream
+    desktop.resetDrawState();
+    desktop.ProcessPictureMsg(new Uint8Array(8), 16, 0); // new stream, turn 1
+    tiles[0].onerror();
+    tiles[1].onload();
+    desktop.ProcessPictureMsg(new Uint8Array(8), 32, 0); // new stream, next turn
+    tiles[2].onload();
+    const staleTileError = drawState();
+    // WEB-14: the native multi-touch start tests the module's own contact timer (it read an undeclared global).
+    let contactInterval = null;
+    context.setInterval = (fn, ms) => { contactInterval = ms; return 'contact-timer'; };
+    desktop.touchenabled = 2;
+    desktop.TouchArray = {};
+    desktop.touchtimer = null;
+    const contact = { identifier: 5, pageX: 10, pageY: 20 };
+    let touchStartError = null;
+    try { desktop.xxTouchStart({ originalEvent: { touches: [contact], changedTouches: [contact] } }); } catch (error) { touchStartError = String(error); }
+    const touchStart = { error: touchStartError, contacts: Object.keys(desktop.TouchArray).length, touchtimer: desktop.touchtimer, interval: contactInterval };
+    desktop.TouchArray = {};
+    desktop.touchtimer = null;
+    desktop.touchenabled = 0;
     desktop.State = 0;
 
     mutateDesktopState(desktop);
@@ -209,6 +241,9 @@ function main() {
         touchRelease,
         deadState,
         tileDrain,
+        tileError,
+        staleTileError,
+        touchStart,
         afterStop,
         afterStart
     };
@@ -216,7 +251,10 @@ function main() {
     assert(deadState.trace === 'undefined' && deadState.killDraw === 'undefined' && deadState.firstUpKeys === 'undefined', `expected no trace(), KillDraw or firstUpKeys on the module, got ${JSON.stringify(deadState)}`);
     assert(deadState.sourceMentions.length === 0, `expected the viewer source to drop ${deadState.sourceMentions.join(', ')}`);
     assert(tileDrain.drawn === 2 && tileDrain.tilesReceived === 0 && tileDrain.tilesDrawn === 0 && tileDrain.pending === 0, `expected two tiles drawn and the counters wrapped, got ${JSON.stringify(tileDrain)}`);
-    assert(touchRelease.packets === 1, `expected one touch packet releasing the held contact on SCREEN, got ${touchRelease.packets}`);
+    assert(JSON.stringify(tileError) === JSON.stringify({ drawnX: [0, 32], tilesReceived: 0, tilesDrawn: 0, pending: 0 }), `expected the tiles around an undecodable one drawn and the counters wrapped, got ${JSON.stringify(tileError)}`);
+    assert(JSON.stringify(staleTileError) === JSON.stringify({ drawnX: [16, 32], tilesReceived: 0, tilesDrawn: 0, pending: 0 }), `expected an old stream's undecodable tile to take no turn in the new stream, got ${JSON.stringify(staleTileError)}`);
+    assert(touchStart.error === null && touchStart.contacts === 1 && touchStart.touchtimer === 'contact-timer' && touchStart.interval === 50, `expected the first native touch to start the 50 ms contact timer, got ${JSON.stringify(touchStart)}`);
+    assert(touchRelease.packets === 1,`expected one touch packet releasing the held contact on SCREEN, got ${touchRelease.packets}`);
     assert(touchRelease.messageType === 2 && touchRelease.id === 7, `expected a type-2 touch packet carrying contact 7, got ${JSON.stringify(touchRelease)}`);
     assert(touchRelease.flags === 0x00040000, `expected POINTER_FLAG_UP for the held contact, got 0x${(touchRelease.flags || 0).toString(16)}`);
     assert(touchRelease.length === 4 + 1 + 9, `expected exactly one contact in the release packet (queued contact 9 dropped), got length ${touchRelease.length}`);

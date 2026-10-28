@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
 const { forkFile } = require('./lib/meshcentral_paths');
+const { readArchitectureTable } = require('./lib/meshcentral_architecture_table');
 
 function read(filePath) {
     return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
@@ -45,19 +46,8 @@ const fsBinding = read(fsBindingPath);
 const updateHelper = read(updateHelperPath);
 const zipReader = read(zipReaderPath);
 
-// The architecture table the Windows helpers derive from (SRV-10), read from the fork's meshcentral.js.
-function readArchitectureTable() {
-    const source = read(forkFile('meshcentral.js'));
-    const signature = 'obj.meshAgentsArchitectureNumbers = {';
-    const start = source.indexOf(signature);
-    assert(start >= 0, 'meshcentral.js must define meshAgentsArchitectureNumbers');
-    let depth = 0;
-    for (let i = start + signature.length - 1; i < source.length; ++i) {
-        if (source[i] === '{') depth++;
-        if (source[i] === '}' && --depth === 0) return new Function('return ' + source.slice(start + signature.length - 1, i + 1) + ';')();
-    }
-    throw new Error('unterminated meshAgentsArchitectureNumbers');
-}
+// The architecture table the Windows helpers derive from (SRV-10): the fork's agenttypes.js, which
+// meshcentral.js loads (MeshCentral 1.3.1).
 const meshAgentsArchitectureNumbers = readArchitectureTable();
 
 const selectorFactory = new Function('obj', 'args', 'domain', 'parent', [
@@ -122,7 +112,8 @@ assert(updateFailedCase.includes('restoreAgentCoreAfterUpdateFailure()'), 'updat
 assert(updateFailedCase.includes('if (obj.agentUpdate != null)'), 'agent-side aborts must clean an active server transfer');
 assert(restoreCore.includes('common.ShortToStr(11)'), 'update abort handling must request normal core restoration');
 assert(restoreCore.includes('delete obj.agentCoreUpdate'), 'recovery-core selection must be cleared after an update abort');
-assert(server.includes("JSON.parse(msg).action == 'agentupdatefailed'"), 'terminal update aborts must be accepted during an active transfer');
+assert(server.includes("if ((transferStatus != null) && (transferStatus.action == 'agentupdatefailed')) { processAgentData(msg); }"), 'terminal update aborts must be accepted during an active transfer');
+assert(/try \{ transferStatus = JSON\.parse\(msg\); \} catch \(ex\) \{ parent\.parent\.debug\('agentupdate', /.test(server), 'an unreadable message during a transfer is logged, not swallowed (SRV-1)');
 assert(server.includes('agentExeInfo.zhash == obj.agentUpdateFailureHash'), 'server must recognize compressed failed-package hashes');
 
 const agentHashCase = agentcore.slice(agentcore.indexOf('case MeshCommand_AgentHash:'), agentcore.indexOf('case MeshCommand_AgentUpdate:'));

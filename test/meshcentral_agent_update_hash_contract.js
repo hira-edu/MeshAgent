@@ -6,7 +6,9 @@
 //   executable hash is current, so no transfer starts;
 // - any other hash starts the native transfer, which ends (command 13) with the normalised
 //   executable hash the agent verifies, or the compressed hash for a compressed transfer;
-// - the HTTP update command advertises fileHashHex when the served file has one, else hashhex.
+// - the HTTP update command advertises fileHashHex when the served file has one, else hashhex;
+//   its URL carries the 'aupd' cookie for this agent id, so lockAgentDownload lets the agent fetch
+//   its own update (MeshCentral 1.3.1, 00329eb73).
 // No server, socket or agent is used.
 const assert = require('assert');
 const path = require('path');
@@ -50,6 +52,7 @@ function connect(createMeshAgent, info, capabilities) {
         fs: require('fs'),
         parent: {
             common, debug() {}, certificateOperations: { forge: {} }, agentUpdateBlockSize: BLOCK, meshAgentBinaries: {},
+            loginCookieEncryptionKey: 'fixture-key', encodeCookie: (o, key) => 'cookie:' + key + ':' + JSON.stringify(o),
             meshAgentsArchitectureNumbers: { [LINUX_X64]: { core: null } },
             taskLimiter: { launch(fn, argument) { fn(argument, 1, null); }, completed() {} }
         }
@@ -106,7 +109,7 @@ function casesFor(createMeshAgent) {
             const update = session.ws.sent.filter((m) => m.charCodeAt(0) === 123).map((m) => JSON.parse(m)).find((c) => c.action === 'agentupdate');
             assert(update, 'the agent is told to update over HTTP');
             assert.strictEqual(update.hash, exeInfo().fileHashHex);
-            assert.strictEqual(update.url, '*/meshagents?id=6');
+            assert.strictEqual(update.url, '*/meshagents?id=6&auth=' + encodeURIComponent('cookie:fixture-key:' + JSON.stringify({ a: 'aupd', i: LINUX_X64 })));
         },
         httpUpdateWithoutFileHashAdvertisesExecutableHash() {
             const session = connect(createMeshAgent, exeInfo({ fileHash: false }), 0);
