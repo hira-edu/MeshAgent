@@ -1,6 +1,7 @@
 """Run the fork's obj.updateProxyCertificates and check which hostname each certificate load uses.
 
-An HTTPS certurl is read with the URL's own hostname (SNI); a file certurl keeps the domain's DNS
+An HTTPS certurl is read with the URL's own hostname (SNI, incident I3); an HTTPS certurl whose host
+is an IP address, which SNI cannot carry (RFC 6066, SRV-16), and a file certurl keep the domain's DNS
 name, or settings.cert when the domain has none. The function is taken from the fork's committed
 meshcentral.js and run under Node with a fake certificate loader. No network I/O.
 """
@@ -33,6 +34,8 @@ const domains = {
     port: { id: 'port', dns: 'portal.example.test', certurl: 'https://agents.example.test:443/path' },
     file: { id: 'file', dns: 'files.example.test', certurl: 'file:/public/cert.pem' },
     nodns: { id: 'nodns', certurl: 'file:/public/other.pem' },
+    ipv4: { id: 'ipv4', dns: 'portal.example.test', certurl: 'https://192.0.2.10/' },
+    ipv6: { id: 'ipv6', certurl: 'https://[2001:db8::1]:8443/cert' },
     nocert: { id: 'nocert', dns: 'plain.example.test' }
 };
 const logs = [];
@@ -44,18 +47,20 @@ const obj = {
     },
     common: { format: (text, ...args) => text.replace(/\{(\d+)\}/g, (match, index) => args[index]) }
 };
-vm.runInNewContext(FUNCTION, { obj, URL, Buffer, console: { log: message => logs.push(message) } });
+vm.runInNewContext(FUNCTION, { obj, URL, Buffer, require, console: { log: message => logs.push(message) } });
 obj.updateProxyCertificates(true);
 assert.deepStrictEqual(loads.map(load => [load.domain.id, load.url, load.hostname]), [
     ['', 'https://agents.example.test/', 'agents.example.test'],
     ['port', 'https://agents.example.test:443/path', 'agents.example.test'],
     ['file', 'file:/public/cert.pem', 'files.example.test'],
-    ['nodns', 'file:/public/other.pem', 'settings.example.test']
+    ['nodns', 'file:/public/other.pem', 'settings.example.test'],
+    ['ipv4', 'https://192.0.2.10/', 'portal.example.test'],
+    ['ipv6', 'https://[2001:db8::1]:8443/cert', 'settings.example.test']
 ]);
 for (const load of loads) { assert.strictEqual(load.domain, domains[load.domain.id]); }
 assert.strictEqual(obj.pendingProxyCertificatesRequests, 0, 'every load callback must settle its pending request');
 assert.strictEqual(logs.length, loads.length, 'a failed certificate load is logged');
-console.log('Proxy certificate SNI follows the HTTPS URL; file loading keeps the domain or settings hostname.');
+console.log('Proxy certificate SNI follows an HTTPS URL host name; IP and file certurls keep the domain or settings hostname.');
 """.replace("FUNCTION", json.dumps(function_source))
 
 with tempfile.TemporaryDirectory() as directory:

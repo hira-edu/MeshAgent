@@ -2,8 +2,11 @@
 
 The fork's obj.updateMeshCore (with its module-version helpers) is taken from the committed
 meshcentral.js and run under Node over a fake package tree: each module keeps its source text
-and its agents/module-versions.json release date, never a file time, and exactly one of a
-module's .js/.min.js pair is served in each minification mode. MeshCentral's
+and its agents/module-versions.json release date, never a file time (SRV-17: upstream 1.3.1
+e02866e7a / #8191 dates modules by file mtime, and the fork's manifest wins), and a module that
+is a .js or a .min.js file registers once in each minification mode. The package ships no
+.js/.min.js twins since D24, so the loader has no twin selector (SRV-18); MeshAgent
+test/meshcentral_core_loader_contract.js checks the package for twins. MeshCentral's
 deploy/tests/module-versions.test.js covers the manifest's fail-closed exits.
 
 deploy.py refuses every MeshCentral publish role before any SSH and still publishes agent
@@ -56,7 +59,7 @@ function buildCores(minifycore, files) {
                 if (!Object.prototype.hasOwnProperty.call(tree, file)) { throw new Error('ENOENT: ' + file); }
                 return Buffer.from(tree[file]);
             },
-            statSync: () => { throw new Error('the core builder must not read file times'); }
+            statSync: () => { throw new Error('the core builder must not read file times (SRV-17, not #8191 mtimes)'); }
         }
     };
     const context = {
@@ -87,20 +90,18 @@ for (const minifycore of [false, true]) {
 }
 console.log('Core module source, registration and manifest version survive generation.');
 
-// One authoritative file per module, whatever the order or which counterpart exists.
+// A module shipped as a .js or a .min.js file registers once, under its name without ".min".
 const plain = ['module.exports="plain";', '2026-10-01T00:00:00.000Z'], min = ['module.exports="min";', '2026-10-02T00:00:00.000Z'];
 for (const minifycore of [false, true]) {
     const folder = minifycore ? 'modules_meshcore_min' : 'modules_meshcore';
-    for (const names of [['probe.js', 'probe.min.js'], ['probe.min.js', 'probe.js'], ['probe.js'], ['probe.min.js']]) {
-        const files = {};
-        for (const name of names) { files[folder + '/' + name] = name.endsWith('.min.js') ? min : plain; }
-        const registrations = buildCores(minifycore, files);
-        assert.strictEqual(registrations.length, 1, 'duplicate files must register one authoritative module');
-        const preferMin = names.includes('probe.min.js') && (minifycore || !names.includes('probe.js'));
-        assert.deepStrictEqual(registrations[0].slice(1), preferMin ? min : plain);
+    for (const name of ['probe.js', 'probe.min.js']) {
+        const registrations = buildCores(minifycore, { [folder + '/' + name]: name.endsWith('.min.js') ? min : plain });
+        assert.strictEqual(registrations.length, 1, 'a module file registers one module');
+        assert.strictEqual(registrations[0][0], 'probe');
+        assert.deepStrictEqual(registrations[0].slice(1), name.endsWith('.min.js') ? min : plain);
     }
 }
-console.log('Core module selection is stable across minification modes, file order and missing counterparts.');
+console.log('A .js or .min.js module registers once in both minification modes, with its manifest version.');
 '''.replace("ESCAPE", json.dumps(escape_source)).replace("BUILDER", json.dumps(builder))
 with tempfile.TemporaryDirectory() as temp:
     file = Path(temp) / "module-versions.js"
