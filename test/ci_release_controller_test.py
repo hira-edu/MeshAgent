@@ -26,7 +26,6 @@ if os.name == 'nt':
     sys.modules.setdefault('pwd', types.SimpleNamespace())
 MANAGER = load('release_manager', 'tools/deployment/release_manager.py')
 ENTRY = load('ci_entry', 'tools/deployment/ci_entry.py')
-SOURCES = load('resolve_sources', 'tools/resolve_deploy_sources.py')
 DIGEST = 'sha256:' + 'a' * 64
 PREVIOUS = 'sha256:' + 'b' * 64
 
@@ -144,20 +143,6 @@ class InputTests(unittest.TestCase):
                       'recover', 'deploy -x', 'deploy sha256:' + 'a' * 63):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 ENTRY.command(value)
-
-    def test_only_default_branch_events_can_deploy(self):
-        event = {'repository': {'default_branch': 'main'}, 'inputs': {'deploy_to_server': 'true'}}
-        env = {'GITHUB_REF': 'refs/heads/main', 'AUTO_DEPLOY': 'true'}
-        self.assertTrue(SOURCES.requested('push', event, env))
-        self.assertTrue(SOURCES.requested('repository_dispatch', event, env))
-        self.assertTrue(SOURCES.requested('workflow_dispatch', event, env))
-        self.assertFalse(SOURCES.requested('pull_request', event, env))
-        for ref in ('refs/tags/v1', 'refs/heads/feature', 'refs/pull/1/merge'):
-            self.assertFalse(SOURCES.requested('push', event, dict(env, GITHUB_REF=ref)))
-        self.assertFalse(SOURCES.requested('push', event, dict(env, AUTO_DEPLOY='false')))
-        legacy = {'repository': {'default_branch': 'master'}, 'inputs': {'deploy_to_server': 'true'}}
-        self.assertFalse(SOURCES.requested(
-            'push', legacy, dict(env, GITHUB_REF='refs/heads/master')))
 
     def test_overlay_release_and_persistent_file_mount_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:

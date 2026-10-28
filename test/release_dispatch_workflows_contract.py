@@ -1,9 +1,10 @@
 """The public repositories' requests for the coordinated release in hook (docs/DEPLOYMENT.md).
 
-A push to MeshAgent main (.github/workflows/build-release.yml) or MeshCentral main
-(.github/workflows/request-release.yml, in the MeshCentral fork checkout located by
-test/lib/meshcentral_paths.py) dispatches sibling-source-updated with the pushed commit to hook, using a
-short-lived release-app token that can write hook contents only. A missing app credential fails with a
+A push to main (production channel) or preview (preview channel) of MeshAgent
+(.github/workflows/build-release.yml) or MeshCentral (.github/workflows/request-release.yml, in the
+MeshCentral fork checkout located by test/lib/meshcentral_paths.py) dispatches sibling-source-updated with
+the pushed commit and branch to hook, using a short-lived release-app token that can write hook contents
+only. Requests of the two channels queue separately. A missing app credential fails with a
 named reason, and the release-app's own pin/lock pushes to MeshCentral dispatch like any other push: the
 release they start is the one that ships them (loops are refused in hook, by release_pins.py relock).
 """
@@ -36,15 +37,18 @@ class DispatchWorkflowContract(unittest.TestCase):
     def each(self):
         return [(name, source, source.split('\n  dispatch:\n', 1)[1]) for name, source in self.workflows.items()]
 
-    def test_main_pushes_and_manual_runs_request_a_release(self):
+    def test_channel_pushes_and_manual_runs_request_a_release(self):
         for name, source, dispatch in self.each():
             with self.subTest(workflow=name):
-                self.assertRegex(source, r'(?m)^  push:\n    branches: \[main\]$')
+                self.assertRegex(source, r'(?m)^  push:\n    branches: \[main, preview\]$')
                 self.assertRegex(source, r'(?m)^  workflow_dispatch:$')
-                self.assertIn("github.ref == 'refs/heads/main'", dispatch)
+                self.assertNotRegex(source, r'branches:.*\bmaster\b')
+                self.assertIn("(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/preview')", dispatch)
                 self.assertIn("github.event.repository.default_branch == 'main'", dispatch)
                 self.assertIn('permissions:\n  contents: read\n', source)
                 self.assertIn('  cancel-in-progress: false\n', source)
+                # One queue per channel: a production request never waits behind or replaces a preview one.
+                self.assertRegex(source, r'(?m)^  group: request-coordinated-release-\$\{\{ .*github\.ref_name \}\}$')
 
     def test_missing_app_credential_fails_with_a_named_reason(self):
         for name, source, dispatch in self.each():
@@ -67,7 +71,9 @@ class DispatchWorkflowContract(unittest.TestCase):
                 self.assertIn('permission-contents: write', token)
                 self.assertEqual(len(re.findall(r'permission-[a-z-]+:', source)), 1)
                 self.assertIn("'event_type': 'sibling-source-updated'", dispatch)
-                self.assertIn("'repository': os.environ['GITHUB_REPOSITORY'], 'sha': os.environ['GITHUB_SHA']", dispatch)
+                # The branch names the channel; hook resolves the other two repositories to the same channel.
+                self.assertIn("'repository': os.environ['GITHUB_REPOSITORY'], 'sha': os.environ['GITHUB_SHA'],\n"
+                              "              'branch': os.environ['GITHUB_REF_NAME']}", dispatch)
                 self.assertIn('gh api --method POST "repos/$COORDINATOR/dispatches" --input request.json', dispatch)
 
     def test_pipeline_commits_dispatch_like_any_push(self):

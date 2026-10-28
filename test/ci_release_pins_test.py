@@ -41,6 +41,25 @@ def pins_document(commit=MESHAGENT, seed='one'):
     return {'schema': BUILDS.SCHEMA, 'build': {'repository': 'hira-edu/MeshAgent', 'commit': commit}, 'files': files}
 
 
+PREVIEW_DIGESTS = set()
+
+
+def preview_document(commit=MESHAGENT, seed='one'):
+    """Pins of a preview-variant build, as the fake pins_channel below recognises them."""
+    document = pins_document(commit, 'preview-' + seed)
+    PREVIEW_DIGESTS.update(entry['sha384'] for entry in document['files'])
+    return document
+
+
+def fake_pins_channel(build, pins):
+    return 'preview' if pins[0]['sha384'] in PREVIEW_DIGESTS else 'production'
+
+
+def with_variants():
+    """agent_build_release.py with preview variant support (the preview-agent interface)."""
+    return mock.patch.object(BUILDS, 'pins_channel', fake_pins_channel, create=True)
+
+
 def pins_text(document):
     return json.dumps(document, indent=2) + '\n'
 
@@ -49,13 +68,14 @@ def parsed(document):
     return BUILDS.parse_pins(document, 'fixture')
 
 
-def record_message(document, runtime=RUNTIME, meshagent=None):
+def record_message(document, runtime=RUNTIME, meshagent=None, channel='production'):
     build, pins = parsed(document)
     return ('Pin\n\nbody\n\n'
             f'Agent-Build-Release: {BUILDS.release_tag(build, pins)}\n'
             f'Agent-Build-MeshAgent: {meshagent or build["commit"]}\n'
             f'Agent-Build-Runtime: {runtime}\n'
-            f'Release-Pipeline-Run: {RUN_URL}\n')
+            f'Release-Pipeline-Run: {RUN_URL}\n'
+            f'Release-Pipeline-Channel: {channel}\n')
 
 
 class RecordTests(unittest.TestCase):
@@ -92,6 +112,41 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(action, 'rebuild')
         self.assertIn('no pipeline record', reasons[0])
 
+    def test_pins_of_the_other_channel_are_never_reused(self):
+        build, _ = parsed(pins_document())
+        # A preview release always rebuilds on change, whatever the production policy says.
+        self.assertEqual(TOOL.decide('keep-pinned', build, RUNTIME, MESHAGENT, RUNTIME, 'preview', 'preview'),
+                         ('reuse', []))
+        action, reasons = TOOL.decide('keep-pinned', build, RUNTIME, OTHER_MESHAGENT, RUNTIME, 'preview', 'preview')
+        self.assertEqual(action, 'rebuild')
+        self.assertIn('MeshAgent of the preview channel is ' + OTHER_MESHAGENT, reasons[0])
+        # Production pins in a preview release (MeshCentral has no preview branch yet): rebuild.
+        action, reasons = TOOL.decide('keep-pinned', build, RUNTIME, MESHAGENT, RUNTIME, 'preview', 'production')
+        self.assertEqual(action, 'rebuild')
+        self.assertIn('MeshCentral pins a production agent build; this is a preview release', reasons[0])
+        # Preview pins on MeshCentral main: rebuild-on-change rebuilds, keep-pinned stops with the reason.
+        action, reasons = TOOL.decide('rebuild-on-change', build, RUNTIME, MESHAGENT, RUNTIME, 'production', 'preview')
+        self.assertEqual(action, 'rebuild')
+        self.assertIn('MeshCentral pins a preview agent build', reasons[0])
+        with self.assertRaisesRegex(TOOL.ReleasePinsError, 'MeshCentral main pins a preview agent build'):
+            TOOL.decide('keep-pinned', build, RUNTIME, MESHAGENT, RUNTIME, 'production', 'preview')
+
+    def test_preview_channel_needs_variant_support(self):
+        saved = BUILDS.__dict__.pop('pins_channel', None)
+        try:
+            self.assertEqual(TOOL.pins_channel(*parsed(pins_document())), 'production')
+            TOOL.require_channel('production')
+            with self.assertRaisesRegex(TOOL.ReleasePinsError, 'cannot tell them apart yet'):
+                TOOL.require_channel('preview')
+        finally:
+            if saved is not None:
+                BUILDS.pins_channel = saved
+        with self.assertRaisesRegex(TOOL.ReleasePinsError, 'CHANNEL must be one of'):
+            TOOL.require_channel('staging')
+        with with_variants():
+            TOOL.require_channel('preview')
+            self.assertEqual(TOOL.pins_channel(*parsed(preview_document())), 'preview')
+
 
 class FakeReader:
     """GitHub REST answers by path, standing in for GitHubReader."""
@@ -114,7 +169,7 @@ class FakeReader:
 
 class PlanTests(unittest.TestCase):
     def environ(self, **overrides):
-        values = {'AGENT_BUILD_POLICY': 'rebuild-on-change', 'MESHCENTRAL_REPOSITORY': MESHCENTRAL,
+        values = {'CHANNEL': 'production', 'AGENT_BUILD_POLICY': 'rebuild-on-change', 'MESHCENTRAL_REPOSITORY': MESHCENTRAL,
                   'GITHUB_REPOSITORY': HOOK, 'MESHAGENT_SHA': MESHAGENT, 'MESHCENTRAL_SHA': 'b' * 40,
                   'RUNTIME_COMPONENT_SHA': RUNTIME}
         values.update(overrides)
@@ -129,8 +184,8 @@ class PlanTests(unittest.TestCase):
             answers[f'/repos/{MESHCENTRAL}/contents/{TOOL.PINS_PATH}?ref=' + '9' * 40] = deployed
         return FakeReader(answers)
 
-    def deployments(self, entries):
-        answers = {f'/repos/{HOOK}/deployments?': [{'id': number} for number, _, _ in entries]}
+    def deployments(self, entries, environment='production'):
+        answers = {f'/repos/{HOOK}/deployments?environment={environment}&': [{'id': number} for number, _, _ in entries]}
         for number, state, url in entries:
             answers[f'/repos/{HOOK}/deployments/{number}/statuses'] = [{'state': state, 'environment_url': url}]
         return FakeReader(answers)
@@ -225,6 +280,25 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('::error title=Release pins::', stdout.getvalue())
 
+    def test_preview_release_reads_preview_pins_and_preview_deployments(self):
+        with with_variants():
+            release = preview_document()
+            result = TOOL.plan(self.environ(CHANNEL='preview', AGENT_BUILD_POLICY='keep-pinned'),
+                               self.sources(release=release, record=record_message(release, channel='preview'),
+                                            deployed=release),
+                               self.deployments([(3, 'success', self.deployed_url())], environment='preview'))
+            self.assertEqual((result['channel'], result['pinned_channel'], result['agents']),
+                             ('preview', 'preview', 'reuse'))
+            self.assertEqual(result['fleet_update'], 'no')
+            self.assertIn('preview channel', TOOL.plan_summary(result))
+            # Production pins (MeshCentral main as the preview fallback) are rebuilt as the preview variant.
+            fallback = TOOL.plan(self.environ(CHANNEL='preview'), self.sources(),
+                                 self.deployments([], environment='preview'))
+            self.assertEqual(fallback['agents'], 'rebuild')
+            self.assertIn('no successful preview deployment', fallback['fleet_notice'])
+        with self.assertRaisesRegex(TOOL.ReleasePinsError, 'cannot tell them apart yet'):
+            TOOL.plan(self.environ(CHANNEL='preview'), self.sources(), self.deployments([], environment='preview'))
+
     def test_reader_refuses_a_missing_token(self):
         with self.assertRaisesRegex(TOOL.ReleasePinsError, 'no token to read MeshCentral'):
             TOOL.GitHubReader('', 'MeshCentral')
@@ -309,10 +383,10 @@ class RelockTests(unittest.TestCase):
         path.write_text(pins_text(document))
         return path
 
-    def relock(self, document=None, expect_head=None, meshagent=MESHAGENT, runtime=RUNTIME):
+    def relock(self, document=None, expect_head=None, meshagent=MESHAGENT, runtime=RUNTIME, channel='production'):
         return TOOL.relock(self.clone, self.pins_file(document or pins_document()), self.agents,
                            expect_head or self.head(), meshagent, runtime, RUN_URL, STORE, pack=self.pack,
-                           log=lambda message: None)
+                           log=lambda message: None, channel=channel)
 
     def locked(self):
         return json.loads((self.clone / TOOL.LOCK_PATH).read_text())['packages'][TOOL.LOCK_ENTRY]['integrity']
@@ -339,7 +413,8 @@ class RelockTests(unittest.TestCase):
         self.assertEqual(len([1 for a, b in zip(old_lock.splitlines(), new_lock.splitlines()) if a != b]), 1)
         self.assertEqual(self.locked(), result['integrity'])
         message = git(self.clone, 'log', '-1', '--format=%B')
-        self.assertEqual(TOOL.trailers(message), {TOOL.TRAILER_LOCK: result['integrity'], TOOL.TRAILER_RUN: RUN_URL})
+        self.assertEqual(TOOL.trailers(message), {TOOL.TRAILER_LOCK: result['integrity'], TOOL.TRAILER_RUN: RUN_URL,
+                                                  TOOL.TRAILER_CHANNEL: 'production'})
         # The pushed head reproduces: the next release finds the lock consistent and commits nothing.
         self.assertFalse(self.relock()['changed'])
 
@@ -355,7 +430,7 @@ class RelockTests(unittest.TestCase):
         record = TOOL.trailers(git(self.clone, 'log', '-1', '--format=%B', pin_commit))
         self.assertEqual(record, {TOOL.TRAILER_RELEASE: BUILDS.release_tag(build, pins),
                                   TOOL.TRAILER_MESHAGENT: OTHER_MESHAGENT, TOOL.TRAILER_RUNTIME: OTHER_RUNTIME,
-                                  TOOL.TRAILER_RUN: RUN_URL})
+                                  TOOL.TRAILER_RUN: RUN_URL, TOOL.TRAILER_CHANNEL: 'production'})
         # The plan reads the same record back and reuses the build next time.
         self.assertEqual(TOOL.build_runtime(git(self.clone, 'log', '-1', '--format=%B', '--', TOOL.PINS_PATH),
                                             build, pins), OTHER_RUNTIME)
@@ -379,6 +454,32 @@ class RelockTests(unittest.TestCase):
         # A newer hook commit is a new build input: pinning its build is allowed.
         self.assertTrue(self.relock(pins_document(commit=OTHER_MESHAGENT, seed='three'), meshagent=OTHER_MESHAGENT,
                                     runtime=RUNTIME)['pins_changed'])
+
+    def test_channels_never_mix_and_the_loop_guard_is_per_channel(self):
+        with with_variants():
+            # A production release refuses preview pins, and the reverse.
+            with self.assertRaisesRegex(TOOL.ReleasePinsError, 'refusing to pin a preview agent build in a production'):
+                self.relock(preview_document(commit=OTHER_MESHAGENT), meshagent=OTHER_MESHAGENT)
+            with self.assertRaisesRegex(TOOL.ReleasePinsError, 'refusing to pin a production agent build in a preview'):
+                self.relock(pins_document(commit=OTHER_MESHAGENT, seed='two'), meshagent=OTHER_MESHAGENT,
+                            channel='preview')
+            self.assertEqual(self.head(), self.base)
+            # Production pins of MeshAgent X / hook Y, then the preview build of the same sources (a preview
+            # release falling back to main): a different channel is a new build, not a loop.
+            self.relock(pins_document(commit=OTHER_MESHAGENT, seed='two'), meshagent=OTHER_MESHAGENT,
+                        runtime=OTHER_RUNTIME)
+            preview = preview_document(commit=OTHER_MESHAGENT)
+            result = self.relock(preview, meshagent=OTHER_MESHAGENT, runtime=OTHER_RUNTIME, channel='preview')
+            self.assertTrue(result['pins_changed'])
+            record = TOOL.trailers(git(self.clone, 'log', '-1', '--format=%B', '--', TOOL.PINS_PATH))
+            self.assertEqual(record[TOOL.TRAILER_CHANNEL], 'preview')
+            self.assertIn('Pin the preview MeshAgent build', git(self.clone, 'log', '-1', '--format=%s', '--',
+                                                                 TOOL.PINS_PATH))
+            with self.assertRaisesRegex(TOOL.ReleasePinsError, 'loop guard'):
+                self.relock(preview_document(commit=OTHER_MESHAGENT, seed='again'), meshagent=OTHER_MESHAGENT,
+                            runtime=OTHER_RUNTIME, channel='preview')
+            self.assertFalse(self.relock(preview, meshagent=OTHER_MESHAGENT, runtime=OTHER_RUNTIME,
+                                         channel='preview')['changed'])
 
     def test_loop_guard_refuses_to_relock_over_its_own_unreproducible_lock(self):
         (self.clone / 'meshcentral.js').write_text('// server, changed\n')
@@ -462,13 +563,80 @@ class RelockTests(unittest.TestCase):
         with redirect_stdout(stdout):
             code = TOOL.main(['relock', '--meshcentral', str(self.clone), '--pins', str(self.pins_file(pins_document())),
                               '--agents', str(self.agents), '--expect-head', self.head(), '--meshagent-sha', MESHAGENT,
-                              '--runtime-sha', RUNTIME, '--run-url', RUN_URL, '--store', STORE],
+                              '--runtime-sha', RUNTIME, '--run-url', RUN_URL, '--store', STORE,
+                              '--channel', 'production'],
                              {'GITHUB_OUTPUT': str(output)}, pack=self.pack)
         self.assertEqual(code, 0)
         values = dict(line.split('=', 1) for line in output.read_text().splitlines())
         self.assertEqual(values['changed'], 'true')
         self.assertEqual(values['pins_changed'], 'false')
         self.assertEqual(values['meshcentral_sha'], self.head())
+
+
+
+class ConfirmTests(unittest.TestCase):
+    DIGEST = 'sha256:' + '1' * 64
+
+    def environ(self, **overrides):
+        values = {'CHANNEL': 'production', 'DEPLOY_DIGEST': self.DIGEST, 'GITHUB_REPOSITORY': HOOK,
+                  'MESHAGENT_SHA': MESHAGENT, 'MESHCENTRAL_SHA': 'b' * 40, 'RUNTIME_COMPONENT_SHA': RUNTIME,
+                  'PINNED_RELEASE': 'meshagent-' + MESHAGENT + '-0123456789abcdef', 'FLEET_UPDATE': 'no',
+                  'FLEET_CONFIRMATION': 'unchanged', 'FLEET_NOTICE': 'Agent build unchanged'}
+        values.update(overrides)
+        return values
+
+    def labels(self, **overrides):
+        values = {TOOL.LABEL_SOURCE: 'https://github.com/' + HOOK, TOOL.LABEL_CHANNEL: 'production',
+                  TOOL.LABEL_MESHAGENT: MESHAGENT, TOOL.LABEL_MESHCENTRAL: 'b' * 40, TOOL.LABEL_RUNTIME: RUNTIME,
+                  TOOL.LABEL_AGENT_BUILD: 'meshagent-' + MESHAGENT + '-0123456789abcdef'}
+        values.update(overrides)
+        return values
+
+    def test_the_image_of_the_current_heads_with_a_matching_confirmation_is_confirmed(self):
+        text = TOOL.confirm(self.environ(), self.labels())
+        self.assertIn('Deployment confirmed', text)
+        self.assertIn(self.DIGEST, text)
+        self.assertIn('Fleet confirmed as changed',
+                      TOOL.confirm(self.environ(FLEET_UPDATE='yes', FLEET_CONFIRMATION='changed'), self.labels()))
+
+    def test_an_image_of_other_sources_or_another_channel_is_refused(self):
+        for label, value in ((TOOL.LABEL_MESHAGENT, OTHER_MESHAGENT), (TOOL.LABEL_MESHCENTRAL, '9' * 40),
+                             (TOOL.LABEL_RUNTIME, OTHER_RUNTIME), (TOOL.LABEL_CHANNEL, 'preview'),
+                             (TOOL.LABEL_SOURCE, 'https://github.com/other/hook'),
+                             (TOOL.LABEL_AGENT_BUILD, 'meshagent-' + MESHAGENT + '-ffffffffffffffff')):
+            with self.subTest(label=label), self.assertRaisesRegex(TOOL.ReleasePinsError, 'is not the production release'):
+                TOOL.confirm(self.environ(), self.labels(**{label: value}))
+        missing = self.labels()
+        del missing[TOOL.LABEL_CHANNEL]
+        with self.assertRaisesRegex(TOOL.ReleasePinsError, TOOL.LABEL_CHANNEL):
+            TOOL.confirm(self.environ(), missing)
+        with self.assertRaisesRegex(TOOL.ReleasePinsError, 'has no labels'):
+            TOOL.confirm(self.environ(), None)
+
+    def test_the_fleet_confirmation_must_match_the_plan(self):
+        for fleet, wrong in (('no', 'changed'), ('yes', 'unchanged'), ('unknown', 'unchanged'), ('no', '')):
+            with self.subTest(fleet=fleet), self.assertRaisesRegex(TOOL.ReleasePinsError, 'fleet_update was confirmed'):
+                TOOL.confirm(self.environ(FLEET_UPDATE=fleet, FLEET_CONFIRMATION=wrong), self.labels())
+        TOOL.confirm(self.environ(FLEET_UPDATE='unknown', FLEET_CONFIRMATION='changed'), self.labels())
+
+    def test_inputs_are_validated(self):
+        for key, value, reason in (('DEPLOY_DIGEST', 'latest', 'DEPLOY_DIGEST'), ('CHANNEL', '', 'CHANNEL'),
+                                   ('MESHCENTRAL_SHA', 'main', 'MESHCENTRAL_SHA'), ('PINNED_RELEASE', '', 'PINNED_RELEASE'),
+                                   ('FLEET_UPDATE', 'maybe', 'FLEET_UPDATE')):
+            with self.subTest(key=key), self.assertRaisesRegex(TOOL.ReleasePinsError, reason):
+                TOOL.confirm(self.environ(**{key: value}), self.labels())
+
+    def test_main_confirm_reads_the_labels_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            labels, summary = Path(folder) / 'labels.json', Path(folder) / 'summary'
+            labels.write_text(json.dumps(self.labels()))
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(TOOL.main(['confirm', '--labels', str(labels)],
+                                           dict(self.environ(), GITHUB_STEP_SUMMARY=str(summary))), 0)
+            self.assertIn('Deployment confirmed', summary.read_text())
+            labels.write_text('not json')
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(TOOL.main(['confirm', '--labels', str(labels)], self.environ()), 1)
 
 
 if __name__ == '__main__':
