@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dup_common import (  # noqa: E402
-    DUP_ROOT, LAYOUTS, MONGO_DATA, NODE_EXE, REPORTS, SECRETS, DupError, create_root, ensure_windows, layout_root,
+    DUP_ROOT, LAYOUTS, MONGO_DATA, NODE_EXE, REPORTS, SECRETS, DupError, create_root, ensure_windows, layout_reports, layout_root,
     log, node_env, read_json, require_root_marker, run, safe_root_for_delete, write_json,
 )
 import dup_checklist  # noqa: E402
@@ -190,7 +190,7 @@ def cmd_reset(args):
         for name in (f"web-{layout}.json",):
             if (SECRETS / name).exists():
                 (SECRETS / name).unlink()
-        for report in REPORTS.glob(f"*-{layout}*.json") if REPORTS.exists() else []:
+        for report in layout_reports(layout):
             report.unlink()
     log("reset complete")
 

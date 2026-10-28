@@ -23,6 +23,18 @@ MONGO_DATA = MONGO_DIR / "data"
 SECRETS = DUP_ROOT / "secrets"
 RUN_DIR = DUP_ROOT / "run"
 REPORTS = DUP_ROOT / "reports"
+
+
+def layout_reports(layout):
+    """The report files of one layout: names with "-<layout>-" or ending "-<layout>.json".
+
+    Matched case-sensitively in Python: a Windows glob such as "*-B*" ignores case and would also
+    match layout A's "manifest-A-built.json"."""
+    import re
+    pattern = re.compile(r"-" + re.escape(layout) + r"(-|\.json$)")
+    if not REPORTS.exists():
+        return []
+    return sorted(path for path in REPORTS.glob("*.json") if pattern.search(path.name))
 DENYLIST_PATH = DUP_ROOT / "denylist.json"
 
 # Pinned runtimes (production 2026-10-27: Node 20.20.2, MongoDB 7.0.31).

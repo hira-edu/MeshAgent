@@ -91,6 +91,21 @@ def test_agent_artifacts_exclude_identity_manifests():
     expect_error(lambda: dup_layout.collect_agent_artifacts(fake, repo), "missing")
 
 
+def test_reset_selects_only_its_own_reports():
+    reports = dup_common.REPORTS
+    reports.mkdir(parents=True, exist_ok=True)
+    names = ["manifest-A-built.json", "manifest-A-built-vs-production.json", "layout-A-build.json", "probe-A.json",
+             "checklist-B-stage1-20261028T000000Z.json", "layout-B-build.json", "probe-B.json", "installs.json"]
+    for name in names:
+        (reports / name).write_text("{}", encoding="utf-8")
+    assert [p.name for p in dup_common.layout_reports("B")] == \
+        ["checklist-B-stage1-20261028T000000Z.json", "layout-B-build.json", "probe-B.json"]
+    assert [p.name for p in dup_common.layout_reports("A")] == \
+        ["layout-A-build.json", "manifest-A-built-vs-production.json", "manifest-A-built.json", "probe-A.json"]
+    for name in names:
+        (reports / name).unlink()
+
+
 def test_staged_loader_rules(deploy):
     # Layout A runs the stock npm package; since Stage 1 the installed wrapper package is the fork.
     pristine = (meshcentral_paths.upstream_package_dir() / "meshcentral.js").read_bytes().decode("utf-8")
@@ -353,6 +368,7 @@ def main():
     deploy = test_deploy_import_keeps_branding_secrets_closed()
     test_publish_paths_map_onto_layout(deploy)
     test_agent_artifacts_exclude_identity_manifests()
+    test_reset_selects_only_its_own_reports()
     test_staged_loader_rules(deploy)
     test_stage1_sources_and_package_roles(deploy)
     test_tarball_manifest_applies_only_npm_bin_rewrite()
