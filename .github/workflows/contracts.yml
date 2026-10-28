@@ -47,7 +47,6 @@ env:
   # deleted test cannot leave a stale entry behind. A test matched by a run pattern
   # below is reported as EXCLUDED with its reason instead of being run.
   EXCLUDED_TESTS: |
-    test/meshcentral_agent_update_hash_contract.js | Checks node_modules/meshcentral/meshagent.js as deployed: deploy.py publishes the fork's meshagent.js over the installed package on the server. npm ci installs the pristine upstream meshcentral 1.2.5 package, which lacks the fork's agent-update hash change, so this fails here by construction until the fork itself is the installed package (Stage 4). Run it against the duplicate or production layout.
     test/service_bundle_embedding_contract.js | Needs built MeshServiceRuntime executables (meshservice/x64/MeshServiceRuntime/MeshService-2022.exe and the ARM64 one) to extract and compare the embedded service DLL. The coordinated release workflow runs it after building ("Validate embedded service DLL parity").
     test/power_action_policy_lab_runtime.js | Lab-only: reads branding_config.local.json (local identities, never committed, and must not reach CI) and the gitignored meshcore/generated/meshagent_branding.h. Its tracked-source half, test/power_action_policy_contract.js, runs here.
     test/deploy_service_host_export_runtime.py | Needs built x64 and ARM64 MeshServiceBundle DLLs (meshservice/{x64,ARM64}/MeshServiceBundle/MeshService-2022.dll), which this workflow does not build.
@@ -117,6 +116,13 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: Fetch the pinned upstream MeshCentral package
+        # Tests that compare the fork with stock upstream read this verified copy (since Stage 1
+        # the installed package is the fork). The tool checks the tarball sha512 and the
+        # extracted tree digest pinned in test/lib/meshcentral_upstream_reference.json; the
+        # tests themselves never download it.
+        run: python test/lib/fetch_upstream_reference.py
+
       - name: Install MeshCentral wrapper dependencies
         id: wrapper
         run: |
@@ -145,6 +151,17 @@ jobs:
           test -f "$wrapper/package-lock.json" || { echo "::error::$wrapper/package-lock.json missing; npm ci needs it"; exit 1; }
           echo "MeshCentral wrapper: $wrapper"
           echo "MESHCENTRAL_WRAPPER_PATH=$wrapper" >> "$GITHUB_ENV"
+          # Stage 1: the wrapper installs the fork package from a tarball packed from the
+          # checkout (file:dist/...). Pack it first; npm ci then checks it against the
+          # integrity pinned in the lockfile, so a pack that differs fails the job.
+          spec="$(node -p 'require(process.argv[1]).dependencies.meshcentral || ""' "$wrapper/package.json")"
+          case "$spec" in
+            file:*)
+              test -f "$wrapper/scripts/pack.js" || { echo "::error::meshcentral is $spec but $wrapper/scripts/pack.js is missing"; exit 1; }
+              node "$wrapper/scripts/pack.js"
+              test -f "$wrapper/${spec#file:}" || { echo "::error::pack did not produce $wrapper/${spec#file:}"; exit 1; }
+              ;;
+          esac
           cd "$wrapper"
           npm ci --no-audit --no-fund
           node -p "'installed meshcentral ' + require('./node_modules/meshcentral/package.json').version"
