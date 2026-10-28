@@ -21,6 +21,12 @@ assertions against fixture pages, and the Docker build-context rules. Its
 `MitigationShimTests` run `harden-image-size.js` under `node` against stand-in
 `image-size` packages and are skipped when `node` is absent. Two symlink cases
 are skipped on Windows hosts that cannot create symlinks.
+`ci_release_agent_builds_test.py` covers `tools/deployment/agent_build_release.py`
+against an in-memory release store and a stub HTTP opener: the release name
+derived from the pins, fetch refusing a missing token, an unreadable store, a
+missing release or asset, an unpinned asset or changed bytes (leaving no fetched
+file), and publish verifying local files first, deleting a draft after a failed
+upload, and verifying rather than replacing an existing release.
 
 Validate hook/coordinated-release.yml and the public repository dispatch workflows with
 `actionlint`. The release workflow also aggregates the Windows matrix and runs
@@ -33,6 +39,44 @@ This integration gate requires Docker and does not use the production database
 or certificates.
 Production promotion additionally verifies the selected image is running and
 the configured public HTTPS `health.ashx` response is exactly `ok`.
+
+## Contracts workflow
+
+`.github/workflows/contracts.yml` runs on every push and pull request on Linux
+with Node 24.22.1 (upstream 1.3.1's image version, which the fork's 1.3.1 base
+uses) and Python 3.12. It checks out `hira-edu/MeshCentral` (`main`, the
+`MESHCENTRAL_REF` repository variable, or the dispatch input) beside MeshAgent,
+fetches the pinned upstream tags and reference packages, and installs the
+deployment wrapper from a tarball it packs from that checkout.
+
+The package carries the Windows agent builds pinned in
+`agents/agent-defaults.json`, which are not in git (see "Fork agent binaries in
+the MeshCentral package" in `docs/DEPLOYMENT.md`). Before packing, the job:
+
+1. checks that the `RELEASE_APP_ID` variable and `RELEASE_APP_PRIVATE_KEY`
+   secret are available, and names whichever is not (runs from forks and
+   Dependabot get no secrets);
+2. mints a token with Contents read on the private hook repository only;
+3. runs `agent_build_release.py fetch` for the pins, which names a missing
+   release, asset or mismatch;
+4. runs `node agents/check-releases.js --directory <folder>` in the MeshCentral
+   checkout;
+5. packs with `node deploy/scripts/pack.js --agents <folder>`, then `npm ci`
+   checks the tarball against the integrity in `deploy/package-lock.json`.
+
+There is no unpinned pack: any failure stops the job before a test runs. The
+test groups then run the JavaScript and Python contracts, the Node runtimes
+(except `EXCLUDED_TESTS`, see [Runtime probes](#runtime-probes)), the release
+tooling tests, the deploy suites, and MeshCentral's `node --test
+deploy/tests/*.test.js`, and upload every log.
+
+To reproduce the packing step locally with the build folder as the source:
+
+```powershell
+node <MeshCentral>/agents/check-releases.js --directory <folder with the pinned files>
+node <MeshCentral>/deploy/scripts/pack.js --agents <folder with the pinned files>
+npm ci --prefix <MeshCentral>/deploy --no-audit --no-fund
+```
 
 ## Test layers
 
