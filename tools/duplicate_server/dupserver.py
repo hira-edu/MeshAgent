@@ -218,7 +218,7 @@ def main(argv=None):
     group.add_argument("--tarball")
     group.add_argument("--standin", action="store_true", help="use the pinned stock `npm pack meshcentral@1.2.5`")
     group.add_argument("--stage1", action="store_true",
-                       help="B-stage1: the wrapper's fork tarball plus layout A's data and web folders and A's config")
+                       help="B-stage1: the wrapper's fork tarball, layout A's data and web folders without shadow cores, and A's config")
     for name in ("start", "stop", "checklist", "reset"):
         p = sub.add_parser(name)
         p.add_argument("--layout", choices=list(LAYOUTS) + ["all"])

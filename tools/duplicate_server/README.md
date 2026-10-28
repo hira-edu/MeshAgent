@@ -43,8 +43,14 @@ probe output and checklist results.
    - `deploy.py`'s own publish map, imported read-only. `ARTIFACTS`, `CORE_ARTIFACTS`,
      `get_publish_path`, `get_core_publish_path` and `validate_local_service_bundle_artifacts` are used
      as they are. MeshAgent sources resolve against the main MeshAgent checkout (or
-     `MC_DUP_SOURCE_REPO`); `../MeshCentral/...` sources resolve against `MESHCENTRAL_ROOT`, or the
-     main checkout's sibling `MeshCentral`;
+     `MC_DUP_SOURCE_REPO`); `../MeshCentral/...` sources resolve through the shared test helper
+     (`test/lib/meshcentral_paths.py`): `MESHCENTRAL_ROOT`, else this checkout's sibling `MeshCentral`,
+     so a worktree must set `MESHCENTRAL_ROOT`. `meshcentral.js` is the exception: production runs
+     stock 1.2.5 plus deploy.py's module-version and proxy SNI transforms, so the loader is rebuilt
+     from the installed stock copy with deploy.py's transform helpers. The CRLF that production's
+     first versioned deploy left on three lines is restored, and the result must equal production's
+     sha256 in `evidence/live/hashes.tsv`. The fork's committed loader, which reads release-dated
+     versions since Stage 1, is not used for layout A;
    - `evidence/production-layout-a/layout-a.tar` extracted over the tree with its mtimes;
    - then `layout-a-modules-posix.tar` (posix format) applied to `meshcentral-data/meshcore*.js` and
      `modules_meshcore*`, which sets their nanosecond mtimes. Those mtimes are the module versions
@@ -68,13 +74,17 @@ probe output and checklist results.
 copies no overrides. The installed tree must equal the tarball. The only allowed difference is npm's
 bin linker rewriting CRLF to LF in declared `bin` files.
 
-**B-stage1** (`layout-b --stage1`) is the Stage 1 fork as production would run it. The package is the
-wrapper's own fork tarball, installed by `npm ci` against the lockfile integrity. The data and web
-folders are built the way layout A builds them: `deploy.py`'s map without the roles that write inside
-`node_modules/meshcentral`, then both production captures. The package must still equal the tarball
+**B-stage1** (`layout-b --stage1`) is the Stage 1 fork as production runs it after the cutover. The
+package is the wrapper's own fork tarball, installed by `npm ci` against the lockfile integrity. The data
+and web folders are built the way layout A builds them: `deploy.py`'s map without the roles that write
+inside `node_modules/meshcentral`, then the production capture. Both leave out the data-dir shadow cores
+(`meshcentral-data/meshcore*.js` and `modules_meshcore*`) that the cutover removes (D18), so the cores and
+their release-dated module versions come from the package. The package must still equal the tarball
 afterwards. The config uses layout A's profile, including `customFiles`, on layout B's ports, database
-and fresh secrets. The checklist compares B-stage1 with production like layout A (1c, 7b, 7d, bin,
-views) and adds 1d, "node_modules/meshcentral equals the tarball".
+and fresh secrets. The checklist compares B-stage1 with production like layout A for 1c, bin and views,
+and adds 1d, "node_modules/meshcentral equals the tarball". Its 7b requires the core to come from the
+package with production's core text, and its 7d requires every served module version to equal the
+release manifest `agents/module-versions.json`.
 
 ## Checklist
 
