@@ -6,6 +6,7 @@
     python tools/duplicate_server/dupserver.py start [--layout A|B]
     python tools/duplicate_server/dupserver.py checklist [--layout A|B]
     python tools/duplicate_server/dupserver.py pin-check                   # layout B refuses to start on a changed agent pin
+    python tools/duplicate_server/dupserver.py dbcompat [--nodes 312 --days 20 ...]
     python tools/duplicate_server/dupserver.py status
     python tools/duplicate_server/dupserver.py stop [--layout A|B|all]
     python tools/duplicate_server/dupserver.py reset [--layout A|B|all]
@@ -30,6 +31,7 @@ from dup_common import (  # noqa: E402
 )
 import dup_checklist  # noqa: E402
 import dup_config  # noqa: E402
+import dup_dbcompat  # noqa: E402
 import dup_install  # noqa: E402
 import dup_layout  # noqa: E402
 import dup_mongo  # noqa: E402
@@ -194,6 +196,17 @@ def cmd_pin_check(args):
         raise DupError(f"pin check failed: {report['detail']}")
 
 
+def cmd_dbcompat(args):
+    require_root_marker()
+    for layout in ("A", "B"):
+        if is_running(layout):
+            raise DupError(f"layout {layout} is running; stop it first (dbcompat runs its db.js against a scratch database)")
+    dup_mongo.start()
+    dup_mongo.initialize_users()
+    dup_dbcompat.run(nodes=args.nodes, days=args.days, events_per_day=args.events_per_day,
+                     power_per_day=args.power_per_day, serverstats_minutes=args.serverstats_minutes)
+
+
 def cmd_reset(args):
     """Drop the duplicate databases and delete the layout trees (data dirs, certs, config). Keep tools,
     downloads, mongod and its users. Rebuild with setup (A) or layout-b (B)."""
@@ -240,6 +253,12 @@ def main(argv=None):
     group = b.add_mutually_exclusive_group()
     group.add_argument("--agents", help="pack the fork first with `pack.js --agents <dir>` in the MeshCentral checkout")
     group.add_argument("--tarball", help="an already packed fork tarball; npm ci refuses it unless the wrapper lock pins it")
+    db = sub.add_parser("dbcompat", help="D27: 1.2.5 -> 1.3.1 -> 1.2.5 -> 1.3.1 and the drop list on a production-sized scratch DB")
+    db.add_argument("--nodes", type=int, default=312)
+    db.add_argument("--days", type=int, default=20)
+    db.add_argument("--events-per-day", type=int, default=10000)
+    db.add_argument("--power-per-day", type=int, default=4000)
+    db.add_argument("--serverstats-minutes", type=int, default=5)
     for name in ("start", "stop", "checklist", "reset"):
         p = sub.add_parser(name)
         p.add_argument("--layout", choices=list(LAYOUTS) + ["all"])
@@ -250,7 +269,7 @@ def main(argv=None):
     sub.add_parser("teardown")
     args = parser.parse_args(argv)
     handler = {"setup": cmd_setup, "layout-b": cmd_layout_b, "start": cmd_start, "stop": cmd_stop,
-               "status": cmd_status, "checklist": cmd_checklist, "pin-check": cmd_pin_check,
+               "status": cmd_status, "checklist": cmd_checklist, "pin-check": cmd_pin_check, "dbcompat": cmd_dbcompat,
                "reset": cmd_reset, "teardown": cmd_teardown}[args.command]
     try:
         handler(args)

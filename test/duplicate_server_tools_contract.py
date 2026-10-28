@@ -333,6 +333,23 @@ def test_fork_layout_rules(deploy):
     assert not dup_layout.is_package_path(deploy, deploy.get_publish_path("data", "MeshService64.exe"))
 
 
+def test_dbcompat_expectations():
+    import dup_dbcompat
+    full = dup_dbcompat.expected_set(True)
+    assert full["meshcentral"] == sorted(dup_dbcompat.SET_125["meshcentral"] + dup_dbcompat.ADDED_131["meshcentral"])
+    assert full["plugins"] == ["TypeAndName1", "_id_"]
+    assert "plugins" not in dup_dbcompat.expected_set(False)
+    assert dup_dbcompat.expected_set(False, ["_id_"])["plugins"] == ["_id_"]
+    # The drop list in dbcompat.js must be exactly what 1.3.1 adds (docs/DEPLOYMENT.md, s6-c review).
+    text = (ROOT / "tools" / "duplicate_server" / "dbcompat.js").read_text(encoding="utf-8")
+    for col, names in dup_dbcompat.ADDED_131.items():
+        for name in names:
+            if name != "_id_":
+                assert f"'{name.split('(')[0]}'" in text, name
+    assert dup_dbcompat.problems_in(["ERR (node:1) [MONGODB DRIVER] Warning: cursor.count is deprecated", "Resetting main indexes..."]) == []
+    assert dup_dbcompat.problems_in(["UNHANDLED REJECTION x", "ERR boom"]) == ["UNHANDLED REJECTION x", "ERR boom"]
+
+
 def test_tarball_manifest_applies_only_npm_bin_rewrite():
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
@@ -551,6 +568,7 @@ def main():
     test_self_update_check()
     test_fork_layout_agents()
     test_fork_layout_rules(deploy)
+    test_dbcompat_expectations()
     test_tarball_manifest_applies_only_npm_bin_rewrite()
     test_summary_key_parsing_and_flag_coverage()
     production_server_id = secrets.token_hex(48)
