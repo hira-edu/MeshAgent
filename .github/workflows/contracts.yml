@@ -3,7 +3,10 @@ name: Contracts and MeshCentral tests
 # Runs the MeshAgent static contracts, the release and deploy suites that need no
 # server or built binaries, and the MeshCentral wrapper tests, against a fresh
 # checkout of hira-edu/MeshCentral placed beside MeshAgent.
-# It never deploys, signs or releases, and it uses no secrets.
+# It never deploys, signs or releases. Its one credential is a short-lived token, minted
+# from the release GitHub App, that can only read the private hook repository: the
+# MeshCentral package carries the Windows agent builds pinned in agents/agent-defaults.json,
+# which are stored as hook release assets, never in public git (SSOT D30 OD1 option B).
 
 on:
   push:
@@ -39,6 +42,9 @@ env:
   # release workflow.
   NODE_VERSION: '20.20.2'
   PYTHON_VERSION: '3.12'
+  # Private repository whose releases hold the pinned Windows agent builds, one release per
+  # pinned build (tools/deployment/agent_build_release.py names it from the pins).
+  AGENT_BUILDS_STORE: hira-edu/hook
   TEST_TIMEOUT_SECONDS: '600'
   # Tests in this repository that this workflow does not run. One line per test:
   # "<path> | <reason>". Every path must exist, or the job fails, so a renamed or
@@ -157,6 +163,52 @@ jobs:
           python test/lib/fetch_upstream_reference.py
           python test/lib/fetch_upstream_reference.py --pin test/lib/meshcentral_production_reference.json
 
+      - name: Check the agent-build store credential
+        # The MeshCentral package carries the Windows agent builds pinned in
+        # agents/agent-defaults.json. They are provisioned, so they live only as release assets
+        # of the private hook repository, read with the release GitHub App. Runs without
+        # repository secrets (pull requests from forks, Dependabot) cannot pack and stop here.
+        env:
+          RELEASE_APP_ID: ${{ vars.RELEASE_APP_ID }}
+          RELEASE_APP_KEY_SET: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          missing=0
+          if [ -z "$RELEASE_APP_ID" ]; then
+            echo "::error::Repository variable RELEASE_APP_ID is not available to this run; it is needed to read the pinned agent builds from $AGENT_BUILDS_STORE"
+            missing=1
+          fi
+          if [ "$RELEASE_APP_KEY_SET" != true ]; then
+            echo "::error::Repository secret RELEASE_APP_PRIVATE_KEY is not available to this run (runs from forks and Dependabot get no secrets); it is needed to read the pinned agent builds from $AGENT_BUILDS_STORE"
+            missing=1
+          fi
+          exit "$missing"
+
+      - name: Mint a read-only token for the agent-build store
+        id: agent_builds_app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: hook
+          permission-contents: read
+
+      - name: Fetch and verify the pinned agent builds
+        # The release is named from the pins (build commit and pinned bytes). The tool writes a
+        # file only after its size and SHA384 match; then the server's own verifier checks the
+        # folder against agents/agent-defaults.json, as the server does at start.
+        env:
+          AGENT_BUILDS_TOKEN: ${{ steps.agent_builds_app.outputs.token }}
+        run: |
+          set -euo pipefail
+          pins="$MESHCENTRAL_ROOT/agents/agent-defaults.json"
+          [ -f "$pins" ] || { echo "::error::$pins missing: MeshCentral $MESHCENTRAL_REF has no fork agent pins (Stage 6)"; exit 1; }
+          builds="$RUNNER_TEMP/agent-builds"
+          python tools/deployment/agent_build_release.py fetch --store "$AGENT_BUILDS_STORE" --pins "$pins" --output "$builds"
+          node "$MESHCENTRAL_ROOT/agents/check-releases.js" --directory "$builds"
+          echo "AGENT_BUILDS_DIR=$builds" >> "$GITHUB_ENV"
+
       - name: Install MeshCentral wrapper dependencies
         id: wrapper
         run: |
@@ -171,13 +223,15 @@ jobs:
           echo "MeshCentral wrapper: $wrapper"
           echo "MESHCENTRAL_WRAPPER_PATH=$wrapper" >> "$GITHUB_ENV"
           # Stage 1: the wrapper installs the fork package from a tarball packed from the
-          # checkout (file:dist/...). Pack it first; npm ci then checks it against the
-          # integrity pinned in the lockfile, so a pack that differs fails the job.
+          # checkout (file:dist/...). Pack it first, with the verified pinned agent builds
+          # staged by --agents; npm ci then checks it against the integrity pinned in the
+          # lockfile, so a pack that differs fails the job.
           spec="$(node -p 'require(process.argv[1]).dependencies.meshcentral || ""' "$wrapper/package.json")"
           case "$spec" in
             file:*)
               test -f "$wrapper/scripts/pack.js" || { echo "::error::meshcentral is $spec but $wrapper/scripts/pack.js is missing"; exit 1; }
-              node "$wrapper/scripts/pack.js"
+              [ -n "${AGENT_BUILDS_DIR:-}" ] || { echo "::error::AGENT_BUILDS_DIR is not set: the pinned agent builds were not fetched"; exit 1; }
+              node "$wrapper/scripts/pack.js" --agents "$AGENT_BUILDS_DIR"
               test -f "$wrapper/${spec#file:}" || { echo "::error::pack did not produce $wrapper/${spec#file:}"; exit 1; }
               ;;
           esac
