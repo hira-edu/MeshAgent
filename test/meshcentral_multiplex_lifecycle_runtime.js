@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const EventEmitter = require('events');
+const { createRequire } = require('module');
 const { forkFile } = require('./lib/meshcentral_paths');
 
 const sourcePath = path.resolve(process.argv[2] || forkFile('meshdesktopmultiplex.js'));
@@ -22,7 +23,7 @@ const sandbox = {
 };
 class FakeDate extends Date { constructor(...a) { super(...(a.length ? a : [now])); } static now() { return now; } }
 sandbox.Date = FakeDate;
-sandbox.require = name => name === 'image-size' ? { imageSize() { return { width: 16, height: 16 }; } } : require(name);
+sandbox.require = createRequire(sourcePath); // So './mcrec.js' (the tile size reader) is the fork's.
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(sourcePath, 'utf8'), sandbox, { filename: sourcePath });
 
