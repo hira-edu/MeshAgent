@@ -197,8 +197,8 @@ function checkMeshCore(source) {
         windowsTerminalAvoidsDispatcher:
             source.includes('function terminal_windows_start(protocol, cols, rows, targetSessionId)') &&
             source.includes("return require('win-terminal')[method](cols, rows, targetSessionId);") &&
-            source.includes('function terminal_windows_active_user_session_id(users)') &&
-            source.includes('terminal_windows_start(that.httprequest.protocol, this.cols, this.rows, targetSessionId)') &&
+            source.includes("terminal_windows_start(this.httprequest.protocol, cols, rows, require('win-terminal').SelectUserSession(this.that.tsid))") &&
+            !source.includes('users.Active[0].SessionId') &&
             source.includes('terminal_windows_start(this.httprequest.protocol, cols, rows, null)') &&
             !source.includes("terminal_windows_dispatch_modules('win-virtual-terminal')") &&
             !source.includes("terminal_windows_dispatch_modules('win-terminal')") &&

@@ -859,8 +859,8 @@ function main() {
             !sources.meshcentralCore.includes('MESH_RUN_COMMAND_DONE') &&
             !sources.meshcentralCore.includes('[Console]::WriteLine') &&
             sources.meshcentralCore.includes('function terminal_windows_start(protocol, cols, rows, targetSessionId)') &&
-            sources.meshcentralCore.includes('function terminal_windows_active_user_session_id(users)') &&
-            sources.meshcentralCore.includes('terminal_windows_start(that.httprequest.protocol, this.cols, this.rows, targetSessionId)') &&
+            sources.meshcentralCore.includes("terminal_windows_start(this.httprequest.protocol, cols, rows, require('win-terminal').SelectUserSession(this.that.tsid))") &&
+            !sources.meshcentralCore.includes('users.Active[0].SessionId') &&
             sources.meshcentralCore.includes('terminal_windows_start(this.httprequest.protocol, cols, rows, null)') &&
             !sources.meshcentralCore.includes("terminal_windows_dispatch_modules('win-virtual-terminal')") &&
             !sources.meshcentralCore.includes("terminal_windows_dispatch_modules('win-terminal')") &&
