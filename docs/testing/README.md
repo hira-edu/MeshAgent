@@ -43,16 +43,29 @@ surfaces and assert invariants without building. They generally follow
 `test/*_contract.js` and run with `node test/<name>_contract.js`. They are the
 fastest gate and do not require built binaries.
 
-`node test/meshcentral_core_module_parity_contract.js` requires every sibling
-MeshCentral `agents/modules_meshcore*` copy with an agent counterpart to match
-`modules/` exactly. The server's undated copies replace modules that an agent
-build does not embed or embeds undated. Clipboard is the listed exception: its
-server copy must not use `MeshClipboardBridgeW`, which those builds lack.
+`node test/meshcentral_core_module_parity_contract.js` checks the module policy
+of the MeshCentral package's `agents/modules_meshcore`, whose files replace older
+embedded copies on agents (see `docs/CONFIGURATION.md`). Every file must fall in
+one class:
+
+- MeshAgent-owned (`monitor-border`, `util-agentlog`, `win-console`,
+  `win-deskutils`, `wifi-scanner`): equal to `modules/<name>.js` as git stores it
+  (LF), byte for byte.
+- fork: modules upstream does not ship, plus `win-terminal` and
+  `win-virtual-terminal`, which the fork replaces. Equal to `modules/<name>.js`
+  apart from line endings. Clipboard is the listed exception: its server copy
+  must not use `MeshClipboardBridgeW`, which builds that do not embed clipboard
+  lack.
+- upstream: everything else, byte-equal to the pinned upstream package, and
+  every upstream module must be present.
+
+An unknown file fails. `agents/modules_meshcore_min` and `agents/meshcore.min.js`
+must not exist (D24): with `minifycore` on, MeshCentral would serve them instead.
 
 The host power-action policy is checked in two parts.
 `node test/power_action_policy_contract.js` reads only tracked sources: the
-MeshAgent policy code under `meshcore/`, `tools/`, and `schema/`, and the sibling
-MeshCentral `meshctrl.js` and `agents/meshcore.js`.
+MeshAgent policy code under `meshcore/`, `tools/`, and `schema/`, and the
+MeshCentral checkout's `meshctrl.js` and `agents/meshcore.js`.
 `node test/power_action_policy_lab_runtime.js` checks the current lab
 configuration: `branding_config.local.json` must set
 `advanced.allowHostPowerActions` to `true`, and the generated
@@ -64,61 +77,103 @@ the MeshAgent root.
 
 ### MeshCentral checkout location
 
-MeshCentral contracts and runtime tests read the sibling `../MeshCentral`
-checkout beside the MeshAgent root. Every input they declare is required: a
-missing or empty file fails with `required input missing` or `is empty` and names
-the path, rather than skipping the check. A few declared optional inputs, such as
-untracked `meshcentral-data` core and module copies, are checked when present and
-reported on stderr when absent.
+MeshCentral contracts and runtime tests find MeshCentral through
+`test/lib/meshcentral_paths.js` (Node) and `test/lib/meshcentral_paths.py`
+(Python), which follow the same rules. They read four places:
 
-The three contracts below also accept `MESHCENTRAL_ROOT`, which overrides the
-sibling path. A MeshAgent worktree under `.claude/worktrees/` has no sibling
-`MeshCentral`, so set it there:
+- The checkout: `MESHCENTRAL_ROOT` when set, otherwise the sibling
+  `../MeshCentral` beside the MeshAgent root. It must hold `meshagent.js` and
+  `agents/`. A MeshAgent worktree under `.claude/worktrees/` has no sibling, so
+  set `MESHCENTRAL_ROOT` there. Fork files such as `meshagent.js`,
+  `agents/meshcore.js` and `public/scripts/*` are read at the checkout root.
+- The deployment wrapper: `deploy/`, whose `package.json` must be named
+  `meshcentral-deploy`. It holds the wrapper lockfile, `deploy/scripts/` (the
+  generators), `deploy/meshcentral-web/public/scripts/custom.js` (the served
+  `custom.js`) and `deploy/meshcentral-data` (local server state). A test that
+  reads a wrapper file fails on a checkout without it.
+- The installed package: exactly one of `deploy/node_modules/meshcentral` or a
+  root `node_modules/meshcentral` left from the old wrapper layout. Neither or
+  both fails; delete the stale root `node_modules` if both exist. Install it in
+  `deploy/` with `npm run pack` (packs the fork into `deploy/dist/`, which the
+  wrapper lockfile pins) and then `npm ci`.
+- The pinned upstream reference: the stock npm package named in
+  `test/lib/meshcentral_upstream_reference.json` (`meshcentral` 1.2.5), which
+  tests compare the fork with. Tests never download it. Populate it once per
+  cache:
+
+  ```powershell
+  python test/lib/fetch_upstream_reference.py
+  ```
+
+  `--tarball <file>` uses a local copy of the tarball instead of downloading
+  it. The tool checks the tarball's sha512, extracts only regular files under
+  `package/`, and checks the tree digest and file count before it replaces the
+  cache. The cache is `artifacts/meshcentral-upstream` in the MeshAgent root
+  (git-ignored), or `MESHCENTRAL_UPSTREAM_CACHE`. A worktree has its own
+  `artifacts/`, so fetch there or point `MESHCENTRAL_UPSTREAM_CACHE` at an
+  existing cache. Each test process re-hashes the cache on first use, and a
+  missing, foreign or changed cache fails with the fetch command.
+
+For example, from a worktree:
 
 ```powershell
 $env:MESHCENTRAL_ROOT = "C:\path\to\MeshCentral"
+$env:MESHCENTRAL_UPSTREAM_CACHE = "C:\path\to\MeshAgent\artifacts\meshcentral-upstream"
 node test/meshcentral_upstream_base_contract.js
-node test/meshcentral_generated_assets_contract.js
-node test/meshcentral_custom_js_script_refs_contract.js
 ```
 
-The other MeshCentral contracts do not read `MESHCENTRAL_ROOT`. From such a
-worktree they fail on the missing sibling path.
+`node test/meshcentral_paths_contract.js` and
+`python test/meshcentral_paths_contract.py` test both helpers against temporary
+layouts.
+
+Every input a test declares is required: a missing or empty file fails with
+`required input missing` or `is empty` and names the path, rather than skipping
+the check. A few declared optional inputs, such as untracked core and module
+copies that earlier deploys left in `meshcentral-data` or
+`deploy/meshcentral-data`, are checked when present and reported on stderr when
+absent. `deploy.py` and
+`tools/meshcentral_update_agents.js` always use the sibling `../MeshCentral`;
+they ignore `MESHCENTRAL_ROOT`.
 
 ### MeshCentral fork contracts
 
-`test/meshcentral_upstream_base_contract.js` checks every MeshCentral file that
-replaces an upstream file. The root must be a git top level holding the upstream
-tag named by `defaultUpstreamTag` in
-`test/fixtures/meshcentral-fork-hunks/upstream-base.json` (currently `1.2.5`), and
-the tag's `package.json` must be upstream `meshcentral` at that version. Fetch the
-upstream tags if it is missing. Each listed file has a state:
+`test/meshcentral_upstream_base_contract.js` checks that the MeshCentral fork
+package equals the pinned upstream reference plus reviewed changes. Its scope is
+the tracked files the package ships (the `package.json` `files` list, plus
+`package.json`, readme and licence files), minus the paths and names excluded in
+`test/fixtures/meshcentral-fork-hunks/upstream-base.json`: `deploy/**`,
+`plugins/**`, `.github/**`, `.gitattributes`, and `public/scripts/custom.js`
+(npm's empty stub; the contract never opens it). The root must be a git top
+level. A file byte-equal to the reference needs no entry, and an entry for one
+fails as stale. Every other file has a state:
 
-- `enforced`: the line-ending-normalised diff against the tag must equal the
-  reviewed diff saved as `upstream-base/<path>.diff` beside the JSON. Any other
-  hunk fails (`PASS enforced`).
+- `enforced`: the line-ending-normalised diff against the reference must equal
+  the reviewed diff saved as `upstream-base/<path>.diff` beside the JSON. Any
+  other hunk fails (`PASS enforced`).
 - `pending-rebase`: the file still starts from an older upstream base
   (`forkBase`). It is reported as `PENDING` with its diff counts, the upstream
-  lines it lacks, and its `flipStage`; it does not fail.
-- `excluded`, with a reason, for wrapper metadata and `public/scripts/custom.js`,
-  which this contract never opens.
+  lines it lacks, and its `flipStage`; it does not fail. Finding those lines
+  needs `forkBase` and the upstream tag (`defaultUpstreamTag`, `1.2.5`) in the
+  checkout's git history; fetch the upstream tags if one is missing.
+- `generated`: a derived copy whose content the generated-assets contract
+  governs, which must list it.
+- `fork-only`: not in the upstream package.
 
-Every tracked file that also exists at the tag must be listed or excluded, and a
-listed file that is no longer tracked fails. A pending file flips to `enforced`
-in the fixture once it is rebased: review its diff with
-`--print-diff <path>` (prints only, writes nothing), save it as its `.diff`
-fixture, and change the state. `--full` prints every missing upstream line of
-pending files instead of the first twelve. `--evidence <dir>` writes the full
-report as JSON into `<dir>`.
+A reference file the fork does not ship must be listed under `removed`, and
+anything unlisted fails. A pending file flips to `enforced` in the fixture once
+it is rebased: review its diff with `--print-diff <path>` (prints only, writes
+nothing), save it as its `.diff` fixture, and change the state. `--full` prints
+every missing upstream line of pending files instead of the first twelve.
+`--evidence <dir>` writes the full report as JSON into `<dir>`.
 
 `test/meshcentral_generated_assets_contract.js` requires every generated or
-minified MeshCentral file under `agents/` or `public/` (`*.min.js`, `*-min.js`,
-and `agents/modules_meshcore_min/**`) to be listed in
-`test/fixtures/meshcentral-fork-hunks/generated-assets.json`. Each listed file is
-in one of these sections or states:
+minified MeshCentral file under `agents/` or `public/` (`*.min.js` and `*-min.js`)
+to be listed in `test/fixtures/meshcentral-fork-hunks/generated-assets.json`.
+Each listed file is in one of these sections or states:
 
-- `builders`: each reproducible builder runs with `--check` and must report no
-  drift.
+- `builders`: each reproducible builder in `deploy/scripts/`
+  (`build-viewer-min.js` and `build-desktop-audio-control.js`) runs with
+  `--check` and must report no drift.
 - `built`: the file is produced entirely by one of those builders.
 - `no-builder-yet`: nothing regenerates the file. It is reported as `PENDING`
   with its size and line count next to its source and the `workPackage` that adds
@@ -126,17 +181,35 @@ in one of these sections or states:
 - `knownDrift`: a recorded deviation of a `copy-of-source` file, saved as a diff
   under `generated-assets/` and reported as `DRIFT`.
 - `vendored`: third-party build output with no source in the repository.
+- `upstreamPublished`: npm build output the fork ships unchanged (for example
+  `agents/meshcmd.min.js` and `agents/modules_meshcmd_min/*`). It must stay
+  byte-equal to the pinned upstream reference.
 
-An unlisted generated file, a listed file that is not tracked, or an
-unrecorded drift fails. When a known drift disappears, the contract fails until
-its `knownDrift` record is removed. A file flips from `no-builder-yet` to
-`built` when a builder entry covers it. `--print-drift <path>` prints the
-current diff from a file's source to it. `--evidence <dir>` writes the report as
-JSON.
+An unlisted generated file, a listed file that is not tracked, a file listed
+twice, or an unrecorded drift fails. When a known drift disappears, the contract
+fails until its `knownDrift` record is removed. A file flips from
+`no-builder-yet` to `built` when a builder entry covers it. `--print-drift <path>`
+prints the current diff from a file's source to it. `--evidence <dir>` writes the
+report as JSON.
+
+MeshCentral's own check of its whole generated set (translations, emails, `-min`
+views and scripts, and the two viewer `-min` files) runs in the MeshCentral
+checkout with the toolchain pinned in `deploy/package.json`:
+
+```powershell
+node deploy/scripts/regenerate.js --check --allow-pending ja-jp
+```
+
+It needs `npm ci` in `deploy/` and writes nothing with `--check`. Without
+`--allow-pending ja-jp` it fails on the stale `*_ja-jp` translations upstream
+1.2.5 ships, which its generators no longer produce. With it, those files are
+still listed, marked as skipped. `ja-jp` is the only pending id; others are
+refused.
 
 `test/meshcentral_custom_js_script_refs_contract.js` reads only the string
-literals in `public/scripts/custom.js` that name a `.js`, `.css`, or `.wasm`
-file. It requires each one to resolve to a tracked MeshCentral file:
+literals in the served `custom.js`,
+`deploy/meshcentral-web/public/scripts/custom.js`, that name a `.js`, `.css`,
+or `.wasm` file. It requires each one to resolve to a tracked MeshCentral file:
 `public/scripts/<name>` for bare or `scripts/` references, and
 `plugins/<p>/<f>` for plugin references. A `plugin/<p>/<f>` URL also needs a
 file in `plugins/<p>/` that registers that route. Query strings are ignored. An
@@ -495,7 +568,9 @@ python test/deploy_meshctrl_runtime.py
 - `deploy_artifact_selection_runtime.py`: the publish-state helpers take
   explicit artifact lists and report declared or tracked files missing locally;
   rollback restores a file since dropped from the map; `deploy` still refuses
-  missing required artifacts.
+  missing required artifacts. It and the rollback test also check that the
+  MeshCentral files seeded on the fake server stay untouched, and that core
+  publication and verification never reach the server.
 - `deploy_config_edit_runtime.py`: `config edit` uploads nothing for an
   unchanged file or invalid JSON (and leaves no local copy), stops the upload
   when the remote backup fails, and backs up before uploading a valid edit.
@@ -505,7 +580,16 @@ python test/deploy_meshctrl_runtime.py
 
 `python test/deploy_transport_health_runtime.py` and
 `node test/deploy_publish_paths_contract.js` pin the recovery helper and the
-backup call signature in `deploy.py`.
+backup call signature in `deploy.py`. The contract also requires each
+MeshCentral publish refusal to come before any remote call.
+
+`python test/meshcentral_module_versions_runtime.py` asserts that `deploy.py`
+refuses the MeshCentral files and still publishes the agent binaries. It also runs
+the two loader patch helpers that `tools/prepare_release_image.py` and the
+duplicate server's layout A still use (module versions and proxy SNI) on the
+pinned upstream `meshcentral.js`. `python test/deploy_proxy_certificate_sni_runtime.py`
+checks that the fork's `meshcentral.js` already carries the SNI change, and the
+helper on upstream's.
 
 ### Duplicate MeshCentral server
 
@@ -593,8 +677,10 @@ An install command failure fails the phase even if the old service is healthy.
 
 ### Viewer pointer input
 
-These checks read the sibling `../MeshCentral` checkout and its installed
-`node_modules/meshcentral`.
+These checks read the MeshCentral checkout and the pinned upstream reference
+(see "MeshCentral checkout location"). The pinned views, and upstream's own
+viewer scripts the contracts compare with, come from the reference; the fork's
+scripts come from the checkout's `public/scripts/`.
 
 - `test/meshcentral_desktop_pointer_baseline_runtime.js` runs the fork's
   `agent-desktop-0.0.2.js` and `-min.js` in a Node VM. It drives desktop mouse
@@ -609,9 +695,9 @@ These checks read the sibling `../MeshCentral` checkout and its installed
   element ids, canvas markups, lifecycle hooks and detection markers the trackpad
   adapters depend on. The guest pages' contracts also pin where their adapters
   add the trackpad toggle, and what it looks like.
-- `test/meshcentral_viewer_min_build_contract.js` requires the served
-  `agent-desktop-0.0.2-min.js` to equal the output of
-  `../MeshCentral/scripts/build-viewer-min.js`.
+- `test/meshcentral_viewer_min_build_contract.js` runs
+  `deploy/scripts/build-viewer-min.js --check` in the MeshCentral checkout, which
+  requires the served `agent-desktop-0.0.2-min.js` to equal the builder's output.
 - `test/meshcentral_trackpad_engine_runtime.js` drives the DOM-free trackpad
   gesture engine (`public/scripts/agent-desktop-trackpad-0.0.1.js`) with a fake
   clock. It has one table test per gesture and disambiguation rule, timing and
@@ -670,7 +756,8 @@ These checks read the sibling `../MeshCentral` checkout and its installed
     module, and its 1:1 view mode scrolls `#DeskParent` after the pointer;
   - uninstall removes every listener and element it added.
 - `test/meshcentral_trackpad_loader_runtime.js` runs the trackpad loader block of
-  `custom.js` on the fixture pages, served from a routed origin, in Chromium and
+  the served `custom.js` (`deploy/meshcentral-web/public/scripts/custom.js`) on the
+  fixture pages, served from a routed origin, in Chromium and
   WebKit. These checks serve the loader with every default forced off. They check
   that:
   - with the flag off nothing is loaded or registered;
@@ -713,8 +800,11 @@ These checks read the sibling `../MeshCentral` checkout and its installed
 - `test/meshcentral_trackpad_licence_contract.js` keeps the Apache Guacamole and
   Chromium attribution in the engine header and in `THIRD_PARTY_NOTICES.txt`.
 
-The baseline and the four contracts are pinned to one MeshCentral version and fail
-when another version is installed. To upgrade:
+The baseline and the four contracts are pinned to one MeshCentral version
+(`PINNED_MESHCENTRAL`) and fail when the upstream reference is another version.
+To upgrade, after pointing the reference pin at the new release (the MeshCentral
+version change steps under "Coordinated GitHub releases" in
+`docs/DEPLOYMENT.md`):
 1. Review the upstream view changes.
 2. Rerun the baseline with `--print`.
 3. Update its traces and the pinned version.

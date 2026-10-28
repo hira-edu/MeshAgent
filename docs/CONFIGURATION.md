@@ -233,22 +233,22 @@ Desktop capture, consent, and service lifecycle callbacks retain their required
 process/session boundaries. Legacy update and uninstall callbacks remain needed
 for endpoints installed with older bindings until those bindings are migrated.
 
-MeshCentral core overrides carry the source module's UTC modification date into
-`addModule`. Undated overrides cannot replace dated embedded modules, and an
-override dated later than the embedded copy replaces it on agents. After changing
-a module, re-embed it with `python3 tools/embed_modules.py <name>...`, which
+MeshCentral sends every module in its `agents/modules_meshcore` folder inside the
+agent core as `addModule(name, source, version)`. An agent replaces its embedded
+copy when the server's version is dated later, or when its own copy is undated.
+In the MeshCentral fork, the version is the release date the package's pack step
+writes to `agents/module-versions.json` (`deploy/scripts/module-versions.js`):
+one date for every module, taken from the last commit that changed the package.
+The fork's `meshcentral.js` refuses to start when that file is missing or does not
+list a module it serves. A package module therefore replaces the embedded copy on
+every agent whose copy is older than the release, so the package's copy of a
+module this repository owns must match `modules/<name>.js` (see
+`test/meshcentral_core_module_parity_contract.js` in [testing](testing/README.md)).
+After changing a module, re-embed it with `python3 tools/embed_modules.py <name>...`, which
 compresses `modules/<name>.js` into `microscript/ILibDuktape_Polyfills.c` with the
-current UTC time and keeps the single-line or chunked form MSVC accepts. Deployment
-selects one source for each module name: minified files when core minification is
-enabled, plain files otherwise, with fallback when only one variant exists.
-This avoids duplicate registration when both files are present. Deployment
-generates the patched core loader from the target server's installed package and
-publishes inventory/clipboard modules into both normal and minified module
-directories under the data and package roots. The tracked transformation preserves
-the server's package version; staging binds its original digest and publication
-rejects a loader that changed afterward. Local npm copies are not release sources.
-Refresh the target's default core
-after publication; a server loader change requires a server restart.
+current UTC time and keeps the single-line or chunked form MSVC accepts.
+`deploy.py` does not publish core modules or the core loader; they reach a server
+only as part of the MeshCentral package.
 
 ## Windows desktop audio
 
@@ -300,10 +300,9 @@ packet; it never queues, stores or logs audio. Flow control belongs to the
 consumer, which drops packets it cannot send.
 
 The agent's embedded copy (Windows builds) must match
-`modules/desktop-audio.js`. The MeshCentral core copies in
-`agents/modules_meshcore/desktop-audio.js` and
-`agents/modules_meshcore_min/desktop-audio.js` and `desktop-audio.min.js` are
-identical to it, and the installed DLL must export `MeshAudioBridgeW`.
+`modules/desktop-audio.js`. The MeshCentral core copy
+`agents/modules_meshcore/desktop-audio.js` is identical to it, and the installed
+DLL must export `MeshAudioBridgeW`.
 
 ## Windows lifecycle manifest encoding and errors
 
@@ -499,7 +498,7 @@ trackpad. While another panel of the page is shown, the pointer arrow is hidden.
   and page kind, `?trackpadengine=off` to turn it off, or `?trackpadengine=default`
   to return to the default.
 - The defaults are `DEFAULT_ON` in the loader block of
-  `MeshCentral/public/scripts/custom.js`. Setting a page kind's entry to `false`
+  `MeshCentral/deploy/meshcentral-web/public/scripts/custom.js`. Setting a page kind's entry to `false`
   rolls that page back to its own behaviour for every browser without a
   per-browser flag.
 - The flag only loads the replacement. Trackpad mode itself stays off until the
