@@ -77,7 +77,8 @@ assert.strictEqual(select(4, 'OLD', { failedHash: 'OTHER' }), 1, 'a different pa
 assert.strictEqual(select(4, 'OLD', { capabilities: 0x100 }), 0, 'historical Windows agents without the lifecycle host must not receive the package');
 assert.strictEqual(select(3, 'OLD', { capabilities: 0 }), 0, 'historical Windows x86 agents must not receive the package');
 assert.strictEqual(select(4, 'OLD', { capabilities: 0x100, system: 2 }), 0, 'recovery mode must not bypass the lifecycle capability gate');
-assert.strictEqual(select(4, 'OLD', { capabilities: 0x300 }), 1, 'agents advertising the corrected decoder already have the lifecycle host');
+assert.strictEqual(select(4, 'OLD', { capabilities: 0x300 }), 0, 'the corrected decoder (0x200) alone does not show lifecycle update support');
+assert.strictEqual(select(4, 'OLD', { capabilities: 0x700 }), 1, 'agents advertising lifecycle update support and the corrected decoder receive the package');
 assert.strictEqual(select(4, 'OLD', { capabilities: 0x400 }), 1, 'agents with raw-only updates keep lifecycle update eligibility');
 assert.strictEqual(select(4, 'NEW', { capabilities: 0x100 }), 0, 'a current historical agent stays current');
 
