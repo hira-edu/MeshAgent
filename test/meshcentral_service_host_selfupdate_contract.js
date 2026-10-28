@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { forkFile, meshcentralRoot } = require('./lib/meshcentral_paths');
+const { forkFile } = require('./lib/meshcentral_paths');
 
 function parseArgs(argv) {
     const args = {};
@@ -54,17 +54,6 @@ function loadText(filePath, purpose) {
     }
     assert(text.trim().length > 0, `required input is empty: ${filePath} (${purpose})`);
     return text.replace(/\r\n?/g, '\n');
-}
-
-// Optional inputs are declared, not discovered: only a missing file is tolerated, it is recorded in
-// absentOptionalInputs (and so in the report), and any other read error or an empty file still fails.
-function loadOptionalText(filePath, purpose, absentOptionalInputs) {
-    if (!fs.existsSync(filePath)) {
-        absentOptionalInputs[filePath] = purpose;
-        console.error(`optional input absent, not checked: ${filePath} (${purpose})`);
-        return null;
-    }
-    return loadText(filePath, purpose);
 }
 
 function extractFunction(source, signature) {
@@ -136,10 +125,7 @@ function main() {
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
     const runtimeHostContractPath = path.resolve('meshservice', 'runtime_host_contract.c');
     const serviceInstallerPath = path.resolve('meshservice', 'service_deployment.c');
-    const rootMeshcorePath = forkFile('meshcore.js');
-    const rootMeshcoreMinPath = forkFile('meshcore.min.js');
     const meshcorePath = forkFile('agents/meshcore.js');
-    const meshcentralDataMeshcorePath = path.join(meshcentralRoot(), 'meshcentral-data', 'meshcore.js');
     const recoverycorePath = forkFile('agents/recoverycore.js');
 
     const agentcoreSource = loadText(agentcorePath, 'agent core whose native self-update path is checked');
@@ -148,14 +134,10 @@ function main() {
     const serviceMainSource = loadText(serviceMainPath, 'service entry whose self-update ingress is checked');
     const runtimeHostContractSource = loadText(runtimeHostContractPath, 'runtime host whose lifecycle host is checked');
     const serviceInstallerSource = loadText(serviceInstallerPath, 'service deployment whose update transaction is checked');
-    // The tracked MeshCentral agent cores are required. The other cores are optional by layout:
-    // root meshcore.js / meshcore.min.js exist in no current layout, and meshcentral-data/meshcore.js
-    // is an untracked deploy leftover that Stage 1 removes (SSOT D16, D18). Each is checked when present.
-    const absentOptionalInputs = {};
-    const rootMeshcoreSource = loadOptionalText(rootMeshcorePath, 'legacy-layout MeshCentral root agent core', absentOptionalInputs);
-    const rootMeshcoreMinSource = loadOptionalText(rootMeshcoreMinPath, 'legacy-layout MeshCentral root minified agent core', absentOptionalInputs);
+    // The package's two agent cores are the only ones checked. Root meshcore.js / meshcore.min.js exist in
+    // no current layout (D24), and a stale meshcentral-data shadow core is the G4 start-time check's to
+    // refuse (SSOT D18), not something this contract reads when it happens to be present.
     const meshcoreSource = loadText(meshcorePath, 'tracked MeshCentral agent core whose JavaScript updater must stay disabled on Windows');
-    const meshcentralDataMeshcoreSource = loadOptionalText(meshcentralDataMeshcorePath, 'untracked meshcentral-data agent core left by earlier deploys', absentOptionalInputs);
     const recoverycoreSource = loadText(recoverycorePath, 'tracked MeshCentral recovery core whose JavaScript updater must stay disabled on Windows');
     const agentcoreSelfUpdate = extractFunction(agentcoreSource, 'void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)');
     const nativeJsUpdateActivation = extractFunction(agentcoreSource, 'static duk_ret_t ILibDuktape_MeshAgent_ActivateNativeUpdate(duk_context *ctx)');
@@ -167,33 +149,19 @@ function main() {
     const lifecycleDispatcher = extractFunction(serviceInstallerSource, 'static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL requireConfig)');
 
     const meshcentralLegacyTokens = ['.update.exe', '_wexecve', '-b64exec ', '-fullupdate', 'windows_getNativeUpdateActivationPath', 'windows_tryNativeFullUpdate', 'windows_execve'];
-    const rootMeshcoreLegacyHits = findTokens(rootMeshcoreSource, meshcentralLegacyTokens);
-    const rootMeshcoreMinLegacyHits = findTokens(rootMeshcoreMinSource, meshcentralLegacyTokens);
     const meshcoreLegacyHits = findTokens(meshcoreSource, meshcentralLegacyTokens);
-    const meshcentralDataMeshcoreLegacyHits = findTokens(meshcentralDataMeshcoreSource, meshcentralLegacyTokens);
     const recoverycoreLegacyHits = findTokens(recoverycoreSource, meshcentralLegacyTokens);
-    const externalMeshCentralDrift = rootMeshcoreLegacyHits.length > 0 ||
-        rootMeshcoreMinLegacyHits.length > 0 ||
-        meshcoreLegacyHits.length > 0 ||
-        meshcentralDataMeshcoreLegacyHits.length > 0 ||
-        recoverycoreLegacyHits.length > 0;
+    const externalMeshCentralDrift = meshcoreLegacyHits.length > 0 || recoverycoreLegacyHits.length > 0;
 
     const checks = {
         meshcentralSourcesAvailableNoLegacyUpdater: meshcoreSource != null &&
             recoverycoreSource != null &&
-            (rootMeshcoreSource == null || (rootMeshcoreLegacyHits.length === 0 && rootMeshcoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.'))) &&
-            (rootMeshcoreMinSource == null || (rootMeshcoreMinLegacyHits.length === 0 && rootMeshcoreMinSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.'))) &&
             meshcoreLegacyHits.length === 0 &&
-            (meshcentralDataMeshcoreSource == null || meshcentralDataMeshcoreLegacyHits.length === 0) &&
             recoverycoreLegacyHits.length === 0 &&
             meshcoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.') &&
-            (meshcentralDataMeshcoreSource == null || meshcentralDataMeshcoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.')) &&
             recoverycoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.'),
         meshcentralJavaScriptUpdaterCannotTouchWindowsProcessImage: windowsUpdaterFailsClosedBeforeDirectReplacement(meshcoreSource) &&
-            (meshcentralDataMeshcoreSource == null || windowsUpdaterFailsClosedBeforeDirectReplacement(meshcentralDataMeshcoreSource)) &&
-            windowsUpdaterFailsClosedBeforeDirectReplacement(recoverycoreSource) &&
-            (rootMeshcoreSource == null || windowsUpdaterFailsClosedBeforeDirectReplacement(rootMeshcoreSource)) &&
-            (rootMeshcoreMinSource == null || windowsUpdaterFailsClosedBeforeDirectReplacement(rootMeshcoreMinSource)),
+            windowsUpdaterFailsClosedBeforeDirectReplacement(recoverycoreSource),
         agentcorePublishesNativeFullUpdate: agentcoreSource.includes('"nativeFullUpdate"') &&
             agentcoreSource.includes('"activateNativeUpdate"'),
         agentcoreProbesZipHeaderBeforeOptionalJsUnzip: agentcoreSource.includes('static int MeshServer_UpdateFileLooksZip(char *updateFilePath)') &&
@@ -274,19 +242,11 @@ function main() {
         serviceMainPath,
         runtimeHostContractPath,
         serviceInstallerPath,
-        rootMeshcorePath,
-        rootMeshcoreMinPath,
         meshcorePath,
-        meshcentralDataMeshcorePath,
         recoverycorePath,
         externalMeshCentralDrift,
-        rootMeshcoreLegacyHits,
-        rootMeshcoreMinLegacyHits,
         meshcoreLegacyHits,
-        meshcentralDataMeshcoreLegacyHits,
         recoverycoreLegacyHits,
-        meshcentralSourcesAvailable: meshcoreSource != null && meshcentralDataMeshcoreSource != null && recoverycoreSource != null,
-        absentOptionalInputs,
         checks
     };
 
@@ -296,19 +256,12 @@ function main() {
             `AGENTCORE_PATH=${agentcorePath}`,
             `AGENT_INSTALLER_PATH=${agentInstallerPath}`,
             `SERVICE_INSTALLER_PATH=${serviceInstallerPath}`,
-            `ROOT_MESHCORE_PATH=${rootMeshcorePath}`,
-            `ROOT_MESHCORE_MIN_PATH=${rootMeshcoreMinPath}`,
             `MESHCORE_PATH=${meshcorePath}`,
-            `MESHCENTRAL_DATA_MESHCORE_PATH=${meshcentralDataMeshcorePath}`,
             `RECOVERYCORE_PATH=${recoverycorePath}`,
             'SUCCESS=true',
             `EXTERNAL_MESHCENTRAL_DRIFT=${externalMeshCentralDrift}`,
-            `ROOT_MESHCORE_LEGACY_HITS=${formatTokenList(rootMeshcoreLegacyHits)}`,
-            `ROOT_MESHCORE_MIN_LEGACY_HITS=${formatTokenList(rootMeshcoreMinLegacyHits)}`,
             `MESHCORE_LEGACY_HITS=${formatTokenList(meshcoreLegacyHits)}`,
-            `MESHCENTRAL_DATA_MESHCORE_LEGACY_HITS=${formatTokenList(meshcentralDataMeshcoreLegacyHits)}`,
             `RECOVERYCORE_LEGACY_HITS=${formatTokenList(recoverycoreLegacyHits)}`,
-            `ABSENT_OPTIONAL_INPUTS=${Object.keys(absentOptionalInputs).join(',') || 'none'}`,
             `CHECKS=${Object.entries(checks).map(([name, passed]) => `${name}:${passed}`).join(',')}`
         ].join('\n') + '\n');
     } else {

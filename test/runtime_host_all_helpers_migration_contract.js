@@ -850,7 +850,8 @@ function main() {
             sources.meshcentralCore.includes("var agent = require('MeshAgent');") &&
             sources.meshcentralCore.includes("agent != null && typeof(agent.SendCommand) == 'function'") &&
             sources.meshcentralCore.includes("sendMeshCoreConsole('uncaughtException1: ' + formatUncaughtException(ex));") &&
-            sources.meshcentralCore.includes('try { console.error(text); } catch (consoleEx) { }') &&
+            !sources.meshcentralCore.includes('catch (consoleEx) { }') &&
+            !sources.meshcentralCore.includes('catch (sendEx) { }') &&
             !sources.meshcentralCore.includes("require('MeshAgent').SendCommand({ action: 'msg', type: 'console', value: \"uncaughtException1: \" + ex });") &&
             sources.meshcentralCore.includes("require('win-terminal').RunCommand(commandText, {") &&
             sources.meshcentralCore.includes("mesh.cmdchild.descriptorMetadata = 'UserCommandsPowerShell';") &&

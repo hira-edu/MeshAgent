@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { forkFile, installedPackageDir, wrapperDir, wrapperFile } = require('./lib/meshcentral_paths');
+const { forkFile, installedPackageDir, wrapperFile } = require('./lib/meshcentral_paths');
 
 function assert(condition, message) {
     if (!condition) {
@@ -24,28 +24,15 @@ function read(relPath, purpose) {
     return text.replace(/\r\n?/g, '\n');
 }
 
-// Each input group declares every copy it checks:
-// - required: tracked sources (this repository, the MeshCentral repository) and the installed
-//   MeshCentral package. Each one must exist.
-// - localState: untracked copies that earlier deploys left in meshcentral-data. Stage 1 removes
-//   them (SSOT D16, D18). Until then each is checked when present and listed in the report when absent.
-// - legacyLayout: paths that no current layout produces. Checked when present, listed when absent.
-function declaredInputs(group, purpose, declared, absentOptional) {
-    const required = declared.required || [];
-    assert(required.length > 0, `${group}: declares no required input (${purpose})`);
+// Each input group lists the copies it checks: tracked sources (this repository, the MeshCentral
+// repository) and the installed MeshCentral package. Each one must exist. Untracked shadow copies in a
+// server's data folder are refused by the G4 start-time check, not read here.
+function declaredInputs(group, purpose, required) {
+    assert(required.length > 0, `${group}: declares no input (${purpose})`);
     const missing = required.filter((relPath) => !fs.existsSync(path.resolve(relPath)));
     assert(missing.length === 0,
         `${group}: required input missing: ${missing.map((relPath) => path.resolve(relPath)).join(', ')} (${purpose})`);
-    const optional = (declared.localState || []).concat(declared.legacyLayout || []);
-    const absent = optional.filter((relPath) => !fs.existsSync(path.resolve(relPath)));
-    if (absent.length > 0) {
-        absentOptional[group] = absent;
-        console.error(`${group}: optional inputs absent, not checked: ${absent.join(', ')}`);
-    }
-    return {
-        purpose,
-        paths: required.concat(optional.filter((relPath) => !absent.includes(relPath)))
-    };
+    return { purpose, paths: required };
 }
 
 function sourceBetween(source, startNeedle, endNeedle) {
@@ -178,7 +165,9 @@ function checkMeshCore(source) {
             source.includes("var agent = require('MeshAgent');") &&
             source.includes("agent != null && typeof(agent.SendCommand) == 'function'") &&
             source.includes("sendMeshCoreConsole('uncaughtException1: ' + formatUncaughtException(ex));") &&
-            source.includes('try { console.error(text); } catch (consoleEx) { }') &&
+            // Behaviour: MeshCentral deploy/tests/agent-core-uncaught-exception.test.js.
+            !source.includes('catch (consoleEx) { }') &&
+            !source.includes('catch (sendEx) { }') &&
             !source.includes("require('MeshAgent').SendCommand({ action: 'msg', type: 'console', value: \"uncaughtException1: \" + ex });"),
         busyRuncommandReplies:
             source.includes("var busyReply = \"Run commands can't execute, already busy.\";") &&
@@ -333,63 +322,34 @@ function checkCustomRunCommandOverlay(source) {
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const absentOptionalInputs = {};
-    // A local server's data folder sits in the deployment wrapper since Stage 1.
-    const meshcentralData = path.join(wrapperDir(), 'meshcentral-data');
-    const terminalInputs = declaredInputs('terminalModules', 'win-terminal copies whose system-only executable and callback contract is checked', {
-        required: [
-            'modules/win-terminal.js',
-            forkFile('agents/modules_meshcore/win-terminal.js')
-        ],
-        localState: [
-            path.join(meshcentralData, 'modules_meshcore/win-terminal.js'),
-            path.join(meshcentralData, 'modules_meshcore_min/win-terminal.js'),
-            path.join(meshcentralData, 'modules_meshcore_min/win-terminal.min.js')
-        ]
-    }, absentOptionalInputs);
-    const systemPathInputs = declaredInputs('systemPathModules', 'win-system-paths copies whose service runtime DLL resolution is checked', {
-        required: [
-            'modules/win-system-paths.js',
-            forkFile('agents/modules_meshcore/win-system-paths.js')
-        ]
-    }, absentOptionalInputs);
-    const virtualTerminalInputs = declaredInputs('virtualTerminalModules', 'win-virtual-terminal copies whose terminal contract is checked', {
-        required: [
-            'modules/win-virtual-terminal.js',
-            forkFile('agents/modules_meshcore/win-virtual-terminal.js')
-        ]
-    }, absentOptionalInputs);
+    const terminalInputs = declaredInputs('terminalModules', 'win-terminal copies whose system-only executable and callback contract is checked', [
+        'modules/win-terminal.js',
+        forkFile('agents/modules_meshcore/win-terminal.js')
+    ]);
+    const systemPathInputs = declaredInputs('systemPathModules', 'win-system-paths copies whose service runtime DLL resolution is checked', [
+        'modules/win-system-paths.js',
+        forkFile('agents/modules_meshcore/win-system-paths.js')
+    ]);
+    const virtualTerminalInputs = declaredInputs('virtualTerminalModules', 'win-virtual-terminal copies whose terminal contract is checked', [
+        'modules/win-virtual-terminal.js',
+        forkFile('agents/modules_meshcore/win-virtual-terminal.js')
+    ]);
     // MeshAgent's embedded copy only: D9 deleted the three fork copies under
     // agents/modules_meshcore*/, so MeshCentral no longer carries win-dispatcher.
-    const dispatcherInputs = declaredInputs('dispatcherModules', 'win-dispatcher copy whose disabled-connect contract is checked', {
-        required: [
-            'modules/win-dispatcher.js'
-        ]
-    }, absentOptionalInputs);
-    const coreInputs = declaredInputs('meshCores', 'MeshCentral agent cores whose run-command and consent handling is checked', {
-        required: [
-            forkFile('agents/meshcore.js')
-        ],
-        localState: [
-            path.join(meshcentralData, 'meshcore.js')
-        ],
-        legacyLayout: [
-            forkFile('meshcore.js'),
-            forkFile('meshcore.min.js')
-        ]
-    }, absentOptionalInputs);
-    const meshCtrlInputs = declaredInputs('meshCtrl', 'meshctrl copies whose run-command options are checked', {
-        required: [
-            forkFile('meshctrl.js'),
-            path.join(installedPackageDir().dir, 'meshctrl.js')
-        ]
-    }, absentOptionalInputs);
-    const customOverlayInputs = declaredInputs('customRunCommandOverlays', 'custom.js run-command overlay whose download command is checked', {
-        required: [
-            // The package copy is npm's empty stub since Stage 1; the served file is the wrapper's.
-            wrapperFile('meshcentral-web/public/scripts/custom.js')
-        ]
-    }, absentOptionalInputs);
+    const dispatcherInputs = declaredInputs('dispatcherModules', 'win-dispatcher copy whose disabled-connect contract is checked', [
+        'modules/win-dispatcher.js'
+    ]);
+    const coreInputs = declaredInputs('meshCores', 'MeshCentral agent core whose run-command and consent handling is checked', [
+        forkFile('agents/meshcore.js')
+    ]);
+    const meshCtrlInputs = declaredInputs('meshCtrl', 'meshctrl copies whose run-command options are checked', [
+        forkFile('meshctrl.js'),
+        path.join(installedPackageDir().dir, 'meshctrl.js')
+    ]);
+    const customOverlayInputs = declaredInputs('customRunCommandOverlays', 'custom.js run-command overlay whose download command is checked', [
+        // The package copy is npm's empty stub since Stage 1; the served file is the wrapper's.
+        wrapperFile('meshcentral-web/public/scripts/custom.js')
+    ]);
     const terminalPaths = terminalInputs.paths;
     const corePaths = coreInputs.paths;
     const customOverlayPaths = customOverlayInputs.paths;
@@ -404,8 +364,7 @@ function main() {
         customRunCommandOverlays: {},
         processPipePolicy: {},
         nativeSelfUpdateIngress: {},
-        nativeConsoleBridge: {},
-        absentOptionalInputs
+        nativeConsoleBridge: {}
     };
 
     for (const terminalPath of terminalPaths) {
@@ -492,7 +451,6 @@ function main() {
             `TERMINAL_MODULES=${terminalPaths.length}`,
             `MESHCORES=${corePaths.length}`,
             `CUSTOM_RUNCOMMAND_OVERLAYS=${customOverlayPaths.length}`,
-            `ABSENT_OPTIONAL_INPUTS=${Object.values(absentOptionalInputs).flat().join(',') || 'none'}`,
             `PROCESS_PIPE_POLICY=${Object.entries(report.processPipePolicy).map(([name, passed]) => `${name}:${passed}`).join(',')}`,
             `NATIVE_SELF_UPDATE_INGRESS=${Object.entries(report.nativeSelfUpdateIngress).map(([name, passed]) => `${name}:${passed}`).join(',')}`,
             `NATIVE_CONSOLE_BRIDGE=${Object.entries(report.nativeConsoleBridge).map(([name, passed]) => `${name}:${passed}`).join(',')}`
