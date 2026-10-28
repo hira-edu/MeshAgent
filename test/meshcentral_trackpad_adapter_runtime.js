@@ -8,11 +8,12 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { meshcentralRoot, installedPackageDir } = require('./lib/meshcentral_paths');
+const { meshcentralRoot, upstreamPackageDir } = require('./lib/meshcentral_paths');
 
 const meshcentral = meshcentralRoot();
 const scripts = path.join(meshcentral, 'public/scripts');
-const views = path.join(installedPackageDir().dir, 'views');
+// Stock upstream views, not the installed package: since Stage 1 the installed package is the fork.
+const views = path.join(upstreamPackageDir(), 'views');
 
 function view(name) { return fs.readFileSync(path.join(views, name), 'utf8').replace(/\r\n/g, '\n'); }
 function slice(source, start, end, name) {

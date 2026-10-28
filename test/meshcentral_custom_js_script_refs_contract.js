@@ -1,6 +1,8 @@
 'use strict';
-// public/scripts/custom.js is carried byte for byte and is out of review scope (operator
-// decision), but the scripts it loads must ship with it. This reads only the string
+// custom.js is carried byte for byte and is out of review scope (operator decision), but the
+// scripts it loads must ship with it. Since Stage 1 it lives in the deployment wrapper at
+// deploy/meshcentral-web/public/scripts/custom.js (the package's public/scripts/custom.js is
+// npm's empty stub, which nothing serves). This reads only the string
 // literals in custom.js that name a .js, .css or .wasm file and asserts each one resolves
 // to a tracked file in the MeshCentral repo. custom.js is served from <domain>/scripts/,
 // so the reference forms map as follows:
@@ -18,9 +20,8 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { meshcentralRoot } = require('./lib/meshcentral_paths');
+const { meshcentralRoot, wrapperFile } = require('./lib/meshcentral_paths');
 
-const CUSTOM = 'public/scripts/custom.js';
 const LITERAL = /(['"`])([^'"`\s]*?\.(?:js|css|wasm)(?:\?[^'"`\s]*)?)\1/g;
 
 function trackedFiles(root) {
@@ -45,6 +46,7 @@ function resolveReference(reference) {
 
 function main() {
     const root = meshcentralRoot();
+    const CUSTOM = path.relative(root, wrapperFile('meshcentral-web/public/scripts/custom.js')).split(path.sep).join('/');
     const tracked = trackedFiles(root);
     assert(tracked.has(CUSTOM), CUSTOM + ' is not tracked in ' + root);
     const text = fs.readFileSync(path.join(root, CUSTOM), 'utf8');

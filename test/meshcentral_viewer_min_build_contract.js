@@ -2,11 +2,12 @@
 // from agent-desktop-0.0.2.js, so a source change cannot ship with a stale or hand-edited min file.
 const { execFileSync } = require('child_process');
 const path = require('path');
-const { meshcentralRoot } = require('./lib/meshcentral_paths');
+const { meshcentralRoot, wrapperFile } = require('./lib/meshcentral_paths');
 
+// The builder lives in the deployment wrapper since Stage 1 and takes uglify-js from deploy/node_modules.
 const meshcentral = meshcentralRoot();
 try {
-    execFileSync(process.execPath, [path.join(meshcentral, 'scripts', 'build-viewer-min.js'), '--check'], { cwd: meshcentral, stdio: 'pipe' });
+    execFileSync(process.execPath, [wrapperFile('scripts/build-viewer-min.js'), '--check'], { cwd: meshcentral, stdio: 'pipe' });
     console.log('PASS viewer min build');
 } catch (error) {
     const reason = String(error.stderr || '').split('\n').find(line => line.startsWith('Error')) || error.message;
