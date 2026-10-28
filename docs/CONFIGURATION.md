@@ -336,11 +336,14 @@ verification remains mandatory for both formats.
 
 Capability `0x400` is advertised by Windows service agents that apply native
 packages through the lifecycle host. MeshCentral pushes a native package to a
-Windows service agent only when it advertises `0x400` or `0x200` (every agent
-with the corrected decoder already has the lifecycle host). A historical agent
-without either bit would hand the package to its own updater, which overwrites
-the service EXE with a binary that is not an SCM host, so it is left on its
-current version instead.
+Windows service agent only when it advertises `0x400`. `0x200` alone is not
+enough: every agent sends `0x200`, and the agent clears `0x400` when the
+process cannot run the lifecycle host (it is not running as the service, or
+the build lacks `MESHAGENT_ENABLE_RUNTIME_FEATURES`). An agent without `0x400`
+would hand the package to its own updater, which overwrites the service EXE
+with a binary that is not an SCM host, so it is left on its current version
+instead. Service agents built before `0x400` existed must be reinstalled to
+receive native updates.
 
 A Windows service agent defers a server-pushed update while Windows is shutting
 down (`SM_SHUTTINGDOWN`) or a Windows Installer transaction holds
