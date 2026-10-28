@@ -3,13 +3,23 @@
 // launchctl. /Library writes are redirected before any filesystem operation.
 const assert = require('assert'), fs = require('fs'), os = require('os'), path = require('path');
 const vm = require('vm'), cp = require('child_process'), EventEmitter = require('events');
-const managerSource = fs.readFileSync(path.join(__dirname, '../modules/service-manager.js'), 'utf8');
-const installerSource = fs.readFileSync(path.join(__dirname, '../modules/agent-installer.js'), 'utf8');
+// A Windows checkout may have CRLF working files; the slices below are line-based.
+const readSource = rel => fs.readFileSync(path.join(__dirname, rel), 'utf8').replace(/\r\n?/g, '\n');
+const managerSource = readSource('../modules/service-manager.js');
+const installerSource = readSource('../modules/agent-installer.js');
 const start = managerSource.indexOf("if (process.platform == 'darwin')\n{");
 const end = managerSource.indexOf('\nfunction serviceManager()', start);
 const agentStart = managerSource.indexOf('this.installLaunchAgent = function');
 const agentEnd = managerSource.indexOf('\n    this.uninstallService =', agentStart);
+// Checked on every platform, so a moved marker fails here instead of as a missing function later.
+assert(start >= 0 && end > start, 'service-manager.js darwin block markers not found');
+assert(agentStart >= 0 && agentEnd > agentStart, 'service-manager.js installLaunchAgent markers not found');
 const installAgent = managerSource.slice(agentStart, agentEnd).replace('this.installLaunchAgent =', 'var installAgent =').replace(/\n    }\s*$/, '');
+// The probe runs the real /usr/bin/plutil and installs under POSIX paths, so it needs macOS.
+if (process.platform !== 'darwin') {
+    console.log('SKIP (darwin only): macos_install_runtime needs /usr/bin/plutil and POSIX install paths; platform is ' + process.platform);
+    process.exit(0);
+}
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-mac-install-'));
 let failWrite = '', failStart = false, failChown = false, agentInstalls = 0;
 let closed = 0, uninstalled = [], commands = [], loaded = new Set(), userDomain = '', domainData = {}, mockCrontab = '';
