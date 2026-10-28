@@ -1,6 +1,6 @@
 {
-  "description": "Files of the MeshCentral fork package that are not byte-equal to the pinned npm meshcentral@1.2.5 (test/lib/meshcentral_upstream_reference.json), checked by test/meshcentral_upstream_base_contract.js. enforced: the CRLF-normalised diff against the reference must equal upstream-base/<path>.diff exactly. pending-rebase: the file starts from forkBase, not 1.2.5, and still lacks upstream changes; it is reported until flipStage rebases it. generated: a derived copy whose content generated-assets.json governs. fork-only: not in the upstream package. removed: upstream package files the fork does not ship. A byte-equal file needs no entry.",
-  "defaultUpstreamTag": "1.2.5",
+  "description": "Files of the MeshCentral fork package that are not byte-equal to the pinned npm meshcentral@1.3.1 (test/lib/meshcentral_upstream_reference.json), checked by test/meshcentral_upstream_base_contract.js. enforced: the CRLF-normalised diff against the reference must equal upstream-base/<path>.diff exactly. pending-rebase: the file starts from forkBase, not the reference, and still lacks upstream changes; it is reported until flipStage rebases it. generated: a derived copy whose content generated-assets.json governs. fork-only: not in the upstream package. removed: upstream package files the fork does not ship. A byte-equal file needs no entry.",
+  "defaultUpstreamTag": "1.3.1",
   "files": {
     "agentcertificatehistory.js": {
       "state": "fork-only",
@@ -8,7 +8,7 @@
     },
     "agents/meshcore.js": {
       "state": "enforced",
-      "reviewed": "Stage 3c (MeshCentral 81ef85909): upstream 1.2.5 plus the fork hunks (native file actions, uncaught-exception fallback, clipboard rewrite, service/ps error reporting, MeshConsoleBridgeW run commands, win-terminal tsid terminals, transfer cleanup/uploaderror, desktop audio protocol 20, SHA-384 self-update hardening, guestname, toast tsid, umhctl console, tunnel_onError argument); fork base was upstream 5f8b74fa8 (mirror 91a9f6e32). WP merges (2026-10-28): CORE-2, CORE-39: audit each native file action as itself (978462a78); CORE-28, CORE-30, CORE-44: answer every Files delete and open (6194f22d9); CORE-42, CORE-15a-e, CORE-49-52, CORE-54, TST-19: one run-command helper (b6f7bc99e); CORE-21, CORE-43: user terminals run only in an unambiguous user session (e1832ae91); CORE-18, CORE-19, CORE-20, CORE-35: remove dispatcher leftovers and the ConPTY probe (38b81846a); CORE-37: refuse the JavaScript self-update before downloading (ace9965ec); CORE-24a: never leave a desktop session without its privacy bar (d4cd2fb26); TST-20: report uncaught exceptions without swallowing a failed send (9ab0845f4)."
+      "reviewed": "Stage 3c (MeshCentral 81ef85909): upstream 1.2.5 plus the fork hunks (native file actions, uncaught-exception fallback, clipboard rewrite, service/ps error reporting, MeshConsoleBridgeW run commands, win-terminal tsid terminals, transfer cleanup/uploaderror, desktop audio protocol 20, SHA-384 self-update hardening, guestname, toast tsid, umhctl console, tunnel_onError argument); fork base was upstream 5f8b74fa8 (mirror 91a9f6e32). WP merges (2026-10-28): CORE-2, CORE-39: audit each native file action as itself (978462a78); CORE-28, CORE-30, CORE-44: answer every Files delete and open (6194f22d9); CORE-42, CORE-15a-e, CORE-49-52, CORE-54, TST-19: one run-command helper (b6f7bc99e); CORE-21, CORE-43: user terminals run only in an unambiguous user session (e1832ae91); CORE-18, CORE-19, CORE-20, CORE-35: remove dispatcher leftovers and the ConPTY probe (38b81846a); CORE-37: refuse the JavaScript self-update before downloading (ace9965ec); CORE-24a: never leave a desktop session without its privacy bar (d4cd2fb26); TST-20: report uncaught exceptions without swallowing a failed send (9ab0845f4). Stage 6 (2026-10-29): rebased on upstream 1.3.1 (reference npm meshcentral@1.3.1); track s6-a (MeshCentral e11debc3b). 1.3.1 changes taken; fork hunks kept. Resolved: CORE-9 keeps the fork SID lookup over #8149, failure now logged to the local debug console; #8103 Linux opener lives in the fork openFileOnDesktop; #8257 5xx/429 retry adopted inside the hardened updater (CORE-36/40); privacy-bar MaxWidth applied in desktop_audio_updateBar (#8255). CORE-26 dropped (identical upstream)."
     },
     "agents/modules_meshcore/clipboard.js": {
       "state": "fork-only",
@@ -40,7 +40,7 @@
     },
     "agents/modules_meshcore/util-agentlog.js": {
       "state": "enforced",
-      "reviewed": "D22 (option b): MeshAgent's own modules/util-agentlog.js (git blob, LF, MeshAgent 2d9fc186) replaces upstream's copy (fork 72a7390fa); embedded by the agent (undated) and equal to that copy up to line endings; fork change (2026-10-03): a strict timestamp regex and correct 12 AM/PM handling, plus comments. MeshAgent test/meshcentral_core_module_parity_contract.js keeps it equal to modules/."
+      "reviewed": "D22 (option b): MeshAgent's own modules/util-agentlog.js (git blob, LF, MeshAgent 2d9fc186) replaces upstream's copy (fork 72a7390fa); embedded by the agent (undated) and equal to that copy up to line endings; fork change (2026-10-03): a strict timestamp regex and correct 12 AM/PM handling, plus comments. MeshAgent test/meshcentral_core_module_parity_contract.js keeps it equal to modules/. Stage 6 (2026-10-29): rebased on upstream 1.3.1 (reference npm meshcentral@1.3.1); track s6-a (cea193868): 1.3.1 port (9cf853836, a2f73687b); kept ms timestamps, metadata, logPath and comments; the fork 12 AM fix dropped (upstream fixed it). Same bytes as MeshAgent modules/util-agentlog.js (D22a, CORE-59)."
     },
     "agents/modules_meshcore/wifi-scanner.js": {
       "state": "enforced",
@@ -72,7 +72,7 @@
     },
     "agents/recoverycore.js": {
       "state": "enforced",
-      "reviewed": "Fork work only: native file actions (nativeFileAction), Windows JavaScript self-update disabled, SHA-384 required, agentupdatefailed reporting, staged-update error handling, transfer cleanup, recovery run commands. The only upstream change between 587973e8c and 1.2.5 (a comment typo, formated -> formatted) is already present. WP merges (2026-10-28): CORE-2, CORE-39: audit each native file action as itself (978462a78); CORE-28, CORE-30, CORE-44: answer every Files delete and open (6194f22d9); CORE-42, CORE-15a-e, CORE-49-52, CORE-54, TST-19: one run-command helper (b6f7bc99e); CORE-21, CORE-43: user terminals run only in an unambiguous user session (e1832ae91); CORE-18, CORE-19, CORE-20, CORE-35: remove dispatcher leftovers and the ConPTY probe (38b81846a); CORE-45: drop the recovery core's umhctl console command (8f3652309); CORE-37: the recovery core also refuses self-update before downloading (7b6740a1c)."
+      "reviewed": "Fork work only: native file actions (nativeFileAction), Windows JavaScript self-update disabled, SHA-384 required, agentupdatefailed reporting, staged-update error handling, transfer cleanup, recovery run commands. The only upstream change between 587973e8c and 1.2.5 (a comment typo, formated -> formatted) is already present. WP merges (2026-10-28): CORE-2, CORE-39: audit each native file action as itself (978462a78); CORE-28, CORE-30, CORE-44: answer every Files delete and open (6194f22d9); CORE-42, CORE-15a-e, CORE-49-52, CORE-54, TST-19: one run-command helper (b6f7bc99e); CORE-21, CORE-43: user terminals run only in an unambiguous user session (e1832ae91); CORE-18, CORE-19, CORE-20, CORE-35: remove dispatcher leftovers and the ConPTY probe (38b81846a); CORE-45: drop the recovery core's umhctl console command (8f3652309); CORE-37: the recovery core also refuses self-update before downloading (7b6740a1c). Stage 6 (2026-10-29): rebased on upstream 1.3.1 (reference npm meshcentral@1.3.1); track s6-a (76e9754b5): 8b8ef61cd (#8257 retry) taken inside the fork updater; CORE-37/39/40 kept."
     },
     "macosinstaller.js": {
       "state": "enforced",
@@ -80,23 +80,23 @@
     },
     "mcrec.js": {
       "state": "enforced",
-      "reviewed": "Fork change: PRD-1 / DEP-21: size desktop tiles with a JPEG/PNG-only reader (eb9344395)."
+      "reviewed": "Fork change: PRD-1 / DEP-21: size desktop tiles with a JPEG/PNG-only reader (eb9344395). Stage 6 (2026-10-29): rebased on upstream 1.3.1 (reference npm meshcentral@1.3.1); track s6-b (f6f6aeab5): #8099 taken; WP3 hunks kept unchanged (context only moved)."
     },
     "meshagent.js": {
       "state": "enforced",
-      "reviewed": "Stage 3b (MeshCentral 5ff479199): npm 1.2.5 plus the fork hunks, from a three-way merge (base 587973e8c). Restores #8052, #8002, #8016, #8064 (getScript removed), #8015 (mc1migration removed), #7799, #7854, #7690, #7934, #7735, #7887, #7986, #7554 and the 1.2.5 compressed-core lines. Fork hunks: native update state machine (request/transfer-pending flags, agentupdatefailure/agentupdatefailed, agentupdatefailurecapability, core restore after a failed update, Windows-only native route, explicit agentupdate via command 12), native transfer fixes (task limiter completed on fs.open error, first block sliced, fd picks the disk path, EOF ends the transfer), 0x300 streaming-zip gate, all-zero hash rejected before test mode, Windows service lifecycle gate (S2, MeshCentral 3bb5ef079: requires 0x400, with the #8052 agentInfo guard; fails closed without agentInfo), certificate history admission (isHistoricalWebCertHash, agentcertificatehistory refresh on mismatch, [AGENT_CERT_COMPAT] audit after the signature), nativeRuntimeResult no-op case. WP merges (2026-10-28): SRV-14: audit [AGENT_CERT_COMPAT] only for pin-only admissions (27b31cfc3); SRV-11 (S11): answer a refused agentupdate request with the reason (9552b93bf); SRV-10 (S10): derive Windows agent architectures from the architecture table (7593a0c5b)."
+      "reviewed": "Stage 3b (MeshCentral 5ff479199): npm 1.2.5 plus the fork hunks, from a three-way merge (base 587973e8c). Restores #8052, #8002, #8016, #8064 (getScript removed), #8015 (mc1migration removed), #7799, #7854, #7690, #7934, #7735, #7887, #7986, #7554 and the 1.2.5 compressed-core lines. Fork hunks: native update state machine (request/transfer-pending flags, agentupdatefailure/agentupdatefailed, agentupdatefailurecapability, core restore after a failed update, Windows-only native route, explicit agentupdate via command 12), native transfer fixes (task limiter completed on fs.open error, first block sliced, fd picks the disk path, EOF ends the transfer), 0x300 streaming-zip gate, all-zero hash rejected before test mode, Windows service lifecycle gate (S2, MeshCentral 3bb5ef079: requires 0x400, with the #8052 agentInfo guard; fails closed without agentInfo), certificate history admission (isHistoricalWebCertHash, agentcertificatehistory refresh on mismatch, [AGENT_CERT_COMPAT] audit after the signature), nativeRuntimeResult no-op case. WP merges (2026-10-28): SRV-14: audit [AGENT_CERT_COMPAT] only for pin-only admissions (27b31cfc3); SRV-11 (S11): answer a refused agentupdate request with the reason (9552b93bf); SRV-10 (S10): derive Windows agent architectures from the architecture table (7593a0c5b). Stage 6 (2026-10-29): rebased on upstream 1.3.1 (reference npm meshcentral@1.3.1); track s6-b (cdcd367be): 13 upstream commits taken; all fork hunks kept (cert compatibility and history pins, S2 gate & 0x400). SRV-1: the capability check moves into 1.3.1 updateAgentExeInfo with the pending-transfer guard (agentUpdateTransferPending); SRV-14 re-placed after the restructured signature check and gated off in ignore-hash mode; #8254 conflict merged."
     },
     "meshcentral.js": {
       "state": "enforced",
-      "reviewed": "Production's loader (sha256 68c45084, formerly patched at deploy time by deploy.py) plus S1.6. Three changes: core modules are added with a release version read from agents/module-versions.json, which pack.js writes from the last commit that changed packaged content (a missing manifest or module entry stops the server, naming the module; S1.6 1b34cff43 replaced the file-mtime version); only the preferred .js or .min.js copy of a module is sent; the proxy certificate is fetched with the certurl's own HTTPS hostname as SNI (align_proxy_certificate_sni). WP merges (2026-10-28): SRV-16: certurl SNI uses the URL host only when it is not an IP (24bc67942); CORE-46: the Windows recovery cores carry win-system-paths (e21f248c2); SRV-18 (D24): drop the dead .js/.min.js module twin selector (18d796dc0)."
+      "reviewed": "Production's loader (sha256 68c45084, formerly patched at deploy time by deploy.py) plus S1.6. Three changes: core modules are added with a release version read from agents/module-versions.json, which pack.js writes from the last commit that changed packaged content (a missing manifest or module entry stops the server, naming the module; S1.6 1b34cff43 replaced the file-mtime version); only the preferred .js or .min.js copy of a module is sent; the proxy certificate is fetched with the certurl's own HTTPS hostname as SNI (align_proxy_certificate_sni). WP merges (2026-10-28): SRV-16: certurl SNI uses the URL host only when it is not an IP (24bc67942); CORE-46: the Windows recovery cores carry win-system-paths (e21f248c2); SRV-18 (D24): drop the dead .js/.min.js module twin selector (18d796dc0). Stage 6 (2026-10-29): rebased on upstream 1.3.1 (reference npm meshcentral@1.3.1); track s6-b (b1d5de9cc) plus coordinator 8aa31a145. Kept SRV-16 (certurl SNI), SRV-17 (module versions from the manifest; wins over #8191 file mtimes, so the mtime lines are removed), CORE-46. Coordinator: the agent pin check (agentbuilds.js prepare) is awaited at start and any error stops the server (s6-e N1, OD6) instead of the 6 s race; the hashagents.json read with an empty catch is removed (N4)."
     },
     "meshdesktopmultiplex.js": {
       "state": "enforced",
-      "reviewed": "Stage 3b (MeshCentral c39d9e9be): npm 1.2.5 plus the fork hunks, from a three-way merge (base 587973e8c). Restores #8006 (rcookie guard, upstream's lines), #7671 terminalUserVariable and the consentAutoAcceptIfFileNoUser spelling. Fork hunks: held mouse button release, audio availability replay, flow control (updateAgentFlowControl, send queue used, sendQueue.length), ordered recording queue with partial writes, viewer backlog limit, image settings and pause recomputed when a viewer leaves, refresh forwarded to the agent, same-size screen re-anchor, closeWhenDrained, unresponsive agent replacement and session watchdog, outTraffc accounting, display-location reply to the viewer, peer.user null guards, image-size and off-screen tile guards, desktoprelays ownership, expireTimer cleared, pending marker not treated as a multiplexor, recording-open races, missing image guard. WP merges (2026-10-28): PRD-1 / DEP-21: size desktop tiles with a JPEG/PNG-only reader (eb9344395); SRV-25 (S8): a recording write error stops the recording (121a29233); SRV-31: drop the debug line on every screen-size packet (815e4c798); SRV-38 / SRV-39 (S9): ping/pong agent liveness and a pending-peer list (a1fd4240c)."
+      "reviewed": "Stage 3b (MeshCentral c39d9e9be): npm 1.2.5 plus the fork hunks, from a three-way merge (base 587973e8c). Restores #8006 (rcookie guard, upstream's lines), #7671 terminalUserVariable and the consentAutoAcceptIfFileNoUser spelling. Fork hunks: held mouse button release, audio availability replay, flow control (updateAgentFlowControl, send queue used, sendQueue.length), ordered recording queue with partial writes, viewer backlog limit, image settings and pause recomputed when a viewer leaves, refresh forwarded to the agent, same-size screen re-anchor, closeWhenDrained, unresponsive agent replacement and session watchdog, outTraffc accounting, display-location reply to the viewer, peer.user null guards, image-size and off-screen tile guards, desktoprelays ownership, expireTimer cleared, pending marker not treated as a multiplexor, recording-open races, missing image guard. WP merges (2026-10-28): PRD-1 / DEP-21: size desktop tiles with a JPEG/PNG-only reader (eb9344395); SRV-25 (S8): a recording write error stops the recording (121a29233); SRV-31: drop the debug line on every screen-size packet (815e4c798); SRV-38 / SRV-39 (S9): ping/pong agent liveness and a pending-peer list (a1fd4240c). Stage 6 (2026-10-29): rebased on upstream 1.3.1 (reference npm meshcentral@1.3.1); track s6-b (f6f6aeab5): 95bf7e4f4 and #8099 taken; S3b and WP3 hunks kept unchanged (context only moved)."
     },
     "meshrelay.js": {
       "state": "enforced",
-      "reviewed": "1.2.5 plus two fork hunks: guest share links that grant desktop also admit desktop audio (relay protocol 20, 2747ad90d); isProtocolAllowedByRights denies protocol 20 under NODESKTOP, like protocol 2 (plan S1). No upstream line is removed except the replaced share line."
+      "reviewed": "1.2.5 plus two fork hunks: guest share links that grant desktop also admit desktop audio (relay protocol 20, 2747ad90d); isProtocolAllowedByRights denies protocol 20 under NODESKTOP, like protocol 2 (plan S1). No upstream line is removed except the replaced share line. Stage 6 (2026-10-29): rebased on upstream 1.3.1 (reference npm meshcentral@1.3.1); track s6-b (e115f0dda): 092eabb01 and edec03598 (protocol 10 rights) taken; the two fork hunks (SRV-19 protocol 20 for guest desktop shares, SRV-20 protocol 20 under NODESKTOP) kept unchanged."
     },
     "public/scripts/THIRD_PARTY_NOTICES.txt": {
       "state": "fork-only",
@@ -109,7 +109,7 @@
     },
     "public/scripts/agent-desktop-0.0.2.js": {
       "state": "enforced",
-      "reviewed": "Stage 3c (MeshCentral f2437fd1e): upstream 1.2.5 (with #8040) plus fork D1-D11; cancelPendingAltGr also clears _altGrDeferredDown (V3). WP merges (2026-10-28): WEB-1: release held native-touch contacts on a stream reset (e8bcb5679); WEB-2, WEB-5: drop the KVMTRACE switch and dead viewer state (6070c6b83); WEB-7: the desktop declares its connection; the agent's reply drives the wait (50212e52f)."
+      "reviewed": "Stage 3c (MeshCentral f2437fd1e): upstream 1.2.5 (with #8040) plus fork D1-D11; cancelPendingAltGr also clears _altGrDeferredDown (V3). WP merges (2026-10-28): WEB-1: release held native-touch contacts on a stream reset (e8bcb5679); WEB-2, WEB-5: drop the KVMTRACE switch and dead viewer state (6070c6b83); WEB-7: the desktop declares its connection; the agent's reply drives the wait (50212e52f). Stage 6 (2026-10-29): rebased on upstream 1.3.1 (reference npm meshcentral@1.3.1); track s6-d (b762594a1, c2de7ca69): #8099, #8135, #8153, #8089, #8195 taken (WEB-15); #8195 tile errors keep the fork draw-generation check; WEB-14 obj.touchtimer."
     },
     "public/scripts/agent-desktop-audio-0.0.1.js": {
       "state": "fork-only",
@@ -150,7 +150,7 @@
     },
     "public/scripts/agent-redir-ws-0.1.1.js": {
       "state": "enforced",
-      "reviewed": "Protocol-2 connect deferral (xxStateChange(3) skipped for desktop) and the generated desktop audio control block appended by deploy/scripts/build-desktop-audio-control.js. Upstream did not change the file between 587973e8c and 1.2.5. WP merges (2026-10-28): WEB-16, WEB-17, DEP-7, WEB-18, TST-18: audio control in its own package file (f17bd1f82); WEB-7: the desktop declares its connection; the agent's reply drives the wait (50212e52f)."
+      "reviewed": "Protocol-2 connect deferral (xxStateChange(3) skipped for desktop) and the generated desktop audio control block appended by deploy/scripts/build-desktop-audio-control.js. Upstream did not change the file between 587973e8c and 1.2.5. WP merges (2026-10-28): WEB-16, WEB-17, DEP-7, WEB-18, TST-18: audio control in its own package file (f17bd1f82); WEB-7: the desktop declares its connection; the agent's reply drives the wait (50212e52f). Stage 6 (2026-10-29): rebased on upstream 1.3.1 (reference npm meshcentral@1.3.1); track s6-d (de7cbe5b6): 1.3.1 taken; fork hunks kept unchanged."
     },
     "public/scripts/opus-decoder-0.7.11.LICENSE.txt": {
       "state": "fork-only",
@@ -185,7 +185,7 @@
     },
     "views/default3.handlebars": {
       "state": "enforced",
-      "reviewed": "Upstream #8104 (31618e90d, from 1.2.6), cherry-picked as fork 1e378b0b7 (D15): no synthetic click on mobile connect. The is-mobile GrabMouseInput override also drops the DOM mouse handlers; the connect wake sends SendUnPause plus SendRefresh at 300/800/1600/2600 ms, and one pointer move (never a button) at 3500 ms only if no frame has arrived. The diff is upstream's commit exactly; it disappears when the fork merges 1.2.6. WP merges (2026-10-28): WEB-16, WEB-17, DEP-7, WEB-18, TST-18: audio control in its own package file (f17bd1f82)."
+      "reviewed": "Upstream #8104 (31618e90d, from 1.2.6), cherry-picked as fork 1e378b0b7 (D15): no synthetic click on mobile connect. The is-mobile GrabMouseInput override also drops the DOM mouse handlers; the connect wake sends SendUnPause plus SendRefresh at 300/800/1600/2600 ms, and one pointer move (never a button) at 3500 ms only if no frame has arrived. The diff is upstream's commit exactly; it disappears when the fork merges 1.2.6. WP merges (2026-10-28): WEB-16, WEB-17, DEP-7, WEB-18, TST-18: audio control in its own package file (f17bd1f82). Stage 6 (2026-10-29): rebased on upstream 1.3.1 (reference npm meshcentral@1.3.1); track s6-d (f235bd775). #8104 is now upstream, so its diff is gone (WEB-22 closed). Remaining: the audio control script tag (WEB-16/17, f17bd1f82), as in default, default-mobile, sharing and sharing-mobile."
     },
     "views/sharing-min.handlebars": {
       "state": "generated",
@@ -1654,6 +1654,26 @@
       "state": "generated",
       "source": "views/sharing.handlebars",
       "reviewed": "Regenerated from views/sharing.handlebars by deploy/scripts/regenerate.js after fork f17bd1f82; differs from upstream only by that change."
+    },
+    "agentbuilds.js": {
+      "state": "enforced",
+      "reviewed": "Stage 6 (s6-e b301db082, 94a1bbaf2; D29c): 1.3.1 interface kept (CreateAgentDefaults: prepare, status, sourcePath, info, start, activate) for meshcentral.js; the GitHub release download, release checks and agentbuilds/ cache are replaced by agents/agent-defaults.json pins (size, SHA384) verified locally at start. Nothing is downloaded; settings.agentDownloads other than {enabled:false} is refused. MeshCentralAssistant.exe is a tool, not an agent."
+    },
+    "agenttypes.js": {
+      "state": "enforced",
+      "reviewed": "Stage 6 (s6-e 72bf772f0): 1.3.1 id table plus D12: the fork Windows service builds 3, 4, 43 (and 10003/10004) are unsigned and never re-signed."
+    },
+    "agents/agent-defaults.json": {
+      "state": "enforced",
+      "reviewed": "Stage 6 (s6-e; pins 3ed4e1dd8, OD2): the fork agent manifest (schema meshcentral-fork-agents/1) pins MeshService.exe, MeshService64.exe, MeshServiceARM64.exe built from hira-edu/MeshAgent 366e4a64 (byte-identical to what production serves in the 2026-10-27 inventory). Replaces upstream release manifest. The binaries are staged by pack.js --agents (OD1 B)."
+    },
+    "agents/check-releases.js": {
+      "state": "enforced",
+      "reviewed": "Stage 6 (s6-e ae5fff4f0): offline gate: every unsigned service build is pinned and verifies (--directory), and the packed agent binaries are exactly the pins (--package). Upstream checked GitHub releases."
+    },
+    "agents/release-manifest.js": {
+      "state": "enforced",
+      "reviewed": "Stage 6 (s6-e ae5fff4f0): writes the fork pin file for built MeshAgent binaries (--repository, --commit, files), checked with the server parser. Upstream wrote a GitHub release manifest."
     }
   },
   "removed": {
@@ -1664,9 +1684,6 @@
     "agents/MeshService.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
     "agents/MeshService64.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
     "agents/MeshServiceARM64.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
-    "agents/agents-feb2026/MeshService.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
-    "agents/agents-feb2026/MeshService64.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
-    "agents/agents-feb2026/MeshServiceARM64.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
     "agents/meshcmd.min.js": "Minified MeshCmd is not shipped (SRV-53, fork 3eb308a92): nothing reads it with minifycore off, and with it on MeshCmd is built from the unminified sources.",
     "agents/meshcore.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
     "agents/modules_meshcmd_min/amt-apfclient.min.js": "Minified MeshCmd is not shipped (SRV-53, fork 3eb308a92): nothing reads it with minifycore off, and with it on MeshCmd is built from the unminified sources.",
@@ -1703,67 +1720,68 @@
     "agents/modules_meshcore_min/win-terminal.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
     "agents/modules_meshcore_min/win-virtual-terminal.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
     "agents/modules_meshcore_min/win-volumes.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
-    "emails/translations/account-check_ja-jp.html": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "emails/translations/account-check_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "emails/translations/account-invite_ja-jp.html": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "emails/translations/account-invite_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "emails/translations/account-login_ja-jp.html": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "emails/translations/account-login_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "emails/translations/account-reset_ja-jp.html": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "emails/translations/account-reset_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "emails/translations/device-help_ja-jp.html": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "emails/translations/device-help_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "emails/translations/device-notify_ja-jp.html": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "emails/translations/device-notify_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "emails/translations/mesh-invite_ja-jp.html": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "emails/translations/mesh-invite_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "emails/translations/sms-messages_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/agentinvite-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/agentinvite_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/default-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/default-mobile-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/default-mobile_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/default3-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/default3_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/default_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/download-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/download2-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/download2_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/download_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/error404-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/error404-mobile-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/error404-mobile_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/error404_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/invite-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/invite_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/login-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/login-mobile-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/login-mobile_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/login2-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/login2_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/login_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/message-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/message2-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/message2_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/message_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/messenger-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/messenger_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/mstsc-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/mstsc_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/player-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/player_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/sharing-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/sharing-mobile-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/sharing-mobile_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/sharing_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/ssh-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/ssh_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/terms-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/terms-mobile-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/terms-mobile_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/terms_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/xterm-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
-    "views/translations/xterm_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1)."
+    "emails/translations/account-check_ja-jp.html": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/account-check_ja-jp.txt": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/account-invite_ja-jp.html": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/account-invite_ja-jp.txt": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/account-login_ja-jp.html": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/account-login_ja-jp.txt": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/account-reset_ja-jp.html": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/account-reset_ja-jp.txt": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/device-help_ja-jp.html": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/device-help_ja-jp.txt": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/device-notify_ja-jp.html": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/device-notify_ja-jp.txt": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/mesh-invite_ja-jp.html": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/mesh-invite_ja-jp.txt": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/sms-messages_ja-jp.txt": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/agentinvite-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/agentinvite_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/default-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/default-mobile-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/default-mobile_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/default3-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/default3_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/default_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/download-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/download2-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/download2_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/download_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/error404-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/error404-mobile-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/error404-mobile_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/error404_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/invite-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/invite_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/login-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/login-mobile-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/login-mobile_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/login2-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/login2_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/login_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/message-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/message2-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/message2_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/message_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/messenger-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/messenger_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/mstsc-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/mstsc_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/player-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/player_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/sharing-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/sharing-mobile-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/sharing-mobile_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/sharing_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/ssh-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/ssh_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/terms-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/terms-mobile-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/terms-mobile_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/terms_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/xterm-min_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/xterm_ja-jp.handlebars": "Stale ja-jp translation upstream ships (1.2.5 and 1.3.1) but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "agents/hashagents.json": "Stage 6 (s6-e 20a9ed450): npm 1.3.1 still ships it, but its only reader (meshcentral.js, an optional Last-Modified date) is removed and the fork serves only pinned agent binaries (D29c)."
   },
   "excluded": {
     "public/scripts/custom.js": "Out of scope by operator decision (SSOT rule 8): never opened by this contract. The package copy is npm's empty stub; the served custom.js is deploy/meshcentral-web/public/scripts/custom.js."

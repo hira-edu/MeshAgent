@@ -59,7 +59,7 @@
  
                  if (obj.attemptWebRTC == true) {
                      // Try to get WebRTC setup
-@@ -304,6 +324,7 @@
+@@ -311,6 +331,7 @@
  
          // Clean up WebRTC
          obj.xxCloseWebRTC();

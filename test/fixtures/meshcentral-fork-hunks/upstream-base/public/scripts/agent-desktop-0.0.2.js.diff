@@ -104,7 +104,7 @@
      }
  
      obj.send = function (x) {
-@@ -129,15 +177,16 @@
+@@ -129,27 +177,30 @@
      obj.ProcessPictureMsg = function (data, X, Y) {
          //if (obj.targetnode != null) obj.Debug("ProcessPictureMsg " + X + "," + Y + " - " + obj.targetnode.substring(0, 8));
          var tile = new Image();
@@ -124,7 +124,14 @@
                  obj.PendingOperations.push([r, 2, tile, X, Y]);
                  while (obj.DoPendingOperations()) { }
              } else {
-@@ -149,7 +198,7 @@
+                 obj.PendingOperations.push([r, 0]);
+             }
+         }
+-        tile.onerror = function () { console.log('DecodeTileError'); obj.PendingOperations.push([r, 0]); if (obj.State != 0) { while (obj.DoPendingOperations()) { } } }
++        // A tile that fails to decode still takes its turn, so the tiles after it are drawn (#8195). One from before a
++        // stream reset is dropped, as onload drops it: its number belongs to the old sequence.
++        tile.onerror = function () { console.log('DecodeTileError'); if (generation != obj.drawGeneration) { return; } obj.PendingOperations.push([r, 0]); if (obj.State != 0) { while (obj.DoPendingOperations()) { } } }
+     }
  
      obj.DoPendingOperations = function () {
          if (obj.PendingOperations.length == 0) return false;
@@ -133,7 +140,7 @@
              var Msg = obj.PendingOperations[i];
              if (Msg[0] == (obj.TilesDrawn + 1)) {
                  if (obj.onPreDrawImage != null) obj.onPreDrawImage(); // Notify that we are about to draw on the canvas.
-@@ -157,7 +206,7 @@
+@@ -157,7 +208,7 @@
                  else if (Msg[1] == 2) { obj.Canvas.drawImage(Msg[2], obj.rotX(Msg[3], Msg[4]), obj.rotY(Msg[3], Msg[4])); delete Msg[2]; }
                  obj.PendingOperations.splice(i, 1);
                  obj.TilesDrawn++;
@@ -142,7 +149,7 @@
                  return true;
              }
          }
-@@ -201,14 +250,14 @@
+@@ -201,14 +252,14 @@
  
      obj.ProcessScreenMsg = function (width, height) {
          if (obj.debugmode > 0) { console.log('ScreenSize: ' + width + ' x ' + height); }
@@ -161,7 +168,7 @@
          obj.SendCompressionLevel(obj.ImageType);
          obj.SendUnPause();
          obj.SendRemoteInputLock(2); // Query input lock state
-@@ -241,13 +290,11 @@
+@@ -241,13 +292,11 @@
                  obj.ProcessPictureMsg(view.slice(4), X, Y);
                  break;
              case 7: // Screen size
@@ -179,7 +186,7 @@
                  obj.send(String.fromCharCode(0x00, 0x0E, 0x00, 0x04));
                  break;
              case 11: // GetDisplays (TODO)
-@@ -488,12 +535,23 @@
+@@ -491,12 +540,23 @@
      }
  
      obj._handleAltGrTimeout = function () { //Windows and no Ctrl+Alt -> send only Ctrl.
@@ -203,7 +210,7 @@
      // Send remote input lock. 0 = Unlock, 1 = Lock, 2 = Query
      obj.SendRemoteInputLock = function (code) { obj.send(String.fromCharCode(0x00, 87, 0x00, 0x05, code)); }
  
-@@ -650,24 +708,38 @@
+@@ -656,24 +716,38 @@
      obj.xxMouseInputGrab = false;
      obj.xxKeyInputGrab = false;
      obj.xxMouseMove = function (e) { if (obj.State == 3) obj.SendMouseMsg(obj.KeyAction.NONE, e); if (e.preventDefault) e.preventDefault(); if (e.stopPropagation) e.stopPropagation(); return false; }
@@ -247,7 +254,7 @@
                  obj.SendKeyMsg(obj.KeyAction.DOWN, e);
                  if (e.preventDefault) e.preventDefault(); if (e.stopPropagation) e.stopPropagation(); return false;
              }
-@@ -676,6 +748,7 @@
+@@ -682,6 +756,7 @@
      obj.xxKeyPress = function (e) {
          if ((e.key != 'Dead') && (obj.State == 3)) {
              if ((typeof e.key == 'string') && (e.key.length == 1) && (e.ctrlKey != true) && (e.altKey != true) && (obj.remoteKeyMap == false)) {
@@ -255,7 +262,7 @@
                  obj.SendKeyUnicode(obj.KeyAction.DOWN, e.key.charCodeAt(0));
              } // else { obj.SendKeyMsg(obj.KeyAction.DOWN, e); }
          }
-@@ -691,10 +764,8 @@
+@@ -697,10 +772,8 @@
      obj.handleKeyUp = function (e) {
          //console.log('keyup', e.code, e.key, e.keyCode, (e.key.length == 1)?e.key.charCodeAt(0):0);
          if (obj.stopInput == true || desktop.State != 3) return false;
@@ -268,7 +275,7 @@
          return obj.xxKeyUp(e);
      }
      obj.handleKeyDown = function (e) {
-@@ -705,6 +776,11 @@
+@@ -711,6 +784,11 @@
  
      // Release the CTRL, ALT, SHIFT keys if they are pressed.
      obj.handleReleaseKeys = function () {
@@ -280,7 +287,7 @@
          var p = JSON.parse(JSON.stringify(obj.pressedKeys)); // Clone the pressed array
          for (var i in p) { obj.SendKeyMsgKC(obj.KeyAction.UP, p[i]); } // Release all keys
      }
-@@ -716,6 +792,127 @@
+@@ -722,6 +800,127 @@
      obj.mousemove = function (e) { if (obj.stopInput == true) return false; return obj.xxMouseMove(e); }
      obj.mousewheel = function (e) { if (obj.stopInput == true) return false; return obj.xxMouseWheel(e); }
  
@@ -408,7 +415,16 @@
      obj.xxMsTouchEvent = function (evt) {
          if (evt.originalEvent.pointerType == 4) return; // If this is a mouse pointer, ignore this event. Touch & pen are ok.
          if (evt.preventDefault) evt.preventDefault();
-@@ -977,5 +1174,12 @@
+@@ -765,7 +964,7 @@
+                 var id = e.originalEvent.changedTouches[i].identifier % 256;
+                 if (!obj.TouchArray[id]) { obj.TouchArray[id] = { x: (e.originalEvent.touches[i].pageX - Offsets[0]) * (Canvas.canvas.width / obj.CanvasId.clientWidth), y: (e.originalEvent.touches[i].pageY - Offsets[1]) * (Canvas.canvas.height / obj.CanvasId.clientHeight), f: 1 }; }
+             }
+-            if (Object.keys(obj.TouchArray).length > 0 && touchtimer == null) { obj.touchtimer = setInterval(function () { obj.SendTouchMsg2(256, 0); }, 50); }
++            if (Object.keys(obj.TouchArray).length > 0 && obj.touchtimer == null) { obj.touchtimer = setInterval(function () { obj.SendTouchMsg2(256, 0); }, 50); }
+         }
+     }
+ 
+@@ -994,5 +1193,12 @@
      obj.getIEVersion = function () { var r = -1; if (navigator.appName == 'Microsoft Internet Explorer') { var ua = navigator.userAgent; var re = new RegExp("MSIE ([0-9]{1,}[.0-9]{0,})"); if (re.exec(ua) != null) r = parseFloat(RegExp.$1); } return r; }
      obj.haltEvent = function (e) { if (e.preventDefault) e.preventDefault(); if (e.stopPropagation) e.stopPropagation(); return false; }
  

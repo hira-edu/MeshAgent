@@ -124,7 +124,7 @@
  
      // If the url starts with *, switch it to use the same protoco, host and port as the control channel.
      if (updateurl != null) {
-@@ -626,109 +623,127 @@
+@@ -626,6 +623,7 @@
                  sendConsoleText('Self Update failed, because there was a problem trying to download the update from ' + updateurl, sessionid);
                  sendAgentMessage('Self Update failed, because there was a problem trying to download the update from ' + updateurl, 3);
                  agentUpdate_Start._selfupdate = null;
@@ -132,15 +132,35 @@
              });
              agentUpdate_Start._selfupdate.on('response', function (img)
              {
-+                if (img.statusCode != 200)
-+                {
-+                    sendConsoleText('Self Update failed because the update server returned HTTP status ' + img.statusCode + '.', sessionid);
-+                    sendAgentMessage('Self Update failed because the update server returned HTTP status ' + img.statusCode + '.', 3);
+@@ -636,123 +634,133 @@
+                     agentUpdate_Start._selfupdate = null;
+                     sendConsoleText('Self Update failed, because the server replied with HTTP ' + img.statusCode + ', URL: ' + (updateurl != null ? updateurl : options.path), sessionid);
+                     sendAgentMessage('Self Update failed, because the server replied with HTTP ' + img.statusCode + ', URL: ' + (updateurl != null ? updateurl : options.path), 3);
 +                    try { img.resume(); } catch (e) { }
-+                    agentUpdate_Start._selfupdate = null;
+ 
+                     // Only a server error or rate limiting can clear up by itself
+-                    if ((img.statusCode < 500) && (img.statusCode != 429)) { return; }
+-                    if (++agentUpdate_Start._retryCount < 4)
+-                    {
+-                        sendConsoleText('Self Update will try again in 20 seconds...', sessionid);
+-                        agentUpdate_Start._timeout = setTimeout(agentUpdate_Start, 20000, updateurl, updateoptions);
+-                    }
+-                    else
++                    if ((img.statusCode >= 500) || (img.statusCode == 429))
+                     {
++                        if (++agentUpdate_Start._retryCount < 4)
++                        {
++                            sendConsoleText('Self Update will try again in 20 seconds...', sessionid);
++                            agentUpdate_Start._timeout = setTimeout(agentUpdate_Start, 20000, updateurl, updateoptions);
++                            return;
++                        }
+                         agentUpdate_Start._retryCount = 0;
+                         sendConsoleText('Self Update giving up, too many failures...', sessionid);
+                         sendAgentMessage('Self Update giving up, too many failures...', 3);
+                     }
 +                    agentUpdate_ReportFailure();
-+                    return;
-+                }
+                     return;
+                 }
                  var self = this;
 -                this._file = require('fs').createWriteStream(agentfilename + (process.platform=='win32'?'.update.exe':'.update'), { flags: 'wb' });
 +                this._fileClosed = false;
@@ -237,6 +257,7 @@
 -                            }
 -                            else
 -                            {
+-                                agentUpdate_Start._retryCount = 0;
 -                                sendConsoleText('Self Update giving up, too many failures...', sessionid);
 -                                sendAgentMessage('Self Update giving up, too many failures...', 3);
 -                            }
@@ -249,6 +270,7 @@
                          }
 +                        else
 +                        {
++                            agentUpdate_Start._retryCount = 0;
 +                            sendConsoleText('Self Update giving up, too many failures...', sessionid);
 +                            sendAgentMessage('Self Update giving up, too many failures...', 3);
 +                            agentUpdate_ReportFailure();
@@ -332,7 +354,7 @@
                      }
                  });
  
-@@ -770,7 +785,7 @@
+@@ -794,7 +802,7 @@
      }
  }
  
@@ -341,7 +363,7 @@
  function addPad(p, ret) { var r = ''; for (var i = 0; i < p; i++) { r += ret; } return r; }
  
  setInterval(function () { sendConsoleText('Timer!'); }, 2000);
-@@ -901,10 +916,10 @@
+@@ -925,10 +933,10 @@
              break;
          }
          case 'termsize': {
@@ -355,7 +377,7 @@
              }
              else {
                  if (ws.httprequest.process == null || ws.httprequest.process.pty == 0) return;
-@@ -915,6 +930,79 @@
+@@ -939,6 +947,79 @@
      }
  }
  
@@ -435,7 +457,7 @@
  
  require('MeshAgent').AddCommandHandler(function (data)
  {
-@@ -924,6 +1012,9 @@
+@@ -948,6 +1029,9 @@
              case 'agentupdate':
                  agentUpdate_Start(data.url, { hash: data.hash, tlshash: data.servertlshash, sessionid: data.sessionid });
                  break;
@@ -445,7 +467,7 @@
              case 'msg':
                  {
                      switch (data.type) {
-@@ -980,8 +1071,9 @@
+@@ -1004,8 +1088,9 @@
                                                  if (tunnels[this.httprequest.index] == null) return; // Stop duplicate calls.
  
                                                  // If there is a upload or download active on this connection, close the file
@@ -457,7 +479,7 @@
  
                                                  //sendConsoleText("Tunnel #" + this.httprequest.index + " closed.", this.httprequest.sessionid);
                                                  delete tunnels[this.httprequest.index];
-@@ -991,14 +1083,14 @@
+@@ -1015,14 +1100,14 @@
                                              });
                                              s.on('data', function (data) {
                                                  // If this is upload data, save it to file
@@ -475,7 +497,7 @@
                                                      }
                                                      this.write(Buffer.from(JSON.stringify({ action: 'uploadack', reqid: this.httprequest.uploadFileid }))); // Ask for more data.
                                                      return;
-@@ -1044,27 +1136,22 @@
+@@ -1068,27 +1153,22 @@
                                                                      if (this.httprequest.xoptions.cols) { cols = this.httprequest.xoptions.cols; }
                                                                  }
  
@@ -518,7 +540,7 @@
                                                              }
                                                              else {
                                                                  var env = { HISTCONTROL: 'ignoreboth' };
-@@ -1121,12 +1208,35 @@
+@@ -1145,12 +1225,35 @@
                                                                      fs.mkdirSync(cmd.path);
                                                                      break;
                                                                  }
@@ -556,7 +578,7 @@
                                                                      break;
                                                                  }
                                                              case 'rename':
-@@ -1168,20 +1278,23 @@
+@@ -1192,20 +1295,23 @@
                                                                              }
                                                                          }
                                                                          MeshServerLogEx((cmd.ask == 'coredump') ? 104 : 49, [cmd.path], 'Download: \"' + cmd.path + '\"', this.httprequest);
@@ -588,7 +610,7 @@
                                                                          this.write(buf.slice(0, len + 4)); // Write as binary
                                                                      }
                                                                      break;
-@@ -1189,38 +1302,33 @@
+@@ -1213,38 +1319,33 @@
                                                              case 'upload':
                                                                  {
                                                                      // Upload a file, browser to agent
@@ -638,7 +660,7 @@
                                                                      }
                                                                      break;
                                                                  }
-@@ -1315,10 +1423,10 @@
+@@ -1339,10 +1440,10 @@
                  break;
              case 'agentupdateex':
                  // Perform an direct agent update without requesting any information from the server, this should not typically be used.
@@ -652,7 +674,7 @@
                  }
                  break;
              case 'eval':
-@@ -1343,7 +1451,7 @@
+@@ -1367,7 +1468,7 @@
                      var pr = require('os').name();
                      pr.sessionid = sessionid;
                      pr.then(function (v) {

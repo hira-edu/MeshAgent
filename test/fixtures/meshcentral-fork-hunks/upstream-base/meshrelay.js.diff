@@ -6,9 +6,9 @@
      if ((protocol == 2) && ((rights & MESHRIGHT_NODESKTOP) != 0)) { return false; }
 +    if ((protocol == 20) && ((rights & MESHRIGHT_NODESKTOP) != 0)) { return false; } // Desktop audio (fork relay protocol 20) is denied together with desktop
      if ((protocol == 4) && ((rights & MESHRIGHT_NOREGISTRY) != 0)) { return false; }
-     if ((protocol == 5) && ((rights & MESHRIGHT_NOFILES) != 0)) { return false; }
+     if (((protocol == 5) || (protocol == 10)) && ((rights & MESHRIGHT_NOFILES) != 0)) { return false; }
      return true;
-@@ -1042,7 +1043,7 @@
+@@ -1044,7 +1045,7 @@
                  if (typeof cookie.p == 'number') {
                      var usages = [];
                      if (cookie.p & 1) { usages.push(1); usages.push(6); usages.push(8); usages.push(9); } // Terminal

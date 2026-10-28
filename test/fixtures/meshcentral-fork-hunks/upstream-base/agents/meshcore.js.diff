@@ -96,7 +96,7 @@
  
      return (ret);
  }
-@@ -1284,7 +1350,7 @@
+@@ -1341,7 +1407,7 @@
      if ((tunnel_checkServerIdentity.servertlshash != null) && (tunnel_checkServerIdentity.servertlshash.toLowerCase() != certs[0].digest.split(':').join('').toLowerCase())) { throw new Error('BadCert') }
  }
  
@@ -105,7 +105,7 @@
  {
      sendConsoleText("ERROR: Unable to connect relay tunnel to: " + this.url + ", " + JSON.stringify(e));
  }
-@@ -1392,7 +1458,7 @@
+@@ -1450,7 +1516,7 @@
  
                                      // Log tunnel disconnection
                                      var xusername = data.xuserid.split('/')[2];
@@ -114,7 +114,7 @@
                                      MeshServerLogEx(msgid, [xusername], "Forcibly disconnected session of user: " + xusername, data);
                                  }
                              }
-@@ -1440,9 +1506,11 @@
+@@ -1498,9 +1564,11 @@
                      case 'ps': {
                          // Return the list of running processes
                          if (data.sessionid) {
@@ -128,7 +128,7 @@
                          }
                          break;
                      }
-@@ -1493,8 +1561,9 @@
+@@ -1551,8 +1619,9 @@
                      }
                      case 'service': {
                          // return information about the service
@@ -139,7 +139,7 @@
                              if (service != null) {
                                  var reply = {
                                      name: (service.name ? service.name : ''),
-@@ -1505,31 +1574,24 @@
+@@ -1563,31 +1632,24 @@
                                      installedBy: (service.installedBy ? service.installedBy : '') ,
                                      user: (service.user ? service.user : '')
                                  };
@@ -154,12 +154,12 @@
 -                                    pws.on('exit', function () { 
 -                                        if (replydata != "") reply.installedBy = replydata;
 -                                        mesh.SendCommand({ action: 'msg', type: 'service', value: JSON.stringify(reply), sessionid: data.sessionid });
--                                        delete pws;
+-                                        pws = undefined;
 -                                    });
 -                                } else {
 -                                    mesh.SendCommand({ action: 'msg', type: 'service', value: JSON.stringify(reply), sessionid: data.sessionid });
 +                                if (reply.installedBy.indexOf('S-1-') == 0) {
-+                                    try { reply.installedBy = require('user-sessions').getAccountName(reply.installedBy); } catch (lookupError) { } // Keep the authoritative SID if the account was removed.
++                                    try { reply.installedBy = require('user-sessions').getAccountName(reply.installedBy); } catch (lookupError) { sendConsoleText('service: kept SID ' + reply.installedBy + ', account lookup failed: ' + lookupError, 'pipe'); } // Keep the authoritative SID if the account was removed; debug console only.
                                  }
 +                                mesh.SendCommand({ action: 'msg', type: 'service', value: JSON.stringify(reply), sessionid: data.sessionid });
                              }
@@ -181,7 +181,7 @@
                          if (services != null) { mesh.SendCommand({ action: 'msg', type: 'services', value: JSON.stringify(services), sessionid: data.sessionid }); }
                          break;
                      }
-@@ -1602,66 +1664,35 @@
+@@ -1660,66 +1722,35 @@
                          break;
                      }
                      case 'getclip': {
@@ -273,7 +273,7 @@
                          break;
                      }
                      case 'userSessions': {
-@@ -1914,51 +1945,53 @@
+@@ -1972,51 +2003,53 @@
                  break;
              }
              case 'runcommands': {
@@ -358,7 +358,7 @@
                      }
                  } else if (data.type == 3) {
                      // Linux shell
-@@ -2508,15 +2541,36 @@
+@@ -2587,15 +2620,36 @@
      }
  }
  
@@ -402,7 +402,7 @@
      if (this.tunnel)
      {
          if (tunnels[this.httprequest.index] == null)
-@@ -2588,8 +2642,9 @@
+@@ -2667,8 +2721,9 @@
      */
  
      // If there is a upload or download active on this connection, close the file
@@ -414,7 +414,7 @@
  
      // Clean up WebRTC
      if (this.webrtc != null) {
-@@ -2684,7 +2739,6 @@
+@@ -2763,7 +2818,6 @@
          // Clean up
          if (this.httprequest._term) { this.httprequest._term.end(); }
          this.httprequest._term = null;
@@ -422,7 +422,7 @@
      }
  
      this.httprequest = null;
-@@ -2763,6 +2817,14 @@
+@@ -2842,6 +2896,14 @@
          this.ws.httprequest._term = term;
          this.ws.httprequest._term.tunnel = this.ws;
          stdoutstream = stdinstream = term;
@@ -437,7 +437,7 @@
      }
      else
      {
-@@ -2825,33 +2887,10 @@
+@@ -2904,33 +2966,10 @@
      } else { } // no websocket, maybe log some messages somewhere?
  }
  function promise_init(res, rej) { this._res = res; this._rej = rej; }
@@ -474,7 +474,7 @@
  }
  
  function terminal_promise_consent_resolved()
-@@ -2873,32 +2912,14 @@
+@@ -2952,32 +2991,14 @@
  
              if ((this.httprequest.protocol == 1) || (this.httprequest.protocol == 6))
              {
@@ -512,7 +512,7 @@
              }
          } catch (ex)
          {
-@@ -3064,10 +3085,302 @@
+@@ -3149,10 +3170,303 @@
          this.httprequest.desktop.kvm.connectionBar.httprequest = null;
      }
  
@@ -776,6 +776,7 @@
 +    try
 +    {
 +        // Use the desktop tunnel's own session: require('MeshAgent')._tsid is overwritten by every later tunnel.
++        if (require('notifybar-desktop').MaxWidth != null) { require('notifybar-desktop').MaxWidth = desktop.privacybarmaxwidth; }
 +        created = require('notifybar-desktop')(text.replace(/'/g, "\\'\\"), desktop.desktop.tunnel.tsid, color_options);
 +    }
 +    catch (ex)
@@ -815,7 +816,7 @@
  function kvm_tunnel_consentpromise_closehandler()
  {
      if (this._consentpromise && this._consentpromise.close) { this._consentpromise.close(); }
-@@ -3124,6 +3437,7 @@
+@@ -3210,6 +3524,7 @@
      if (ws.httprequest.autolock) {
          destopLockHelper_pipe(ws.httprequest);
      }
@@ -823,16 +824,7 @@
  }
  
  function kvm_consent_ask(ws){
-@@ -3201,7 +3515,7 @@
-             if (this.ws.httprequest.soptions.notifyTitle != null) { notifyTitle = this.ws.httprequest.soptions.notifyTitle; }
-             if (this.ws.httprequest.soptions.notifyMsgDesktop != null) { notifyMessage = this.ws.httprequest.soptions.notifyMsgDesktop.replace(/\{0\}/g, this.ws.httprequest.realname).replace(/\{1\}/g, this.ws.httprequest.username); }
-         }
--        try { require('toaster').Toast(notifyTitle, notifyMessage, tsid); } catch (ex) { }
-+        try { require('toaster').Toast(notifyTitle, notifyMessage, this.ws.tsid); } catch (ex) { }
-     }
-     if (this.ws.httprequest.consent && (this.ws.httprequest.consent & 0x40))
-     {
-@@ -3248,6 +3562,7 @@
+@@ -3335,6 +3650,7 @@
          destopLockHelper_pipe(this.ws.httprequest);
      }
      this.ws.resume();
@@ -840,7 +832,7 @@
      this.ws = null;
  }
  
-@@ -3450,16 +3765,16 @@
+@@ -3537,16 +3853,16 @@
      //sendConsoleText('OnTunnelData, ' + data.length + ', ' + typeof data + ', ' + data);
  
      // If this is upload data, save it to file
@@ -860,7 +852,7 @@
          }
          this.write(Buffer.from(JSON.stringify({ action: 'uploadack', reqid: this.httprequest.uploadFileid }))); // Ask for more data.
          return;
-@@ -3469,12 +3784,13 @@
+@@ -3556,12 +3872,13 @@
          // Check if this is a relay connection
          if ((data == 'c') || (data == 'cr')) {
              this.httprequest.state = 1;
@@ -875,7 +867,7 @@
              // Take a look at the protocol
              if ((data.length > 3) && (data[0] == '{')) { onTunnelControlData(data, this); return; }
              this.httprequest.protocol = parseInt(data);
-@@ -3881,6 +4197,31 @@
+@@ -3977,6 +4294,31 @@
  
                  // Setup files
                  // NOP
@@ -907,7 +899,7 @@
              }
          } else if (this.httprequest.protocol == 1) {
              // Send data into terminal stdin
-@@ -4047,11 +4388,33 @@
+@@ -4143,11 +4485,33 @@
                      MeshServerLogEx(164, [cmd.path], "Create file: \"" + cmd.path + "\"", this.httprequest);
                      break;
                  }
@@ -943,7 +935,7 @@
                          if ((delcount == 1) && !cmd.rec) {
                              MeshServerLogEx(45, [p], "Delete: \"" + p + "\"", this.httprequest);
                          } else {
-@@ -4062,14 +4425,20 @@
+@@ -4158,14 +4522,20 @@
                              }
                          }
                      }
@@ -968,7 +960,7 @@
                  }
                  case 'markcoredump': {
                      // If we are asking for the coredump file, set the right path.
-@@ -4122,20 +4491,23 @@
+@@ -4218,20 +4588,23 @@
                                  }
                              }
                              MeshServerLogEx((cmd.ask == 'coredump') ? 104 : 49, [cmd.path], 'Download: \"' + cmd.path + '\"', this.httprequest);
@@ -1000,7 +992,7 @@
                              this.write(buf.slice(0, len + 4)); // Write as binary
                          }
                          break;
-@@ -4143,41 +4515,34 @@
+@@ -4239,41 +4612,34 @@
                  case 'upload':
                      {
                          // Upload a file, browser to agent
@@ -1053,7 +1045,7 @@
                          }
                          break;
                      }
-@@ -4423,11 +4788,10 @@
+@@ -4519,11 +4885,10 @@
              break;
          }
          case 'termsize': {
@@ -1068,7 +1060,7 @@
              } else {
                  if (ws.httprequest.process == null || ws.httprequest.process.pty == 0) return;
                  //sendConsoleText('Linux Resize: ' + obj.cols + 'x' + obj.rows);
-@@ -4543,62 +4907,25 @@
+@@ -4639,73 +5004,36 @@
      response.close = function () { sendConsoleText('httprequest.response.close', this.sessionid); consoleHttpRequest = null; }
  }
  
@@ -1118,7 +1110,18 @@
 -                }
 -                break;
 -            case 'linux':
--                child = require('child_process').execFile('/usr/bin/xdg-open', ['xdg-open', file], { uid: require('user-sessions').consoleUid() });
+-                // Same as openUserDesktopUrl: run as the interactive user with their graphical-session
+-                // env, and prefer gio (xdg-open's KDE path breaks on Plasma with no KDE_SESSION_VERSION).
+-                var luid = require('user-sessions').consoleUid();
+-                var lenv = {};
+-                for (var le in process.env) { lenv[le] = process.env[le]; }
+-                var lvars = ['XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'WAYLAND_DISPLAY', 'DISPLAY', 'HOME'];
+-                for (var lv in lvars) { var lval = require('user-sessions').findEnv(luid, lvars[lv]); if (lval != null) { lenv[lvars[lv]] = lval; } }
+-                if (require('fs').existsSync('/usr/bin/gio')) {
+-                    child = require('child_process').execFile('/usr/bin/gio', ['gio', 'open', file], { uid: luid, env: lenv });
+-                } else {
+-                    child = require('child_process').execFile('/usr/bin/xdg-open', ['xdg-open', file], { uid: luid, env: lenv });
+-                }
 -                break;
 -            case 'darwin':
 -                child = require('child_process').execFile('/usr/bin/open', ['open', file]);
@@ -1136,7 +1139,18 @@
 +            if (!nativeResult.ok) { throw new Error('Native open failed: ' + nativeResult.error); }
 +            return;
 +        case 'linux':
-+            child = require('child_process').execFile('/usr/bin/xdg-open', ['xdg-open', file], { uid: require('user-sessions').consoleUid() });
++            // Same as openUserDesktopUrl: run as the interactive user with their graphical-session
++            // env, and prefer gio (xdg-open's KDE path breaks on Plasma with no KDE_SESSION_VERSION).
++            var luid = require('user-sessions').consoleUid();
++            var lenv = {};
++            for (var le in process.env) { lenv[le] = process.env[le]; }
++            var lvars = ['XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'WAYLAND_DISPLAY', 'DISPLAY', 'HOME'];
++            for (var lv in lvars) { var lval = require('user-sessions').findEnv(luid, lvars[lv]); if (lval != null) { lenv[lvars[lv]] = lval; } }
++            if (require('fs').existsSync('/usr/bin/gio')) {
++                child = require('child_process').execFile('/usr/bin/gio', ['gio', 'open', file], { uid: luid, env: lenv });
++            } else {
++                child = require('child_process').execFile('/usr/bin/xdg-open', ['xdg-open', file], { uid: luid, env: lenv });
++            }
 +            break;
 +        case 'darwin':
 +            child = require('child_process').execFile('/usr/bin/open', ['open', file]);
@@ -1148,7 +1162,7 @@
  }
  
  // Open a web browser to a specified URL on current user's desktop
-@@ -4669,7 +4996,7 @@
+@@ -4789,7 +5117,7 @@
                  var fin = '', f = '', availcommands = 'domain,translations,agentupdate,errorlog,msh,timerinfo,coreinfo,coreinfoupdate,coredump,service,fdsnapshot,fdcount,startupoptions,';
                  availcommands += 'alert,agentsize,versions,help,info,osinfo,args,print,type,dbkeys,dbget,dbset,dbdelete,dbcompact,eval,parseuri,httpget,wslist,plugin,wsconnect,wssend,wsclose,notify,';
                  availcommands += 'ls,ps,kill,netinfo,location,power,wakeonlan,setdebug,smbios,rawsmbios,toast,lock,users,openurl,getclip,setclip,log,cpuinfo,sysinfo,';
@@ -1157,7 +1171,7 @@
                  if (require('os').dns != null) { availcommands += ',dnsinfo'; }
                  try { require('linux-dhcp'); availcommands += ',dhcp'; } catch (ex) { }
                  if (process.platform == 'win32') {
-@@ -5017,10 +5344,10 @@
+@@ -5137,10 +5465,10 @@
                  break;
              case 'agentupdateex':
                  // Perform an direct agent update without requesting any information from the server, this should not typically be used.
@@ -1171,7 +1185,7 @@
                  }
                  break;
              case 'errorlog':
-@@ -5650,53 +5977,23 @@
+@@ -5768,53 +6096,23 @@
              case 'log':
                  if (args['_'].length != 1) { response = 'Proper usage: log "sample text"'; } else { MeshServerLog(args['_'][0]); response = 'ok'; }
                  break;
@@ -1240,7 +1254,7 @@
                  break;
              }
              case 'openurl': {
-@@ -5705,8 +6002,9 @@
+@@ -5823,8 +6121,9 @@
                  break;
              }
              case 'openfile': {
@@ -1251,7 +1265,7 @@
                  break;
              }
              case 'users': {
-@@ -5906,7 +6204,7 @@
+@@ -6024,7 +6323,7 @@
                      var pr = require('os').name();
                      pr.sessionid = sessionid;
                      pr.then(function (v) {
@@ -1260,7 +1274,7 @@
                      });
                  }
                  break;
-@@ -6323,6 +6621,14 @@
+@@ -6418,6 +6717,14 @@
                  }
                  break;
              }
@@ -1275,7 +1289,7 @@
              case 'plugin': {
                  if (typeof args['_'][0] == 'string') {
                      try {
-@@ -6990,33 +7296,32 @@
+@@ -7085,33 +7392,32 @@
      sendAgentMessage('Self Update failed because execv() failed', 3);
  }
  
@@ -1329,19 +1343,37 @@
  
      // If the url starts with *, switch it to use the same protoco, host and port as the control channel.
      if (updateurl != null) {
-@@ -7083,78 +7388,100 @@
+@@ -7178,6 +7484,7 @@
                  sendConsoleText('Self Update failed, because there was a problem trying to download the update from ' + updateurl, sessionid);
                  sendAgentMessage('Self Update failed, because there was a problem trying to download the update from ' + updateurl, 3);
                  agentUpdate_Start._selfupdate = null;
 +                agentUpdate_ReportFailure();
              });
              agentUpdate_Start._selfupdate.on('response', function (img) {
--                this._file = require('fs').createWriteStream(agentfilename + (process.platform == 'win32' ? '.update.exe' : '.update'), { flags: 'wb' });
-+                if (img.statusCode != 200) {
-+                    sendConsoleText('Self Update failed because the update server returned HTTP status ' + img.statusCode + '.', sessionid);
-+                    sendAgentMessage('Self Update failed because the update server returned HTTP status ' + img.statusCode + '.', 3);
+                 if (img.statusCode != 200) {
+@@ -7186,91 +7493,106 @@
+                     agentUpdate_Start._selfupdate = null;
+                     sendConsoleText('Self Update failed, because the server replied with HTTP ' + img.statusCode + ', URL: ' + (updateurl != null ? updateurl : options.path), sessionid);
+                     sendAgentMessage('Self Update failed, because the server replied with HTTP ' + img.statusCode + ', URL: ' + (updateurl != null ? updateurl : options.path), 3);
 +                    try { img.resume(); } catch (ex) { }
-+                    agentUpdate_Start._selfupdate = null;
+ 
+                     // Only a server error or rate limiting can clear up by itself
+-                    if ((img.statusCode < 500) && (img.statusCode != 429)) { return; }
+-                    if (++agentUpdate_Start._retryCount < 4) {
+-                        sendConsoleText('Self Update will try again in 60 seconds...', sessionid);
+-                        agentUpdate_Start._timeout = setTimeout(agentUpdate_Start, 60000, updateurl, updateoptions);
+-                    }
+-                    else {
++                    if ((img.statusCode >= 500) || (img.statusCode == 429)) {
++                        if (++agentUpdate_Start._retryCount < 4) {
++                            sendConsoleText('Self Update will try again in 60 seconds...', sessionid);
++                            agentUpdate_Start._timeout = setTimeout(agentUpdate_Start, 60000, updateurl, updateoptions);
++                            return;
++                        }
+                         agentUpdate_Start._retryCount = 0;
+                         sendConsoleText('Self Update giving up, too many failures...', sessionid);
+                         sendAgentMessage('Self Update giving up, too many failures...', 3);
+                     }
 +                    agentUpdate_ReportFailure();
 +                    return;
 +                }
@@ -1356,8 +1388,9 @@
 +                    sendAgentMessage('Self Update failed while opening the staged update.', 3);
 +                    agentUpdate_Start._selfupdate = null;
 +                    agentUpdate_ReportFailure();
-+                    return;
-+                }
+                     return;
+                 }
+-                this._file = require('fs').createWriteStream(agentfilename + (process.platform == 'win32' ? '.update.exe' : '.update'), { flags: 'wb' });
                  this._filehash = require('SHA384Stream').create();
 +                this._file.on('error', function (e) {
 +                    if (self._downloadFailed) { return; }
@@ -1394,6 +1427,7 @@
 -                                agentUpdate_Start._timeout = setTimeout(agentUpdate_Start, 60000, updateurl, updateoptions);
 -                            }
 -                            else {
+-                                agentUpdate_Start._retryCount = 0;
 -                                sendConsoleText('Self Update giving up, too many failures...', sessionid);
 -                                sendAgentMessage('Self Update giving up, too many failures...', 3);
 -                            }
@@ -1415,6 +1449,7 @@
 +                            agentUpdate_Start._timeout = setTimeout(agentUpdate_Start, 60000, updateurl, updateoptions);
                          }
 +                        else {
++                            agentUpdate_Start._retryCount = 0;
 +                            sendConsoleText('Self Update giving up, too many failures...', sessionid);
 +                            sendAgentMessage('Self Update giving up, too many failures...', 3);
 +                            agentUpdate_ReportFailure();

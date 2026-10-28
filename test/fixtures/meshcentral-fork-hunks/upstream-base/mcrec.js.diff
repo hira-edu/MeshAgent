@@ -42,7 +42,7 @@
  function indexFile(infile) {
      var state = { recFileName: null, recFile: null, recFileSize: 0, recFilePtr: 0 };
      if (fs.existsSync(infile) == false) { log2("Missing file: " + infile); return; }
-@@ -122,7 +157,8 @@
+@@ -123,7 +158,8 @@
                          if (state.swidth == null) { break; }
                          var x = block.data.readUInt16BE(4);
                          var y = block.data.readUInt16BE(6);
@@ -52,7 +52,7 @@
                          //log("Tile", x, y, dimensions.width, dimensions.height, block.ptr);
                          //console.log(elapseSeconds);
  
-@@ -277,48 +313,6 @@
+@@ -278,48 +314,6 @@
  function isNumber(x) { return (('' + parseInt(x)) === x) || (('' + parseFloat(x)) === x); }
  function format(format) { var args = Array.prototype.slice.call(arguments, 1); return format.replace(/{(\d+)}/g, function (match, number) { return typeof args[number] != 'undefined' ? args[number] : match; }); };
  
@@ -101,7 +101,7 @@
  function start() { startEx(process.argv); }
  function startEx(argv) {
      if (argv.length > 2) { indexFile(argv[2]); } else {
-@@ -328,8 +322,9 @@
+@@ -329,8 +323,9 @@
          log("  Usage: node mcrec [file]");
      }
  }
