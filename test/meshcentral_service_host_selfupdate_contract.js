@@ -4,7 +4,8 @@
 // 1. Executed: the JavaScript updater agentUpdate_Start in the MeshCentral fork's agent cores
 //    (agents/meshcore.js and agents/recoverycore.js) runs with injected https, fs, hash stream and
 //    MeshAgent. On Windows it refuses before any request or file access. Elsewhere it refuses
-//    without a valid SHA-384 hash, keeps the current agent on an HTTP error or a hash mismatch,
+//    without a valid SHA-384 hash, keeps the current agent on an HTTP error or a hash mismatch (retrying
+//    a 5xx/429 or a mismatch up to 4 attempts, then reporting the failure and resetting the counter),
 //    replaces the binary on Linux/FreeBSD only by renaming the verified staged file over it, and on
 //    any other platform deletes the staged file and refuses.
 // 2. Executed: the agent installer's Windows update (modules/agent-installer.js) hands the staged
@@ -95,6 +96,22 @@ function respond(u, status, digestHex, closeFirst) {
     else { hash.emit('hash', Buffer.from(digestHex, 'hex')); file.emit('close'); }
 }
 
+// Answers the most recent update request (retries issue new ones) with an HTTP status, or a 200 body hashing to digestHex.
+function respondLatest(u, status, digestHex) {
+    const image = new EventEmitter();
+    image.statusCode = status;
+    image.piped = [];
+    image.pipe = (target) => image.piped.push(target);
+    image.resume = () => { image.resumed = true; };
+    u.log.requests[u.log.requests.length - 1].request.emit('response', image);
+    if (status === 200) {
+        const [file, hash] = image.piped;
+        hash.emit('hash', Buffer.from(digestHex, 'hex'));
+        file.emit('close');
+    }
+    return image;
+}
+
 const replacedExecutable = (u) => u.log.fs.filter((op) => (op[0] === 'renameSync' || op[0] === 'copyFileSync') && op[2] === u.execPath);
 
 function updaterCases(source) {
@@ -147,6 +164,44 @@ function updaterCases(source) {
             respond(u, 404);
             assert.strictEqual(u.log.failures, 1);
             assert(!u.log.fs.some((op) => op[0] === 'createWriteStream'), 'nothing is staged');
+            assert.deepStrictEqual(u.log.timers, [], 'a client error is not retried (upstream #8257)');
+            assert(u.log.console.some((line) => line.includes('replied with HTTP 404, URL: https://server.invalid/meshagents?id=6')), 'the status and URL are reported');
+        },
+        // Upstream #8257 (1.3.1): a server error or rate limit is retried up to 4 attempts and the counter is reset when
+        // the update gives up. The fork reports agentupdatefailed only when it gives up, never while a retry is pending.
+        serverErrorOrRateLimitIsRetriedThenGivesUp() {
+            for (const status of [503, 429]) {
+                const u = updater(source, 'linux');
+                for (let attempt = 1; attempt <= 3; attempt++) {
+                    u.start('*/meshagents?id=6', { hash: VALID_HASH });
+                    const image = respondLatest(u, status);
+                    assert(image.resumed, status + ': the error body is drained, not aborted');
+                    assert.strictEqual(u.log.timers.length, attempt, status + ': attempt ' + attempt + ' schedules a retry');
+                    assert.strictEqual(u.log.failures, 0, status + ': no failure report while a retry is pending');
+                }
+                u.start('*/meshagents?id=6', { hash: VALID_HASH });
+                respondLatest(u, status);
+                assert.strictEqual(u.log.timers.length, 3, status + ': the fourth failure gives up');
+                assert.strictEqual(u.log.failures, 1, status + ': giving up is reported to the server');
+                assert(u.log.console.includes('Self Update giving up, too many failures...'));
+                assert(!u.log.fs.some((op) => op[0] === 'createWriteStream'), status + ': nothing is staged');
+                u.start('*/meshagents?id=6', { hash: VALID_HASH });
+                respondLatest(u, status);
+                assert.strictEqual(u.log.timers.length, 4, status + ': the counter was reset, so a later update retries again');
+            }
+        },
+        hashMismatchGivesUpAndResetsTheCounter() {
+            const u = updater(source, 'linux');
+            for (let attempt = 1; attempt <= 4; attempt++) {
+                u.start('*/meshagents?id=6', { hash: VALID_HASH });
+                respondLatest(u, 200, 'cd'.repeat(48));
+            }
+            assert.strictEqual(u.log.timers.length, 3, 'three retries, then give up');
+            assert.strictEqual(u.log.failures, 1, 'giving up is reported once');
+            u.start('*/meshagents?id=6', { hash: VALID_HASH });
+            respondLatest(u, 200, 'cd'.repeat(48));
+            assert.strictEqual(u.log.timers.length, 4, 'the counter was reset (upstream #8257)');
+            assert.deepStrictEqual(replacedExecutable(u), [], 'a mismatching download never replaces the binary');
         },
         otherPlatformsRefuseBeforeAnyRequestOrFile() {
             for (const platform of ['darwin', 'android']) {

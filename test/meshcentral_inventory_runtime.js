@@ -63,6 +63,31 @@ for (const filename of ['meshcore.js']) {
             assert.equal(closed, 2, 'detail getter failures must also close service handles');
         }
     }
+    // CORE-9 (Stage 6): a failed SID lookup keeps the SID, still sends exactly one reply, and is logged to the local
+    // debug console only ('pipe' never reaches the server).
+    {
+        const messages = [], debug = [];
+        let closed = 0;
+        const service = {name:'probe', status:{state:'RUNNING'}, installedBy:'S-1-5-21-1-2-3-1001', close() { ++closed; }};
+        const state = {
+            mesh: {SendCommand: message => messages.push(message)},
+            sendConsoleText: (text, sessionid) => debug.push([String(text), sessionid]),
+            require(name) {
+                if (name === 'user-sessions') return {getAccountName() { throw Error('account removed'); }};
+                assert.equal(name, 'service-manager');
+                return {manager: {getService() { return service; }, enumerateService() { throw Error('must not fall through'); }}};
+            }
+        };
+        const begin = source.indexOf("case 'service': {"), end = source.indexOf("case 'serviceStop':", begin);
+        const dispatch = vm.runInNewContext('(function(data){switch(data.type){' + source.slice(begin, end) + '}})', state);
+        dispatch({type:'service',sessionid:'s',serviceName:'probe'});
+        assert.equal(messages.length, 1, 'one reply when the account lookup fails');
+        assert.equal(JSON.parse(messages[0].value).installedBy, 'S-1-5-21-1-2-3-1001', 'the SID is kept');
+        assert.equal(closed, 1);
+        assert.equal(debug.length, 1, 'the lookup failure is logged');
+        assert.equal(debug[0][1], 'pipe', 'only to the local debug console');
+        assert.match(debug[0][0], /account lookup failed: Error: account removed/);
+    }
 }
 console.log('MeshCentral inventory requests return valid replies, isolate access failures and avoid service fallthrough.');
 if (process.argv.includes('--native')) {
