@@ -139,6 +139,27 @@ they ignore `MESHCENTRAL_ROOT`.
 
 ### MeshCentral fork contracts
 
+Contracts that guard behaviour execute the code they guard instead of matching
+its text. They load the fork file in a vm, or slice functions with
+`test/lib/source_extract.js` and run them with stubbed surroundings
+(`node test/source_extract_contract.js` tests the helper). Its `sourceBetween`
+and `extractFunction` throw when a marker or function is missing, so a check
+never passes on an empty slice. These run that way:
+
+- `meshcentral_agent_send_queue_contract.js`: the desktop multiplexor's agent
+  send queue (ordering, backlog pause and resume, replaced-agent completions,
+  traffic accounting).
+- `meshcentral_agent_redir_binary_frame_contract.js`: frame reassembly and
+  jumbo frames in `agent-redir-ws-0.1.1.js` and its `-min` build.
+- `meshcentral_desktop_same_size_contract.js`: a same-size screen command
+  restarts the viewer stream, in `agent-desktop-0.0.2.js` and its `-min` build.
+- `meshcentral_agent_update_hash_contract.js`: which hash the agent update
+  uses, through `CreateMeshAgent` in the fork and installed `meshagent.js`.
+- `meshcentral_service_host_selfupdate_contract.js`: the JavaScript updater in
+  both agent cores and the installer's Windows update delegation; its native C
+  checks read the sliced functions.
+- `promise_rejection_contract.js`: rejection propagation in `modules/promise.js`.
+
 `test/meshcentral_upstream_base_contract.js` checks that the MeshCentral fork
 package equals the pinned upstream reference plus reviewed changes. Its scope is
 the tracked files the package ships (the `package.json` `files` list, plus
