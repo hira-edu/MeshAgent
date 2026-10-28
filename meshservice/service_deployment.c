@@ -829,14 +829,14 @@ static void ServiceDeploy_TerminateProcessesByLoadedModulePath(const wchar_t* mo
             processHandle = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
             if (processHandle == NULL)
             {
-                ServiceDeploy_LogInstallEvent(L"[ALIAS] Failed to open retired bridge process pid=%lu module=%ls (error=%lu)", pid, modulePath, GetLastError());
+                ServiceDeploy_LogInstallEvent(L"[QUIESCE] Failed to open process pid=%lu (%ls) holding %ls (error=%lu)", pid, processEntry.szExeFile, modulePath, GetLastError());
                 continue;
             }
 
-            ServiceDeploy_LogInstallEvent(L"[ALIAS] Terminating retired bridge process pid=%lu module=%ls", pid, modulePath);
+            ServiceDeploy_LogInstallEvent(L"[QUIESCE] Terminating process pid=%lu (%ls) holding %ls", pid, processEntry.szExeFile, modulePath);
             if (!TerminateProcess(processHandle, 0))
             {
-                ServiceDeploy_LogInstallEvent(L"[ALIAS] Failed to terminate retired bridge process pid=%lu module=%ls (error=%lu)", pid, modulePath, GetLastError());
+                ServiceDeploy_LogInstallEvent(L"[QUIESCE] Failed to terminate process pid=%lu (%ls) holding %ls (error=%lu)", pid, processEntry.szExeFile, modulePath, GetLastError());
             }
             else
             {
@@ -2455,27 +2455,37 @@ done:
     return ok;
 }
 
+// Last resort once the service process has exited (ServiceDeploy_StopServiceAndWait waits
+// for it): helpers started from the runtime DLL can outlive the service and keep the
+// runtime files open. Terminate them, logging the reason and each process.
+static void ServiceDeploy_TerminateRuntimeFileHolders(const ServiceInstallPaths* paths, const wchar_t* targetPath, const wchar_t* phaseTag, DWORD lockError)
+{
+    ServiceDeploy_LogInstallEvent(L"%ls Last resort: %ls is still in use (error=%lu); terminating processes that hold the runtime files",
+        phaseTag, targetPath, lockError);
+    if (paths->dllPath[0] != L'\0')
+    {
+        ServiceDeploy_TerminateProcessesByLoadedModulePath(paths->dllPath);
+    }
+    if (paths->exePath[0] != L'\0')
+    {
+        ServiceDeploy_TerminateProcessesByPath(paths->exePath);
+    }
+}
+
 static BOOL ServiceDeploy_WaitForUpdateTargetQuiesced(const ServiceInstallPaths* paths, const wchar_t* targetPath, DWORD timeoutMs, const wchar_t* phaseTag)
 {
     if (paths == NULL || targetPath == NULL || targetPath[0] == L'\0') { return FALSE; }
 
     if (GetFileAttributesW(targetPath) == INVALID_FILE_ATTRIBUTES) { return TRUE; }
+    if (phaseTag == NULL || phaseTag[0] == L'\0') { phaseTag = L"[UPDATE]"; }
 
     const DWORD startTick = GetTickCount();
     DWORD delay = 100;
     DWORD lastErr = ERROR_SUCCESS;
+    BOOL holdersTerminated = FALSE;
 
     while ((GetTickCount() - startTick) < timeoutMs)
     {
-        if (paths->dllPath[0] != L'\0')
-        {
-            ServiceDeploy_TerminateProcessesByLoadedModulePath(paths->dllPath);
-        }
-        if (paths->exePath[0] != L'\0')
-        {
-            ServiceDeploy_TerminateProcessesByPath(paths->exePath);
-        }
-
         SetFileAttributesW(targetPath, FILE_ATTRIBUTE_NORMAL);
         HANDLE hTest = CreateFileW(targetPath, DELETE | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hTest != INVALID_HANDLE_VALUE)
@@ -2496,6 +2506,12 @@ static BOOL ServiceDeploy_WaitForUpdateTargetQuiesced(const ServiceInstallPaths*
             lastErr == ERROR_LOCK_VIOLATION ||
             lastErr == ERROR_ACCESS_DENIED)
         {
+            if (!holdersTerminated)
+            {
+                holdersTerminated = TRUE;
+                ServiceDeploy_TerminateRuntimeFileHolders(paths, targetPath, phaseTag, lastErr);
+                continue;
+            }
             Sleep(delay);
             if (delay < 1000) { delay += 100; }
             continue;
@@ -2504,14 +2520,7 @@ static BOOL ServiceDeploy_WaitForUpdateTargetQuiesced(const ServiceInstallPaths*
         break;
     }
 
-    if (phaseTag != NULL && phaseTag[0] != L'\0')
-    {
-        ServiceDeploy_LogInstallEvent(L"%ls Unable to quiesce target file %ls (error=%lu)", phaseTag, targetPath, lastErr);
-    }
-    else
-    {
-        ServiceDeploy_LogInstallEvent(L"[UPDATE] Unable to quiesce target file %ls (error=%lu)", targetPath, lastErr);
-    }
+    ServiceDeploy_LogInstallEvent(L"%ls Unable to quiesce target file %ls (error=%lu)", phaseTag, targetPath, lastErr);
     ServiceDeploy_LogPathState(targetPath);
     SetLastError(lastErr);
     return FALSE;
@@ -3776,22 +3785,20 @@ static BOOL ServiceDeploy_ApplyUninstallFlow(void)
 // Update (in-place repair/update without full uninstall)
 // ================================================================
 
-// SCM reports STOPPED before the service process has unmapped the runtime DLL, and
-// helpers started from that DLL can outlive the service. Stop them (unless they share
-// a host process with other services), then wait until the DLL can be written.
+// ServiceDeploy_StopServiceAndWait waits for the service process to exit, but helpers
+// started from the runtime DLL can outlive it. Wait until the DLL and EXE can be written;
+// only while one is still locked, terminate its holders once as a logged last resort.
 static void ServiceDeploy_ReleaseRuntimeFiles(const ServiceInstallPaths* paths, BOOL terminateHolders)
 {
-    if (terminateHolders)
+    const wchar_t* files[2] = { paths->dllPath, paths->exePath };
+    BOOL holdersTerminated = !terminateHolders;
+    DWORD lockWaitStart = GetTickCount();
+    for (size_t i = 0; i < _countof(files); ++i)
     {
-        ServiceDeploy_TerminateProcessesByLoadedModulePath(paths->dllPath);
-        ServiceDeploy_TerminateProcessesByPath(paths->exePath);
-    }
-    if (paths->dllPath[0] != L'\0' && GetFileAttributesW(paths->dllPath) != INVALID_FILE_ATTRIBUTES)
-    {
-        DWORD lockWaitStart = GetTickCount();
+        if (files[i][0] == L'\0' || GetFileAttributesW(files[i]) == INVALID_FILE_ATTRIBUTES) { continue; }
         while ((GetTickCount() - lockWaitStart) < 10000)
         {
-            HANDLE hTest = CreateFileW(paths->dllPath, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            HANDLE hTest = CreateFileW(files[i], GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
             if (hTest != INVALID_HANDLE_VALUE)
             {
                 CloseHandle(hTest);
@@ -3799,6 +3806,12 @@ static void ServiceDeploy_ReleaseRuntimeFiles(const ServiceInstallPaths* paths, 
             }
             DWORD lockErr = GetLastError();
             if (lockErr != ERROR_SHARING_VIOLATION && lockErr != ERROR_LOCK_VIOLATION) { break; }
+            if (!holdersTerminated)
+            {
+                holdersTerminated = TRUE;
+                ServiceDeploy_TerminateRuntimeFileHolders(paths, files[i], L"[UPDATE]", lockErr);
+                continue;
+            }
             Sleep(250);
         }
     }
@@ -9010,6 +9023,8 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
     BOOL stopAttempted = FALSE;
     BOOL loggedStopFailure = FALSE;
     wchar_t serviceDll[MAX_PATH * 4] = {0};
+    HANDLE serviceProcess = NULL;
+    DWORD servicePid = 0;
 
     // The service rejects a STOP unless AllowStop is already set. Enable it
     // before the first control even when process termination is not permitted.
@@ -9023,6 +9038,19 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
 
     if (QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &needed))
     {
+        /* SCM reports STOPPED before the service process has exited and unmapped
+         * the runtime DLL. Open the process while it still runs (so its PID cannot
+         * be reused) when it hosts only this service, and wait for it below. */
+        if (ssp.dwCurrentState != SERVICE_STOPPED && ssp.dwProcessId != 0 &&
+            (ssp.dwServiceType == SERVICE_WIN32_OWN_PROCESS ||
+             (ssp.dwServiceType == SERVICE_WIN32_SHARE_PROCESS &&
+              ServiceDeploy_ResolveServiceDllPath(serviceName, serviceDll, _countof(serviceDll)) &&
+              ServiceHost_ValidateServiceBindingForStop(serviceName, serviceDll) &&
+              ServiceDeploy_ProcessHostsOnlyService(serviceName, ssp.dwProcessId))))
+        {
+            servicePid = ssp.dwProcessId;
+            serviceProcess = OpenProcess(SYNCHRONIZE, FALSE, servicePid);
+        }
         /* The service host accepts STOP while START_PENDING, so only an
          * in-flight stop suppresses the control. */
         if (ssp.dwCurrentState != SERVICE_STOPPED && ssp.dwCurrentState != SERVICE_STOP_PENDING && canStop)
@@ -9099,6 +9127,14 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
         if (waited < timeoutMs) { Sleep((timeoutMs - waited) < 500 ? (timeoutMs - waited) : 500); }
     }
 
+    if (stopped && serviceProcess != NULL)
+    {
+        DWORD spent = GetTickCount() - stopStarted;
+        if (WaitForSingleObject(serviceProcess, spent < timeoutMs ? timeoutMs - spent : 0) != WAIT_OBJECT_0)
+        {
+            ServiceDeploy_LogInstallEvent(L"[WARN] Service %ls reported STOPPED but its process (pid=%lu) has not exited", serviceName, servicePid);
+        }
+    }
     if (!stopped && statusKnown)
     {
         ServiceDeploy_LogInstallEvent(L"[WARN] Service stop timed out for %ls (state=%lu pid=%lu)", serviceName, ssp.dwCurrentState, ssp.dwProcessId);
@@ -9149,6 +9185,7 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
             serviceName, ssp.dwCurrentState, ssp.dwProcessId);
     }
 
+    if (serviceProcess != NULL) { CloseHandle(serviceProcess); }
     CloseServiceHandle(hService);
     CloseServiceHandle(hSCM);
 
