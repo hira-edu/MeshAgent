@@ -8,6 +8,8 @@ Layout A reproduces /opt/meshcentral as production has it today:
 Layout B installs a MeshCentral tarball into node_modules/meshcentral with no overrides.
 Layout B-stage1 installs the wrapper's own fork tarball and builds layout A's data and web folders
 the same way as A (deploy.py's map without the package roles, then the capture).
+Layout B-stage2 (B-stage1 with --retire-overrides) also applies the D16 web cutover: production's 62
+default3 overrides and the r0 canary scripts are left out of the capture, so the package views serve.
 """
 import base64
 import hashlib
@@ -267,6 +269,13 @@ def collect_core_artifacts(deploy, repo, root, include_package=True):
             if not targets:
                 continue
         entry = {"name": name, "remote_relative_path": config["remote_relative_path"], "publish_targets": targets}
+        if not include_package and all(is_shadow_core(remote_to_local(deploy, deploy.get_core_publish_path(
+                role, config["remote_relative_path"]), root).relative_to(root).as_posix()) for role in targets):
+            # B-stage1 never writes a data-dir shadow core (D18; publish_locally records it as left out),
+            # so its source is not read. D24 deleted agents/meshcore.min.js, which deploy.py still lists.
+            entry["shadow_core_only"] = True
+            entries.append(entry)
+            continue
         if name == "meshcentral.js":
             # Layout A: production's loader, rebuilt from the layout's stock npm copy (checked equal to the
             # pinned upstream tarball before this runs).
@@ -290,6 +299,19 @@ SHADOW_CORE_PREFIXES = ("meshcentral-data/meshcore.js", "meshcentral-data/meshco
 
 def is_shadow_core(relative):
     return relative.startswith(SHADOW_CORE_PREFIXES)
+
+
+# D16 web cutover (Stage 2): production's hand-made default3 overrides (main page, -min and every
+# translation) and the r0 canary scripts retire, so the package's own views serve. custom.js stays.
+D16_RETIRED_WEB = re.compile(r"^meshcentral-web/(views/(translations/)?default3(-min)?(_[a-z]{2}(-[a-z]{2,3})?)?\.handlebars"
+                             r"|public/scripts/r0-umair-reconnect-canary(-min)?\.js)$")
+D16_RETIRED_WEB_COUNT = 64  # 62 default3 overrides + 2 canary scripts in layout-a.tar
+# Folders the cutover leaves empty: they are not created, so no override folder exists at all.
+D16_RETIRED_DIRS = ("meshcentral-web/views/", "meshcentral-web/views/translations/")
+
+
+def is_d16_retired(relative):
+    return bool(D16_RETIRED_WEB.match(relative)) or relative in D16_RETIRED_DIRS
 
 
 def publish_locally(name, include_package=True):
@@ -348,9 +370,10 @@ def publish_locally(name, include_package=True):
                 "file owners and modes (Windows)"]}
 
 
-def extract_production_capture(name, without_shadow_cores=False):
+def extract_production_capture(name, without_shadow_cores=False, without_d16_web=False):
     """Extract layout-a.tar over the tree, keeping the captured mtimes (module mtimes are module versions).
-    without_shadow_cores leaves out the data-dir shadow cores (B-stage1, D18)."""
+    without_shadow_cores leaves out the data-dir shadow cores (B-stage1, D18); without_d16_web also
+    leaves out the 62 default3 overrides and the r0 canary scripts (B-stage2, D16)."""
     root = layout_root(name)
     if not LAYOUT_A_TAR.is_file():
         raise DupError(f"Production capture missing: {LAYOUT_A_TAR}")
@@ -366,6 +389,15 @@ def extract_production_capture(name, without_shadow_cores=False):
         if without_shadow_cores:
             skipped = [m.name for m in members if m.isfile() and is_shadow_core(m.name)]
             members = [m for m in members if not is_shadow_core(m.name.rstrip("/") + ("/" if m.isdir() else ""))]
+        if without_d16_web:
+            retired = [m.name for m in members if m.isfile() and is_d16_retired(m.name)]
+            if len(retired) != D16_RETIRED_WEB_COUNT:
+                raise DupError(f"D16 cutover expects {D16_RETIRED_WEB_COUNT} retired web files in {LAYOUT_A_TAR}, found {len(retired)}")
+            members = [m for m in members if not is_d16_retired(m.name.rstrip("/") + ("/" if m.isdir() else ""))]
+            leftover = [m.name for m in members if m.name.startswith("meshcentral-web/views/")]
+            if leftover:
+                raise DupError(f"D16 cutover leaves no view override, but the capture still holds {leftover[:5]}")
+            skipped += retired
         archive.extractall(root, members=members, filter="data")
     with tarfile.open(LAYOUT_A_TAR) as archive:
         for member in archive.getmembers():
@@ -377,7 +409,7 @@ def extract_production_capture(name, without_shadow_cores=False):
                 raise DupError(f"mtime not preserved for {member.name}: {actual} != {int(member.mtime)}")
             extracted.append(member.name)
     log(f"  extracted {len(extracted)} files from layout-a.tar with original mtimes"
-        + (f"; left out {len(skipped)} shadow-core files" if without_shadow_cores else ""))
+        + (f"; left out {len(skipped)} shadow-core and D16-retired files" if without_shadow_cores or without_d16_web else ""))
     return {"tar": str(LAYOUT_A_TAR), "tar_sha256": sha256_file(LAYOUT_A_TAR), "files": len(extracted), "skipped": skipped}
 
 
@@ -590,7 +622,7 @@ def tarball_manifest(tgz):
     return rows, sorted(bins)
 
 
-def build_layout_b(tgz=None, stage1=False):
+def build_layout_b(tgz=None, stage1=False, retire_overrides=False):
     """Layout B.
 
     tgz: install that tarball into node_modules/meshcentral with no override copies.
@@ -598,14 +630,18 @@ def build_layout_b(tgz=None, stage1=False):
     wrapper's own fork tarball (npm ci checks it against the lockfile integrity), and the data and web
     folders are built the way layout A builds them (deploy.py's map without its package roles, then the
     production capture), minus the data-dir shadow cores the cutover removes (D18), so the cores and
-    their release-dated module versions come from the package. The config uses layout A's profile."""
+    their release-dated module versions come from the package. The config uses layout A's profile.
+    retire_overrides (with stage1): B-stage2, the D16 web cutover on top, so default3 comes from the
+    package (#8104) and the r0 canary is gone; the config drops customFiles (dup_config)."""
     if stage1 == (tgz is not None):
         raise DupError("layout B needs exactly one of a tarball or the Stage 1 variant")
+    if retire_overrides and not stage1:
+        raise DupError("--retire-overrides applies to B-stage1 only")
     root = layout_root("B")
     if (root / "node_modules").exists():
         raise DupError(f"{root} already has node_modules; run `reset --layout B` first")
     if stage1:
-        record = {"variant": "stage1", "wrapper": install_wrapper("B")}
+        record = {"variant": "stage2" if retire_overrides else "stage1", "wrapper": install_wrapper("B")}
         if "wrapper_tarball" not in record["wrapper"]:
             raise DupError("B-stage1 needs a wrapper that installs the fork from a packed tarball (file:dist/...)")
         tgz = root.joinpath(*PurePosixPath(record["wrapper"]["wrapper_tarball"]["path"]).parts)
@@ -618,7 +654,13 @@ def build_layout_b(tgz=None, stage1=False):
     record["tree_equals_tarball"] = verify_package_equals_tarball(root, tgz)
     if stage1:
         record["publish"] = publish_locally("B", include_package=False)
-        record["capture"] = extract_production_capture("B", without_shadow_cores=True)
+        record["capture"] = extract_production_capture("B", without_shadow_cores=True, without_d16_web=retire_overrides)
+        if retire_overrides:
+            left = sorted(p.relative_to(root).as_posix() for p in (root / "meshcentral-web").rglob("*")
+                          if is_d16_retired(p.relative_to(root).as_posix() + ("/" if p.is_dir() else "")))
+            if left or (root / "meshcentral-web" / "views").exists():
+                raise DupError(f"B-stage2 must hold no default3 override or r0 canary script (D16): {left[:5]}")
+            record["d16_retired"] = sorted(n for n in record["capture"]["skipped"] if is_d16_retired(n))
         shadows = sorted(p.relative_to(root).as_posix() for p in (root / "meshcentral-data").rglob("*")
                          if p.is_file() and is_shadow_core(p.relative_to(root).as_posix()))
         if shadows:

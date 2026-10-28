@@ -177,6 +177,16 @@ def test_stage1_sources_and_package_roles(deploy):
     expect_error(lambda: dup_layout.wrapper_tarball_spec(wrapper), "inside the wrapper")
     expect_error(lambda: dup_layout.build_layout_b(), "exactly one")
     expect_error(lambda: dup_layout.build_layout_b(TEMP_ROOT / "x.tgz", stage1=True), "exactly one")
+    expect_error(lambda: dup_layout.build_layout_b(TEMP_ROOT / "x.tgz", retire_overrides=True), "B-stage1 only")
+    # B-stage2 (D16 web cutover): exactly the 62 default3 overrides and the 2 r0 canary scripts retire.
+    with tarfile.open(dup_layout.LAYOUT_A_TAR) as archive:
+        web = [m.name for m in archive.getmembers() if m.isfile() and m.name.startswith("meshcentral-web/")]
+    retired = [name for name in web if dup_layout.is_d16_retired(name)]
+    assert len(retired) == dup_layout.D16_RETIRED_WEB_COUNT == 64, len(retired)
+    assert sum(1 for n in retired if "/views/" in n) == 62 and sum(1 for n in retired if "r0-umair-reconnect-canary" in n) == 2
+    for kept in ("meshcentral-web/public/scripts/custom.js", "meshcentral-web/views/default.handlebars",
+                 "meshcentral-web/views/translations/default_de.handlebars", "meshcentral-web/public/scripts/r0-other.js"):
+        assert not dup_layout.is_d16_retired(kept), kept
 
 
 def test_tarball_manifest_applies_only_npm_bin_rewrite():
@@ -239,6 +249,13 @@ def test_generated_config(denylist_path):
     assert stage1["settings"]["port"] == dup_common.LAYOUTS["B"]["port"]
     assert stage1["settings"]["mongoDbName"] == dup_common.LAYOUTS["B"]["db"]
     expect_error(lambda: dup_config.generate("B", "mongodb://x", profile="C"), "profile")
+    # B-stage2 is B-stage1's config minus the keys the D16 cutover retires (only customFiles).
+    stage2, stage2_record = dup_config.generate("B", "mongodb://x", profile="A", retire_d16=True)
+    assert "customFiles" not in stage2["domains"][""] and stage2_record["retire_d16"] is True
+    assert {"key": "domains[''].customFiles", "reason": dup_config.D16_RETIRED_KEYS[("domain", "customFiles")]} in stage2_record["omitted"]
+    without = {k: v for k, v in stage1["domains"][""].items() if k != "customFiles"}
+    assert {k: v for k, v in stage2["domains"][""].items()}.keys() == without.keys()
+    assert stage2["settings"].keys() == stage1["settings"].keys()
     assert "mpsPort" not in configs["A"]["settings"] and configs["B"]["settings"]["mpsPort"] == 4434
     assert configs["A"]["settings"]["mpsPortBind"] == "127.0.0.1", "loopback is the default bind"
     hostonly, _ = dup_config.generate("A", "mongodb://x", bind="192.168.56.1")

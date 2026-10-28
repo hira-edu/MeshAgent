@@ -15,6 +15,10 @@
 // Options:
 //   --view <file>      run this page file instead (repeatable), for example production's override, to
 //                      compare; it is held to the same expectations
+//   --url <page url>   load this page from a running MeshCentral instead (repeatable; the duplicate server,
+//                      e.g. https://mc-dup-b.localhost:4432/?sitestyle=3&lang=en&minify=1), signed in with
+//   --login <file>     a JSON file holding that server's test account ("user", "password"). The page and
+//                      its scripts (custom.js included) come from the server; only the two sockets are fake.
 //   --browser <name>   chromium (Pixel 7) or webkit (iPhone 15); default both
 //   --evidence <dir>   write report.json and one Playwright trace per run
 // Requires: npm ci --prefix test && npx --prefix test playwright install chromium webkit
@@ -83,12 +87,14 @@ function classify(packets) {
     };
 }
 
-async function runOne(playwright, engine, variant, scenario, evidence) {
+async function runOne(playwright, engine, variant, scenario, evidence, login) {
     const log = [];
-    const server = await startServer(render(variant.text, variant.min), log);
-    const port = server.address().port;
+    const server = variant.url ? null : await startServer(render(variant.text, variant.min), log);
+    const pageUrl = variant.url || ('http://127.0.0.1:' + server.address().port + '/');
+    const port = Number(new URL(pageUrl).port) || 443;
     const browser = await playwright[engine].launch({ headless: true });
-    const context = await browser.newContext(Object.assign({}, playwright.devices[ENGINES[engine]]));
+    // The duplicate server uses its own self-signed certificate.
+    const context = await browser.newContext(Object.assign({}, playwright.devices[ENGINES[engine]], variant.url ? { ignoreHTTPSErrors: true } : {}));
     if (evidence) { await context.tracing.start({ screenshots: true, snapshots: true }); }
     const packets = [];
     let screenAt = null, relayUrl = null;
@@ -125,7 +131,14 @@ async function runOne(playwright, engine, variant, scenario, evidence) {
                 }
             }, 300);
         });
-        await page.goto('http://127.0.0.1:' + port + '/');
+        if (variant.url) {
+            // The server's own login form post, as the login page sends it; the session cookie stays in the context.
+            const origin = new URL(variant.url).origin;
+            await context.request.get(origin + '/');
+            const response = await context.request.post(origin + '/login', { form: { action: 'login', username: login.user, password: login.password }, maxRedirects: 0 });
+            if (![200, 302].includes(response.status())) { throw new Error('login to ' + origin + ' returned HTTP ' + response.status()); }
+        }
+        await page.goto(pageUrl);
         await page.waitForFunction(() => (typeof gotoDevice === 'function') && (typeof getNodeFromId === 'function') && (getNodeFromId('node//s2mobile') != null), null, { timeout: 30000 });
         const mobile = await page.evaluate(() => document.body.classList.contains('is-mobile'));
         // The device list's own navigation to the device's Desktop tab.
@@ -136,10 +149,10 @@ async function runOne(playwright, engine, variant, scenario, evidence) {
         const state = await page.evaluate(() => ({ desktopState: desktop ? desktop.State : null }));
         return { mobile, relayUrl, state, packets, log };
     } finally {
-        if (evidence) { await context.tracing.stop({ path: path.join(evidence, [engine, variant.name, scenario].join('-') + '.zip') }); }
+        if (evidence) { await context.tracing.stop({ path: path.join(evidence, [engine, variant.name.replace(/[^\w.-]+/g, '_'), scenario].join('-') + '.zip') }); }
         await context.close();
         await browser.close();
-        server.close();
+        if (server) { server.close(); }
     }
 }
 
@@ -175,13 +188,23 @@ async function main() {
     const browserIndex = argv.indexOf('--browser');
     const engines = browserIndex >= 0 ? [argv[browserIndex + 1]] : Object.keys(ENGINES);
     for (const engine of engines) { assert(ENGINES[engine], 'unsupported browser ' + engine); }
-    const views = [];
-    argv.forEach((arg, i) => { if (arg === '--view') { views.push(path.resolve(argv[i + 1])); } });
-    const variants = views.length
+    const views = [], urls = [];
+    argv.forEach((arg, i) => { if (arg === '--view') { views.push(path.resolve(argv[i + 1])); } if (arg === '--url') { urls.push(argv[i + 1]); } });
+    assert(!(views.length && urls.length), '--view and --url cannot be combined');
+    let login = null;
+    if (urls.length) {
+        const loginIndex = argv.indexOf('--login');
+        assert(loginIndex >= 0 && argv[loginIndex + 1], '--url needs --login <file> with the test account of that server');
+        login = JSON.parse(required(path.resolve(argv[loginIndex + 1]), 'test account for --url'));
+        assert(typeof login.user === 'string' && typeof login.password === 'string', '--login file needs "user" and "password"');
+    }
+    const variants = urls.length
+        ? urls.map(url => ({ name: new URL(url).host + new URL(url).search, file: url, url }))
+        : views.length
         ? views.map(file => ({ name: path.basename(file), file, min: /-min[._]/.test(path.basename(file)) ? '-min' : '' }))
         : [{ name: 'default3', file: path.join(root, 'views', 'default3.handlebars'), min: '' },
             { name: 'default3-min', file: path.join(root, 'views', 'default3-min.handlebars'), min: '-min' }];
-    for (const variant of variants) { variant.text = required(variant.file, 'served Modern UI page under test'); }
+    for (const variant of variants) { if (!variant.url) { variant.text = required(variant.file, 'served Modern UI page under test'); } }
     const playwright = require('playwright');
     const report = [];
     for (const engine of engines) {
@@ -189,7 +212,7 @@ async function main() {
             for (const scenario of ['no-frame', 'frame']) {
                 let entry;
                 try {
-                    const result = await runOne(playwright, engine, variant, scenario, evidence);
+                    const result = await runOne(playwright, engine, variant, scenario, evidence, login);
                     const checked = validate(scenario, result);
                     entry = { engine, device: ENGINES[engine], view: variant.file, scenario, errors: checked.errors, counts: checked.counts, relayUrl: result.relayUrl, log: result.log, packets: result.packets };
                 } catch (error) {

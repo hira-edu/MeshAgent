@@ -199,6 +199,14 @@ def expected_production_view(minify, lang):
     return "node_modules/meshcentral/views (package)"
 
 
+def package_view(minify, lang):
+    """The package file webserver.js getRenderPage/render pick when no override exists."""
+    name = "default3-min" if minify else "default3"
+    if lang != "en":
+        return f"node_modules/meshcentral/views/translations/{name}_{lang}.handlebars"
+    return f"node_modules/meshcentral/views/{name}.handlebars"
+
+
 # --------------------------------------------------------------------------- checklist
 
 def latest_start_log(layout):
@@ -289,9 +297,10 @@ def run_checklist(layout, label=None):
     results = Results(layout)
     root = layout_root(layout)
     variant = dup_layout.layout_variant(layout)
-    # Layout A and B-stage1 must both reproduce production, so both get the production comparisons.
-    production_checks = variant in ("A", "stage1")
-    label = label or {"A": "production-today", "stage1": "stage1"}.get(variant, "target")
+    # Layout A, B-stage1 and B-stage2 must reproduce production (B-stage2 except its D16 web cutover),
+    # so they get the production comparisons; B-stage2's views are checked against the package instead.
+    production_checks = variant in ("A", "stage1", "stage2")
+    label = label or {"A": "production-today", "stage1": "stage1", "stage2": "stage2"}.get(variant, "target")
     log_path, start_record = latest_start_log(layout)
     log_text = log_path.read_text(encoding="utf-8", errors="replace")
 
@@ -354,7 +363,7 @@ def run_checklist(layout, label=None):
                    "coreTextSha256": core["coreTextSha256"],
                    "modules": [{"name": m["name"], "version": m["version"]} for m in core["modules"]]}
     results.add("7a", f"served {windows_core} core composition", "INFO", composition)
-    if variant == "stage1":
+    if variant in ("stage1", "stage2"):
         # After the cutover (D18) the cores come from the package, with release-dated versions (D17);
         # the core text itself must still be production's.
         package_agents = root / "node_modules" / "meshcentral" / "agents"
@@ -435,7 +444,12 @@ def run_checklist(layout, label=None):
             served, scores = identify_view(html, candidates)
             entry = {"lang": lang, "minify": minify, "http": status, "served": served,
                      "scores": {k: (round(v, 3) if v is not None else None) for k, v in scores.items()}}
-            if production_checks:
+            if variant == "stage2":
+                # D16: no override is left, so the package's own page (with #8104) must serve.
+                entry["expected"] = package_view(bool(minify), lang)
+                if served != entry["expected"]:
+                    problems.append(f"lang={lang} minify={minify}: served {served}, expected the package view {entry['expected']}")
+            elif production_checks:
                 entry["production_expected"] = expected_production_view(bool(minify), lang)
                 if served != entry["production_expected"]:
                     problems.append(f"lang={lang} minify={minify}: served {served}, production {entry['production_expected']}")
@@ -444,8 +458,28 @@ def run_checklist(layout, label=None):
             if status != 200:
                 problems.append(f"lang={lang} minify={minify}: HTTP {status}")
             views.append(entry)
-    title = "default3 view selection = production" if production_checks else "default3 view selection"
+    title = ("default3 view selection = the package page (D16 cutover)" if variant == "stage2"
+             else "default3 view selection = production" if production_checks else "default3 view selection")
     results.add("views", title, "PASS" if not problems else "FAIL", {"views": views, "problems": problems})
+
+    if variant == "stage2":
+        # D16 web cutover: nothing of the overrides or the r0 canary is left on disk, in the config record
+        # (read from the config-differences report, not config.json) or in the served page.
+        problems = []
+        web = root / "meshcentral-web"
+        left = sorted(p.relative_to(root).as_posix() for p in web.rglob("*")
+                      if p.is_file() and dup_layout.is_d16_retired(p.relative_to(root).as_posix()))
+        if left or (web / "views").exists():
+            problems.append(f"retired web files or the views override folder remain: {left[:5]}")
+        config_record = read_json(REPORTS / f"config-{layout}-differences.json")
+        omitted = [entry["key"] for entry in config_record.get("omitted", [])]
+        if not config_record.get("retire_d16") or "domains[''].customFiles" not in omitted:
+            problems.append(f"config was not generated with the D16 cutover (omitted: {omitted})")
+        status, body, _ = request(layout, "GET", "/?sitestyle=3&lang=en&minify=0", cookies=jar)
+        if b"r0-umair-reconnect-canary" in body or b"R0UmairCanary" in body:
+            problems.append("the served page still references the r0 canary")
+        results.add("d16", "D16 web cutover: no default3 override, r0 canary script or customFiles entry; served page has no canary",
+                    "PASS" if not problems else "FAIL", problems or {"customFiles": "omitted", "views_override": "absent"})
 
     for item, title in PENDING_VM:
         results.add(item, title, "PENDING-VM", "needs the test agent on the throwaway VM")
