@@ -27,7 +27,7 @@ the preview channel always rebuilds on change):
                      hook commit is not the hook commit that built it. That hook commit is read from the trailers of the
                      MeshCentral commit that last changed agents/agent-defaults.json, which this tool writes:
 
-      Agent-Build-Release: meshagent-<commit>-<pins hash>   (agent_build_release.py release tag)
+      Agent-Build-Release: <agent_build_release.py release tag of the pins and the channel>
       Agent-Build-MeshAgent: <MeshAgent commit>
       Agent-Build-Runtime: <hook commit>
       Release-Pipeline-Run: <run URL>
@@ -36,9 +36,12 @@ the preview channel always rebuilds on change):
                      A pin without that record (for example one committed by hand) counts as built by an
                      unknown hook commit, so the next release rebuilds.
 
-Channels never mix: a release refuses pins of the other channel's variant (agent_build_release.py
-pins_channel). Production under keep-pinned stops with a named reason when MeshCentral main pins a
-preview build (for example after merging MeshCentral preview into main); otherwise that release rebuilds.
+Channels never mix. The pins name bytes only, so the channel of a pinned build is its record's
+Release-Pipeline-Channel (a pin without a pipeline record counts as production's, as committed by hand),
+and the release tag is per channel (meshagent-preview-... for preview), so a release of one channel can
+never fetch or publish the other channel's builds. A release whose MeshCentral branch pins the other
+channel's build rebuilds; production under keep-pinned stops with a named reason instead (for example
+after a merge of MeshCentral preview into main brought the preview pins).
 
 Loop guards: relock refuses to pin a second build of the same MeshAgent and hook commits for the same channel
 over its own pin commit, and refuses to re-lock over its own lock commit (a Linux pack that does not reproduce). Every
@@ -113,35 +116,27 @@ def trailers(message):
     return found
 
 
-def build_runtime(message, build, pins):
-    """The hook commit that built the pinned build, when message is the pipeline's record of these pins."""
+def pin_record(message, build, pins):
+    """(hook commit, channel) that built the pinned build, when message is the pipeline's record of these
+    pins; (None, 'production') for pins without that record (committed by hand)."""
     record = trailers(message)
-    if (record.get(TRAILER_RELEASE) == builds.release_tag(build, pins)
+    channel = record.get(TRAILER_CHANNEL, 'production')
+    if (channel in CHANNELS
+            and record.get(TRAILER_RELEASE) == builds.release_tag(build, pins, channel)
             and record.get(TRAILER_MESHAGENT) == build['commit']
             and SHA.match(record.get(TRAILER_RUNTIME, ''))):
-        return record[TRAILER_RUNTIME]
-    return None
+        return record[TRAILER_RUNTIME], channel
+    return None, 'production'
 
 
-def pins_channel(build, pins):
-    """The channel whose agent variant the pins name.
-
-    agent_build_release.py defines how a preview build is told apart (pins_channel). Before it can build
-    preview variants, every pin set is a production build.
-    """
-    reader = getattr(builds, 'pins_channel', None)
-    channel = 'production' if reader is None else reader(build, pins)
-    if channel not in CHANNELS:
-        raise ReleasePinsError(f'the pinned build names an unknown channel {channel!r}')
-    return channel
+def build_runtime(message, build, pins):
+    """The hook commit that built the pinned build, when message is the pipeline's record of these pins."""
+    return pin_record(message, build, pins)[0]
 
 
 def require_channel(channel):
     if channel not in CHANNELS:
         raise ReleasePinsError(f'CHANNEL must be one of {", ".join(CHANNELS)} (found {channel or "nothing"})')
-    if channel != 'production' and getattr(builds, 'pins_channel', None) is None:
-        raise ReleasePinsError(f'the {channel} channel needs {channel} agent builds, and agent_build_release.py '
-                               'cannot tell them apart yet (it has no pins_channel)')
 
 
 def decide(policy, build, runtime_record, meshagent_sha, runtime_sha, channel='production',
@@ -170,8 +165,8 @@ def same_build(left, right):
     return builds.canonical_pins(*left) == builds.canonical_pins(*right)
 
 
-def describe_build(build, pins):
-    return f'{build["repository"]} {build["commit"][:12]} ({builds.release_tag(build, pins)})'
+def describe_build(build, pins, channel='production'):
+    return f'{build["repository"]} {build["commit"][:12]} ({builds.release_tag(build, pins, channel)})'
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -258,15 +253,15 @@ def deployed_meshcentral(reader, coordinator, meshcentral, environment='producti
     return None, f'no successful {environment} deployment of this pipeline is recorded'
 
 
-def fleet_statement(release, deployed, deployed_note):
+def fleet_statement(release, deployed, deployed_note, channel='production'):
     """('yes' | 'no' | 'unknown', one-line notice) for promoting a release with these pins."""
     if deployed is None:
-        return 'unknown', (f'Agent build {describe_build(*release)}: {deployed_note}, so treat promotion as a fleet '
+        return 'unknown', (f'Agent build {describe_build(*release, channel)}: {deployed_note}, so treat promotion as a fleet '
                            'update; production keeps whatever it serves today only if that is this build.')
     if same_build(release, deployed):
-        return 'no', f'Agent build unchanged: {describe_build(*release)} is already deployed; no fleet update.'
-    return 'yes', (f'FLEET UPDATE: the pinned agent build changes from {describe_build(*deployed)} to '
-                   f'{describe_build(*release)}. Every connected agent is offered the new build when the '
+        return 'no', f'Agent build unchanged: {describe_build(*release, channel)} is already deployed; no fleet update.'
+    return 'yes', (f'FLEET UPDATE: the pinned agent build changes from {describe_build(*deployed, channel)} to '
+                   f'{describe_build(*release, channel)}. Every connected agent is offered the new build when the '
                    'controller policy enable_fleet_update is true.')
 
 
@@ -290,19 +285,18 @@ def plan(environ, sources, deployments):
     meshcentral = names['MESHCENTRAL_REPOSITORY']
     build, pins = pins_at(sources, meshcentral, shas['MESHCENTRAL_SHA'])
     record_commit, message = pin_record_at(sources, meshcentral, shas['MESHCENTRAL_SHA'])
-    runtime_record = build_runtime(message, build, pins)
-    pinned_channel = pins_channel(build, pins)
+    runtime_record, pinned_channel = pin_record(message, build, pins)
     action, reasons = decide(policy, build, runtime_record, shas['MESHAGENT_SHA'], shas['RUNTIME_COMPONENT_SHA'],
                              channel, pinned_channel)
     deployed_sha, note = deployed_meshcentral(deployments, names['GITHUB_REPOSITORY'], meshcentral, channel)
     deployed = pins_at(sources, meshcentral, deployed_sha) if deployed_sha else None
-    fleet, notice = fleet_statement((build, pins), deployed, note)
+    fleet, notice = fleet_statement((build, pins), deployed, note, channel)
     if action == 'rebuild':
         notice = ('This release rebuilds the agents: a new build is committed to MeshCentral and the release of '
                   'that commit states the fleet change. If the rebuild reproduces the pinned bytes: ' + notice)
     return {
         'agents': action,
-        'pinned_release': builds.release_tag(build, pins),
+        'pinned_release': builds.release_tag(build, pins, channel),
         'pinned_build': build['commit'],
         'pin_record': record_commit or '',
         'pinned_runtime': runtime_record or '',
@@ -416,7 +410,7 @@ def commit(clone, path, message):
 
 
 def pin_message(build, pins, meshagent_sha, runtime_sha, run_url, store, channel='production'):
-    tag = builds.release_tag(build, pins)
+    tag = builds.release_tag(build, pins, channel)
     files = '\n'.join(f'  {pin["filename"]} {pin["size"]} bytes, SHA384 {pin["sha384"]}' for pin in pins)
     return (f'Pin the {channel} MeshAgent build {build["commit"][:12]} for the coordinated release\n\n'
             f'agents/agent-defaults.json pins the {channel} Windows service builds of\n'
@@ -467,9 +461,7 @@ def relock(clone, pins_file, agents, expect_head, meshagent_sha, runtime_sha, ru
         current = builds.load_pins(clone / PINS_PATH)
     except builds.AgentBuildError as error:
         raise ReleasePinsError(str(error)) from None
-    if pins_channel(build, pins) != channel:
-        raise ReleasePinsError(f'refusing to pin a {pins_channel(build, pins)} agent build in a {channel} release')
-    result = {'pins_changed': False, 'lock_changed': False, 'release': builds.release_tag(build, pins)}
+    result = {'pins_changed': False, 'lock_changed': False, 'release': builds.release_tag(build, pins, channel)}
 
     if not same_build((build, pins), current):
         if build['commit'] != meshagent_sha:
@@ -484,7 +476,7 @@ def relock(clone, pins_file, agents, expect_head, meshagent_sha, runtime_sha, ru
         (clone / PINS_PATH).write_bytes(wanted_bytes)
         head = commit(clone, PINS_PATH, pin_message(build, pins, meshagent_sha, runtime_sha, run_url, store, channel))
         result['pins_changed'] = True
-        log(f'committed {PINS_PATH}: {describe_build(build, pins)} ({head})')
+        log(f'committed {PINS_PATH}: {describe_build(build, pins, channel)} ({head})')
 
     record = pack(clone, agents)
     check_pack(record, head, build, pins)
