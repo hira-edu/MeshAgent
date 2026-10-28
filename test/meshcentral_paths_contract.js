@@ -219,7 +219,7 @@ const cases = {
     upstreamPinIsComplete() {
         const pin = paths.loadReferencePin();
         assert.strictEqual(pin.name, 'meshcentral');
-        assert.strictEqual(pin.version, '1.2.5');
+        assert.strictEqual(pin.version, '1.3.1');
         assert(/^sha512-[A-Za-z0-9+/]{86}==$/.test(pin.integrity), 'pinned integrity is a sha512: ' + pin.integrity);
         assert(/^sha256:[0-9a-f]{64}$/.test(pin.treeDigest), 'pinned tree digest is a sha256: ' + pin.treeDigest);
         assert(Number.isInteger(pin.fileCount) && pin.fileCount > 0);
