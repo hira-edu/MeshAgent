@@ -144,6 +144,31 @@ function main() {
     const afterSameSizeReset = captureDesktopState(desktop);
     const parentStateAfterSameSizeReset = desktop.parent.State;
 
+    // Native touch (touchenabled 2): a contact the remote already saw go down must be released
+    // when a SCREEN resets the stream, or it stays down on the remote. A contact that was only
+    // queued (f 1, its down not sent yet) is dropped without sending anything.
+    const touchPackets = [];
+    let clearedTimer = null;
+    context.clearInterval = (id) => { clearedTimer = id; };
+    desktop.touchenabled = 2;
+    desktop.State = 3;
+    desktop.TouchArray = { 7: { x: 100, y: 200, f: 3 }, 9: { x: 5, y: 6, f: 1 } };
+    desktop.touchtimer = 'touch-timer';
+    const beforeTouchReset = sentPackets.length;
+    desktop.ProcessScreenMsg(800, 600);
+    for (const packet of sentPackets.slice(beforeTouchReset)) { if (packet.charCodeAt(1) === desktop.InputType.TOUCH) { touchPackets.push(packet); } }
+    const touchRelease = {
+        packets: touchPackets.length,
+        messageType: touchPackets.length ? touchPackets[0].charCodeAt(4) : null,
+        id: touchPackets.length ? touchPackets[0].charCodeAt(5) : null,
+        flags: touchPackets.length ? ((touchPackets[0].charCodeAt(6) << 24) | (touchPackets[0].charCodeAt(7) << 16) | (touchPackets[0].charCodeAt(8) << 8) | touchPackets[0].charCodeAt(9)) >>> 0 : null,
+        length: touchPackets.length ? touchPackets[0].length : null,
+        remainingContacts: Object.keys(desktop.TouchArray).length,
+        touchtimer: desktop.touchtimer,
+        clearedTimer
+    };
+    desktop.State = 0;
+
     mutateDesktopState(desktop);
     desktop.Stop();
     const afterStop = captureDesktopState(desktop);
@@ -161,9 +186,17 @@ function main() {
         parentStateAfterFirstScreen,
         parentStateAfterSameSizeReset,
         afterSameSizeReset,
+        touchRelease,
         afterStop,
         afterStart
     };
+
+    assert(touchRelease.packets === 1, `expected one touch packet releasing the held contact on SCREEN, got ${touchRelease.packets}`);
+    assert(touchRelease.messageType === 2 && touchRelease.id === 7, `expected a type-2 touch packet carrying contact 7, got ${JSON.stringify(touchRelease)}`);
+    assert(touchRelease.flags === 0x00040000, `expected POINTER_FLAG_UP for the held contact, got 0x${(touchRelease.flags || 0).toString(16)}`);
+    assert(touchRelease.length === 4 + 1 + 9, `expected exactly one contact in the release packet (queued contact 9 dropped), got length ${touchRelease.length}`);
+    assert(touchRelease.remainingContacts === 0, `expected no touch contact left after SCREEN, got ${touchRelease.remainingContacts}`);
+    assert(touchRelease.touchtimer === null && touchRelease.clearedTimer === 'touch-timer', `expected the touch timer to be cleared, got ${JSON.stringify(touchRelease)}`);
 
     assert(report.firstHandshakeCount === 3, `expected first screen reset handshake to send 3 packets, got ${report.firstHandshakeCount}`);
     assert(report.sameSizeHandshakeDelta === 3, `expected same-size screen reset handshake delta to be 3, got ${report.sameSizeHandshakeDelta}`);
