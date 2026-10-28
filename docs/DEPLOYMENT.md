@@ -66,6 +66,15 @@ dispatch jobs request write access only to hook. No personal access token
 is needed for cross-repository dispatch. PR builds do not receive App, provisioning, signing, or live runtime-test credentials;
 private sibling builds require a trusted branch run.
 
+One exception reads, never writes: MeshAgent's `contracts.yml` mints a
+short-lived token with Contents read on hook only, on every push and pull
+request, to fetch the pinned agent builds the MeshCentral package carries (see
+[Fork agent binaries in the MeshCentral package](#fork-agent-binaries-in-the-meshcentral-package)).
+It uses the same `RELEASE_APP_ID` variable and `RELEASE_APP_PRIVATE_KEY` secret.
+Runs that GitHub gives no repository secrets, such as pull requests from forks
+and Dependabot, fail at "Check the agent-build store credential" and name the
+missing setting.
+
 Configure the private hook repository:
 
 | Setting | Location | Purpose |
@@ -235,6 +244,37 @@ node deploy/scripts/pack.js --agents <folder with the three exes>
 `pack.js` without `--agents` refuses a manifest whose builds are not in the
 package. The deploy lockfile pins the resulting tarball, so changing a build
 needs new pins, a repack and a new lock commit.
+
+The pinned builds are stored as release assets of the private hook repository,
+never in git. `tools/deployment/agent_build_release.py` names the release from
+the pins alone, `meshagent-<build commit>-<16 hex>` (the hex is the start of the
+SHA256 of the canonical pins), so each pinned build has exactly one release and
+a rebuild of the same commit gets its own. The release holds each pinned file
+under its pinned name plus `meshcentral-agent-defaults.json`. The tool reads its
+token from `AGENT_BUILDS_TOKEN` and never prints it.
+
+- **Publish.** The coordinated release publishes every build that passes
+  `release_bundle_gate.js` (hook's "Publish the verified agent builds for
+  MeshCentral pinning", after the gate, with hook's own workflow token). A build
+  made elsewhere, such as a local build, is published with a token that can
+  write hook's releases:
+
+  ```powershell
+  python tools/deployment/agent_build_release.py publish --store hira-edu/hook `
+    --pins <meshcentral-agent-defaults.json> --directory <folder with the pinned files>
+  ```
+
+  It verifies every file against the pins first, uploads to a draft, publishes
+  it, then fetches it back and verifies it. A failed upload deletes the draft. A
+  release that already exists for the same pins is verified, never replaced.
+  Pin a build in MeshCentral only from its published release's
+  `meshcentral-agent-defaults.json`, so every pin can be fetched.
+- **Fetch.** `python tools/deployment/agent_build_release.py fetch --store hira-edu/hook
+  --pins <MeshCentral>/agents/agent-defaults.json --output <new folder>` writes a
+  file only after its size and SHA384 match the pin. A missing release or asset,
+  an asset the pins do not name, or any mismatch fails and leaves no fetched
+  file. Run `check-releases.js --directory` and `pack.js --agents` on that
+  folder, as above.
 
 ### Shadow-copy check
 
