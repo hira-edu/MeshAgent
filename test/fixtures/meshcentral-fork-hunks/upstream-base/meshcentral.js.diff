@@ -9,7 +9,42 @@
                      obj.pendingProxyCertificatesRequests--;
                      if (cert != null) {
                          // Hash the entire cert
-@@ -2999,7 +2999,11 @@
+@@ -2926,6 +2926,26 @@
+         return r;
+     }
+ 
++    // Agent core module versions are release dates read from agents/module-versions.json, which the
++    // fork's pack step writes (deploy/scripts/module-versions.js). An agent replaces a module only when
++    // the version is newer than its own copy, so a version must never come from file or install times.
++    // A missing manifest, or a served module it does not list, stops the server and names the module.
++    const moduleVersionPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
++    function moduleVersionFailure(message) { console.error('ERROR: agent core module versions: ' + message); process.exit(1); }
++    function readModuleVersions() {
++        const manifestPath = obj.path.join(__dirname, 'agents', 'module-versions.json');
++        var manifest = null;
++        try { manifest = JSON.parse(obj.fs.readFileSync(manifestPath, 'utf8')); } catch (ex) { moduleVersionFailure('cannot read ' + manifestPath + ': ' + ex.message); }
++        if ((manifest == null) || (typeof manifest.modules != 'object') || (manifest.modules == null)) { moduleVersionFailure(manifestPath + ' has no "modules" object'); }
++        return manifest.modules;
++    }
++    function moduleVersionOf(moduleVersions, moduleName, modulePath) {
++        const key = obj.path.relative(obj.path.join(__dirname, 'agents'), modulePath).split(obj.path.sep).join('/');
++        const version = Object.prototype.hasOwnProperty.call(moduleVersions, key) ? moduleVersions[key] : null;
++        if ((typeof version != 'string') || !moduleVersionPattern.test(version)) { moduleVersionFailure('module "' + moduleName + '" (' + modulePath + ') has no release version in agents/module-versions.json'); }
++        return version;
++    }
++
+     // Update the default mesh core
+     obj.updateMeshCore = function (func, dumpToFile) {
+         // Figure out where meshcore.js is
+@@ -2982,6 +3002,7 @@
+             if (obj.args.minifycore !== false) { try { moduleDirPath = obj.path.join(meshcorePath, 'modules_meshcore_min'); modulesDir = obj.fs.readdirSync(moduleDirPath); } catch (ex) { } } // Favor minified modules if present.
+             if (modulesDir == null) { try { moduleDirPath = obj.path.join(meshcorePath, 'modules_meshcore'); modulesDir = obj.fs.readdirSync(moduleDirPath); } catch (ex) { } } // Use non-minified mofules.
+             if (modulesDir != null) {
++                const moduleVersions = readModuleVersions();
+                 for (var i in modulesDir) {
+                     if (modulesDir[i].toLowerCase().endsWith('.json')) {
+                         // We are adding a JSON file to the meshcores
+@@ -2999,7 +3020,11 @@
                          // We are adding a JS file to the meshcores
                          var moduleName = modulesDir[i].substring(0, modulesDir[i].length - 3);
                          if (moduleName.endsWith('.min')) { moduleName = moduleName.substring(0, moduleName.length - 4); } // Remove the ".min" for ".min.js" files.
@@ -17,7 +52,7 @@
 +                        const preferredModule = moduleName + (obj.args.minifycore === false ? '.js' : '.min.js');
 +                        if (modulesDir[i] !== preferredModule && modulesDir.indexOf(preferredModule) >= 0) { continue; }
 +                        const modulePath = obj.path.join(moduleDirPath, modulesDir[i]);
-+                        const moduleVersion = obj.fs.statSync(modulePath).mtime.toISOString();
++                        const moduleVersion = moduleVersionOf(moduleVersions, moduleName, modulePath);
 +                        const moduleData = ['try { addModule("', moduleName, '", "', obj.escapeCodeString(obj.fs.readFileSync(modulePath).toString('binary')), '", "', moduleVersion, '"); addedModules.push("', moduleName, '"); } catch (ex) { }\r\n'];
  
                          // Merge this module

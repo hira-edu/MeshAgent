@@ -12,11 +12,6 @@
       "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
       "reviewed": "Not reviewed hunk by hunk yet. Fork areas: native file actions, clipboard rewrite, service/process error reporting, Windows run commands via MeshConsoleBridgeW, win-terminal terminals, upload/download cleanup, desktop audio protocol 20, self-update hardening. Lacks upstream registry tunnel/consent and module split (#8072, #7690), Windows updates, software/printers (#7939), linux-info hang (#7904) and more."
     },
-    "agents/meshcore.min.js": {
-      "state": "generated",
-      "source": "agents/meshcore.js",
-      "reviewed": "Fork copy of meshcore.js (no minifier yet), with the known C1 drift; replaces upstream's minified core."
-    },
     "agents/modules_meshcore/clipboard.js": {
       "state": "fork-only",
       "reviewed": "Fork agent module served in the cores (deploy.py core map; production data-dir copy)."
@@ -24,6 +19,10 @@
     "agents/modules_meshcore/desktop-audio.js": {
       "state": "fork-only",
       "reviewed": "Fork agent module served in the cores (deploy.py core map; production data-dir copy)."
+    },
+    "agents/modules_meshcore/monitor-border.js": {
+      "state": "enforced",
+      "reviewed": "D22 (option b): MeshAgent's own modules/monitor-border.js (git blob, LF, MeshAgent 2d9fc186) replaces upstream's copy (fork 72a7390fa); embedded by the agent (dated 2026-02-14) and equal to that copy up to line endings; the constructors call this.Start(), and the copyright year differs. MeshAgent test/meshcentral_core_module_parity_contract.js keeps it equal to modules/."
     },
     "agents/modules_meshcore/process-manager.js": {
       "state": "fork-only",
@@ -41,6 +40,22 @@
       "state": "fork-only",
       "reviewed": "Fork agent module served in the cores (deploy.py core map; production data-dir copy)."
     },
+    "agents/modules_meshcore/util-agentlog.js": {
+      "state": "enforced",
+      "reviewed": "D22 (option b): MeshAgent's own modules/util-agentlog.js (git blob, LF, MeshAgent 2d9fc186) replaces upstream's copy (fork 72a7390fa); embedded by the agent (undated) and equal to that copy up to line endings; fork change (2026-10-03): a strict timestamp regex and correct 12 AM/PM handling, plus comments. MeshAgent test/meshcentral_core_module_parity_contract.js keeps it equal to modules/."
+    },
+    "agents/modules_meshcore/wifi-scanner.js": {
+      "state": "enforced",
+      "reviewed": "D22 (option b): MeshAgent's own modules/wifi-scanner.js (git blob, LF, MeshAgent 2d9fc186) replaces upstream's copy (fork 72a7390fa); not embedded; deliberate fork change (2026-06-28): the Windows scan throws instead of starting upstream's ScriptContainer child, plus the copyright year. MeshAgent test/meshcentral_core_module_parity_contract.js keeps it equal to modules/."
+    },
+    "agents/modules_meshcore/win-console.js": {
+      "state": "enforced",
+      "reviewed": "D22 (option b): MeshAgent's own modules/win-console.js (git blob, LF, MeshAgent 2d9fc186) replaces upstream's copy (fork 72a7390fa); embedded by the agent (undated) and equal to that copy up to line endings; the differences from upstream are comments, layout and the copyright year. MeshAgent test/meshcentral_core_module_parity_contract.js keeps it equal to modules/."
+    },
+    "agents/modules_meshcore/win-deskutils.js": {
+      "state": "enforced",
+      "reviewed": "D22 (option b): MeshAgent's own modules/win-deskutils.js (git blob, LF, MeshAgent 2d9fc186) replaces upstream's copy (fork 72a7390fa); embedded by the agent (undated) and equal to that copy up to line endings; fork rewrite (2026-06): session dispatch disabled until an approved rundll32 export exists, plus idle-time helpers. MeshAgent test/meshcentral_core_module_parity_contract.js keeps it equal to modules/."
+    },
     "agents/modules_meshcore/win-registry.js": {
       "state": "fork-only",
       "reviewed": "Fork agent module served in the cores (deploy.py core map; production data-dir copy)."
@@ -56,84 +71,6 @@
     "agents/modules_meshcore/win-virtual-terminal.js": {
       "state": "enforced",
       "reviewed": "Fork replaces the upstream PseudoConsole implementation with module.exports = require('win-terminal') and a new copyright line. Upstream did not change the file between 587973e8c and 1.2.5."
-    },
-    "agents/modules_meshcore_min/clipboard.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/clipboard.min.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/desktop-audio.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/desktop-audio.min.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/process-manager.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/process-manager.min.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/service-manager.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/service-manager.min.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/umhctl.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/user-sessions.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/user-sessions.min.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/win-registry.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/win-registry.min.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/win-system-paths.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/win-system-paths.min.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/win-terminal.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/win-terminal.min.js": {
-      "state": "generated",
-      "source": "agents/modules_meshcore/win-terminal.js",
-      "reviewed": "Byte copy of the fork win-terminal.js (no module minifier yet); replaces upstream's minified module."
-    },
-    "agents/modules_meshcore_min/win-virtual-terminal.js": {
-      "state": "fork-only",
-      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
-    },
-    "agents/modules_meshcore_min/win-virtual-terminal.min.js": {
-      "state": "generated",
-      "source": "agents/modules_meshcore/win-virtual-terminal.js",
-      "reviewed": "Byte copy of the fork win-virtual-terminal.js (no module minifier yet); replaces upstream's minified module."
     },
     "agents/recoverycore.js": {
       "state": "enforced",
@@ -151,7 +88,7 @@
     },
     "meshcentral.js": {
       "state": "enforced",
-      "reviewed": "Production's loader (sha256 68c45084), formerly patched at deploy time by deploy.py. Two changes only: core modules are added with their file mtime as the module version (version_meshcentral_module_loader), and only the preferred .js or .min.js copy of a module is sent; the proxy certificate is fetched with the certurl's own HTTPS hostname as SNI (align_proxy_certificate_sni)."
+      "reviewed": "Production's loader (sha256 68c45084, formerly patched at deploy time by deploy.py) plus S1.6. Three changes: core modules are added with a release version read from agents/module-versions.json, which pack.js writes from the last commit that changed packaged content (a missing manifest or module entry stops the server, naming the module; S1.6 1b34cff43 replaced the file-mtime version); only the preferred .js or .min.js copy of a module is sent; the proxy certificate is fetched with the certurl's own HTTPS hostname as SNI (align_proxy_certificate_sni)."
     },
     "meshctrl.js": {
       "state": "pending-rebase",
@@ -242,7 +179,27 @@
     "agents/MeshServiceARM64.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
     "agents/agents-feb2026/MeshService.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
     "agents/agents-feb2026/MeshService64.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
-    "agents/agents-feb2026/MeshServiceARM64.pdb": "Windows debug symbols: the fork ships no .pdb (D3)."
+    "agents/agents-feb2026/MeshServiceARM64.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
+    "agents/meshcore.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/amt-apfclient.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/amt-lme.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/amt-manage.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/amt-mei.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/coretranslations.json": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/linux-dhcp.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/monitor-border.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/smbios.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/sysinfo.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/util-agentlog.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/wifi-scanner-windows.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/wifi-scanner.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/win-console.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/win-deskutils.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/win-info.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/win-securitycenter.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/win-terminal.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/win-virtual-terminal.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "agents/modules_meshcore_min/win-volumes.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore."
   },
   "excluded": {
     "public/scripts/custom.js": "Out of scope by operator decision (SSOT rule 8): never opened by this contract. The package copy is npm's empty stub; the served custom.js is deploy/meshcentral-web/public/scripts/custom.js."
