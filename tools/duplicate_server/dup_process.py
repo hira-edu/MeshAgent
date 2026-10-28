@@ -79,15 +79,22 @@ def port_open(port, host="127.0.0.1"):
         return sock.connect_ex((host, port)) == 0
 
 
-def wait_for_port(port, timeout, alive=None, what="process", host="127.0.0.1"):
+def log_tail(log_path, lines=20):
+    if log_path is None or not Path(log_path).is_file():
+        return ""
+    text = Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines()
+    return "\n  last log lines:\n    " + "\n    ".join(text[-lines:])
+
+
+def wait_for_port(port, timeout, alive=None, what="process", host="127.0.0.1", log_path=None):
     deadline = time.time() + timeout
     while time.time() < deadline:
         if port_open(port, host):
             return
         if alive is not None and not alive():
-            raise DupError(f"{what} exited before listening on {port}")
+            raise DupError(f"{what} exited before listening on {port}{log_tail(log_path)}")
         time.sleep(1)
-    raise DupError(f"{what} did not listen on {host}:{port} within {timeout}s")
+    raise DupError(f"{what} did not listen on {host}:{port} within {timeout}s{log_tail(log_path)}")
 
 
 def pid_alive(pid):

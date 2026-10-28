@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dup_common import (
-    DENYLIST_PATH, EXTRA_VALUES_PATH, LAYOUTS, PRODUCTION_SUMMARY, REPORTS, SSOT_ROOT, TOOL_DIR, WORKTREE_ROOT,
+    DENYLIST_PATH, EXTRA_VALUES_PATH, LAYOUTS, MONGODUMP_EXE, PRODUCTION_SUMMARY, REPORTS, SSOT_ROOT, TOOL_DIR, WORKTREE_ROOT,
     DupError, layout_root, log, read_json, write_json,
 )
 
@@ -60,11 +60,19 @@ def load_flags():
             raise DupError(f"production_flags.json {section} keys differ from summary.txt: "
                            f"missing {sorted(set(expected) - set(listed))}, extra {sorted(set(listed) - set(expected))}")
         for key, spec in flags[section].items():
+            if "layouts" in spec and "reason" not in spec:
+                raise DupError(f"production_flags.json {section}.{key} limits its layouts without a reason")
             if len(SPEC_KINDS & set(spec)) != 1:
                 raise DupError(f"production_flags.json {section}.{key} must have exactly one of {sorted(SPEC_KINDS)}")
             for name in ([spec["evidence"]] if "evidence" in spec else []) + spec.get("evidence_keys", []):
                 if name not in extra:
                     raise DupError(f"production_flags.json {section}.{key} needs {name!r}, missing from {EXTRA_VALUES_PATH}")
+    for section, entries in flags.get("after_inventory", {}).items():
+        if section not in ("settings", "domain"):
+            raise DupError(f"production_flags.json after_inventory has an unknown section {section!r}")
+        for key, spec in entries.items():
+            if set(spec) != {"value", "source"}:
+                raise DupError(f"production_flags.json after_inventory {section}.{key} needs exactly a value and its source")
     return flags
 
 
@@ -110,7 +118,8 @@ def dup_value(kind, key, layout, spec, context):
     if kind == "false":
         return False
     if kind == "autobackup":
-        value = {"backuppath": str(root / "meshcentral-backups")}
+        # Production runs mongodump from PATH; the duplicate changes no PATH, so it names the pinned binary.
+        value = {"backuppath": str(root / "meshcentral-backups"), "mongodumppath": str(MONGODUMP_EXE)}
         value.update(spec["known"])
         for name in spec.get("evidence_keys", []):
             value[name] = context["extra"][name]
@@ -122,45 +131,36 @@ def dup_value(kind, key, layout, spec, context):
     raise DupError(f"Unknown dup kind {kind!r} for {key}")
 
 
-# Config keys the D16 cutover retires (B-stage2): customFiles holds only the r0 canary entry.
-D16_RETIRED_KEYS = {("domain", "customFiles"): "D16 cutover: the r0 canary customFiles entry is retired with its script"}
-
-
-def generate(layout, mongodb_uri, bind="127.0.0.1", profile=None, retire_d16=False):
+def generate(layout, mongodb_uri, bind="127.0.0.1"):
     """Build the config dict and a record of every key that differs from production.
 
-    profile selects which layout's production values apply (the "layouts" lists in
-    production_flags.json); it defaults to the layout. B-stage1 uses profile "A": production's
-    config, including customFiles, on layout B's ports, database and fresh secrets. retire_d16
-    (B-stage2) drops the keys the D16 cutover retires (D16_RETIRED_KEYS)."""
-    profile = profile or layout
-    if profile not in LAYOUTS:
-        raise DupError(f"Unknown config profile {profile!r}")
+    Values marked with "layouts" in production_flags.json apply only to those layouts (layout B, the
+    fork after the cutover, leaves out the r0 canary customFiles entry, D16). "after_inventory" holds
+    production settings applied after the 2026-10-27 inventory (the D6 safeguards); both layouts get them."""
+    if layout not in LAYOUTS:
+        raise DupError(f"Unknown layout {layout!r}")
     flags = load_flags()
     template = json.loads(template_path().read_text(encoding="utf-8"))
     record = {"template": str(template_path()), "evidence": str(EXTRA_VALUES_PATH), "bind": validate_bind(bind),
-              "profile": profile, "retire_d16": retire_d16,
-              "dropped_template_keys": [], "from_evidence": [], "substituted": [], "omitted": [], "duplicate_only": []}
+              "dropped_template_keys": [], "from_evidence": [], "after_inventory": [], "substituted": [], "omitted": [],
+              "duplicate_only": []}
     context = {"mongodb": mongodb_uri, "bind": validate_bind(bind), "extra": load_extra_values()}
 
-    def build(section_template, section_flags, label, section):
+    def build(section_template, section_flags, label):
         result = {}
         production_lower = {key.lower(): key for key in section_flags}
         for key in section_template:
             if key.lower() not in production_lower:
                 record["dropped_template_keys"].append(f"{label}.{key}")
         for key, spec in section_flags.items():
-            if retire_d16 and (section, key) in D16_RETIRED_KEYS:
-                record["omitted"].append({"key": f"{label}.{key}", "reason": D16_RETIRED_KEYS[(section, key)]})
+            if layout not in spec.get("layouts", list(LAYOUTS)):
+                record["omitted"].append({"key": f"{label}.{key}", "reason": spec["reason"]})
                 continue
             if "value" in spec:
                 result[key] = spec["value"]
             elif "omit" in spec:
                 record["omitted"].append({"key": f"{label}.{key}", "reason": spec["omit"]})
             elif "evidence" in spec:
-                if profile not in spec.get("layouts", list(LAYOUTS)):
-                    record["omitted"].append({"key": f"{label}.{key}", "reason": spec["reason"]})
-                    continue
                 result[key] = context["extra"][spec["evidence"]]
                 record["from_evidence"].append(f"{label}.{key}")
             else:
@@ -172,12 +172,14 @@ def generate(layout, mongodb_uri, bind="127.0.0.1", profile=None, retire_d16=Fal
                 record["substituted"].append(entry)
         return result
 
-    settings = build(template.get("settings", {}), flags["settings"], "settings", "settings")
-    domain = build(template.get("domains", {}).get("", {}), flags["domain"], "domains['']", "domain")
-    if retire_d16:
-        for section, key in D16_RETIRED_KEYS:
-            if key not in flags[section]:
-                raise DupError(f"D16 cutover retires {section}.{key}, which production_flags.json no longer lists")
+    settings = build(template.get("settings", {}), flags["settings"], "settings")
+    domain = build(template.get("domains", {}).get("", {}), flags["domain"], "domains['']")
+    for section, label, target in (("settings", "settings", settings), ("domain", "domains['']", domain)):
+        for key, spec in flags["after_inventory"].get(section, {}).items():
+            if key.lower() in {k.lower() for k in target}:
+                raise DupError(f"production_flags.json after_inventory {section}.{key} is already set from the inventory")
+            target[key] = spec["value"]
+            record["after_inventory"].append({"key": f"{label}.{key}", "value": spec["value"], "source": spec["source"]})
     settings["mongoDbName"] = LAYOUTS[layout]["db"]
     record["duplicate_only"].append({"key": "settings.mongoDbName", "value": LAYOUTS[layout]["db"],
                                      "reason": flags["duplicate_only_settings"]["mongoDbName"]})
@@ -189,8 +191,8 @@ def generate(layout, mongodb_uri, bind="127.0.0.1", profile=None, retire_d16=Fal
     return config, record
 
 
-def write_config(layout, mongodb_uri, bind="127.0.0.1", profile=None, retire_d16=False):
-    config, record = generate(layout, mongodb_uri, bind, profile, retire_d16)
+def write_config(layout, mongodb_uri, bind="127.0.0.1"):
+    config, record = generate(layout, mongodb_uri, bind)
     text = json.dumps(config, indent=2) + "\n"
     hits = scan_text(text, load_denylist())
     if hits:

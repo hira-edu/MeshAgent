@@ -61,6 +61,10 @@ const report = {
     webViewsOverridePath: obj.webViewsOverridePath || null,
     webPublicOverridePath: obj.webPublicOverridePath || null,
     args: { selfupdate: obj.args.selfupdate, minifycore: obj.args.minifycore, minify: obj.config.domains[''].minify, plugins: obj.args.plugins || null },
+    // D6: obj.StartEx sets serverSelfWriteAllowed = false when <package>/daemon exists (meshcentral.js
+    // "if (obj.fs.existsSync(obj.path.join(__dirname, 'daemon')))"), and meshuser.js hides the admin
+    // update when domain.myserver.upgrade is not true.
+    selfUpdate: { daemonMarker: fs.existsSync(path.join(packageDir, 'daemon')), myserver: obj.config.domains[''].myserver === undefined ? null : obj.config.domains[''].myserver },
 };
 
 function decodeCore(buffer) {
@@ -140,14 +144,31 @@ req('./db.js').CreateDB(obj, function (db) {
                         localname: arch.localname, core: arch.core, unsigned: arch.unsigned === true,
                         path: bin.path, relativePath: path.relative(layoutRoot, bin.path).split(path.sep).join('/'),
                         size: fs.statSync(bin.path).size, sha256: sha256File(bin.path),
+                        sha384: crypto.createHash('sha384').update(fs.readFileSync(bin.path)).digest('hex'),
                     };
                 }
                 process.stdout.write(JSON.stringify(report, null, 2) + '\n');
                 process.exit(0);
             };
-            // updateMeshAgentsTable calls back once every binary is loaded (meshcentral.js:3598).
-            obj.updateMeshAgentsTable(domain, done);
-            setTimeout(function () { if (!reported) { fail('updateMeshAgentsTable did not finish within 120s'); } }, 120000).unref();
+            const loadTable = function () {
+                // updateMeshAgentsTable calls back once every binary is loaded.
+                obj.updateMeshAgentsTable(domain, done);
+                setTimeout(function () { if (!reported) { fail('updateMeshAgentsTable did not finish within 120s'); } }, 120000).unref();
+            };
+            // Fork 1.3.1: the default agent binaries are the builds pinned in agents/agent-defaults.json, verified
+            // before the table loads (meshcentral.js StartEx: CreateAgentDefaults, await prepare(), any error stops
+            // the server, then start()). Mirrored here so the table reads exactly the files the server serves.
+            if (!fs.existsSync(path.join(packageDir, 'agentbuilds.js'))) { report.agentDefaults = null; loadTable(); return; }
+            obj.agentDefaults = req('./agentbuilds').CreateAgentDefaults(obj);
+            obj.agentDefaults.prepare().then(function () {
+                const status = obj.agentDefaults.status();
+                report.agentDefaults = { manifest: status.manifest, build: status.build, errors: status.errors,
+                    files: status.files.map(function (f) { return { filename: f.filename, size: f.size, sha384: f.sha384, status: f.status, error: f.error || null }; }) };
+                // The server stops on any of these errors; report them instead of a table it would never load.
+                if (status.errors.length > 0) { report.agentBinaries = null; process.stdout.write(JSON.stringify(report, null, 2) + '\n'); process.exit(0); }
+                obj.agentDefaults.start();
+                loadTable();
+            }, function (ex) { fail('agent defaults prepare failed: ' + ((ex && ex.message) || ex)); });
         });
     });
 });

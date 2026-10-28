@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Local duplicate of the production MeshCentral server (work package A1).
 
-    python tools/duplicate_server/dupserver.py setup [--bind 127.0.0.1]   # installs + layout A + config + users
+    python tools/duplicate_server/dupserver.py setup [--bind 127.0.0.1]   # runtimes + layout A + config + users
+    python tools/duplicate_server/dupserver.py layout-b [--agents <dir> | --tarball <tgz>] [--bind 127.0.0.1]
     python tools/duplicate_server/dupserver.py start [--layout A|B]
     python tools/duplicate_server/dupserver.py checklist [--layout A|B]
+    python tools/duplicate_server/dupserver.py pin-check                   # layout B refuses to start on a changed agent pin
     python tools/duplicate_server/dupserver.py status
     python tools/duplicate_server/dupserver.py stop [--layout A|B|all]
-    python tools/duplicate_server/dupserver.py layout-b (--tarball <tgz> | --standin | --stage1 [--retire-overrides]) [--bind 127.0.0.1]
     python tools/duplicate_server/dupserver.py reset [--layout A|B|all]
     python tools/duplicate_server/dupserver.py teardown
 
@@ -24,8 +25,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dup_common import (  # noqa: E402
-    DUP_ROOT, LAYOUTS, MONGO_DATA, NODE_EXE, REPORTS, SECRETS, DupError, create_root, ensure_windows, layout_reports, layout_root,
-    log, node_env, read_json, require_root_marker, run, safe_root_for_delete, write_json,
+    DUP_ROOT, LAYOUTS, MONGO_DATA, REPORTS, SECRETS, DupError, create_root, ensure_windows, layout_node, layout_reports,
+    layout_root, log, node_env, node_runtimes, read_json, require_root_marker, run, safe_root_for_delete, write_json,
 )
 import dup_checklist  # noqa: E402
 import dup_config  # noqa: E402
@@ -41,7 +42,7 @@ def selected(layout_arg, default):
 
 
 def mc_command(layout, *extra):
-    return [NODE_EXE, layout_root(layout) / "node_modules" / "meshcentral" / "meshcentral.js", *extra]
+    return [layout_node(layout).exe, layout_root(layout) / "node_modules" / "meshcentral" / "meshcentral.js", *extra]
 
 
 def create_web_admin(layout):
@@ -51,33 +52,40 @@ def create_web_admin(layout):
         return read_json(path)
     creds = {"user": "dupadmin", "password": pysecrets.token_urlsafe(18), "email": "dupadmin@dup.localhost"}
     root = layout_root(layout)
+    env = node_env(layout_node(layout))
     run(mc_command(layout, "--createaccount", creds["user"], "--pass", creds["password"], "--email", creds["email"]),
-        cwd=root, env=node_env(), timeout=300, capture=True)
-    run(mc_command(layout, "--adminaccount", creds["user"]), cwd=root, env=node_env(), timeout=300, capture=True)
+        cwd=root, env=env, timeout=300, capture=True)
+    run(mc_command(layout, "--adminaccount", creds["user"]), cwd=root, env=env, timeout=300, capture=True)
     write_json(path, creds)
     log(f"  created site admin {creds['user']} for layout {layout} (credentials in {path})")
     return creds
 
 
-def configure_layout(layout, bind, profile=None, retire_d16=False):
-    """bind is the address MeshCentral listens on (portBind, mpsPortBind). mongod stays on 127.0.0.1.
-    profile picks which layout's production config values apply (B-stage1 uses A's); retire_d16
-    (B-stage2) drops the config keys the D16 cutover retires."""
+def configure_layout(layout, bind):
+    """bind is the address MeshCentral listens on (portBind, mpsPortBind). mongod stays on 127.0.0.1."""
     dup_config.validate_bind(bind)
     dup_mongo.start()
     dup_mongo.initialize_users()
-    dup_config.write_config(layout, dup_mongo.connection_uri(layout), bind, profile, retire_d16)
+    dup_config.write_config(layout, dup_mongo.connection_uri(layout), bind)
     create_web_admin(layout)
+
+
+def install_runtimes(runtimes):
+    """Checksum-verified Node runtimes, MongoDB and mongodump, recorded in reports/installs.json."""
+    path = REPORTS / "installs.json"
+    installs = {item["name"] + "-" + item["version"]: item for item in (read_json(path) if path.is_file() else [])}
+    for item in ([dup_install.install_node(runtime) for runtime in runtimes]
+                 + [dup_install.install_mongo(), dup_install.install_mongo_tools()]):
+        installs[item["name"] + "-" + item["version"]] = item
+        log(f"  {item['name']} {item['version']} sha256 {item['sha256']} (checked against {item['checksum_source']})")
+    write_json(path, sorted(installs.values(), key=lambda item: (item["name"], item["version"])))
 
 
 def cmd_setup(args):
     ensure_windows()
     dup_config.validate_bind(args.bind)
     create_root()
-    installs = [dup_install.install_node(), dup_install.install_mongo()]
-    write_json(REPORTS / "installs.json", installs)
-    for item in installs:
-        log(f"  {item['name']} {item['version']} sha256 {item['sha256']} (checked against {item['checksum_source']})")
+    install_runtimes(node_runtimes())
     dup_config.build_denylist()
     dup_layout.build_layout_a()
     configure_layout("A", args.bind)
@@ -87,14 +95,9 @@ def cmd_setup(args):
 def cmd_layout_b(args):
     require_root_marker()
     dup_config.validate_bind(args.bind)
-    if args.retire_overrides and not args.stage1:
-        raise DupError("--retire-overrides needs --stage1")
-    if args.stage1:
-        dup_layout.build_layout_b(stage1=True, retire_overrides=args.retire_overrides)
-        configure_layout("B", args.bind, profile="A", retire_d16=args.retire_overrides)
-    else:
-        dup_layout.build_layout_b(dup_layout.upstream_tarball() if args.standin else Path(args.tarball))
-        configure_layout("B", args.bind)
+    install_runtimes([layout_node("B")])
+    dup_layout.build_layout_b(tarball=args.tarball, agents_dir=args.agents)
+    configure_layout("B", args.bind)
     log("layout B ready: run `start --layout B` then `checklist --layout B`")
 
 
@@ -117,11 +120,16 @@ def cmd_start(args):
         dup_process.assert_port_free(port, f"layout {layout}", host)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         log_path = root / "logs" / f"meshcentral-{stamp}.log"
-        # The production systemd drop-in: NODE_OPTIONS=--require /opt/meshcentral/bin/harden-image-size.js
-        env = node_env({"NODE_OPTIONS": "--require " + str(root / "bin" / "harden-image-size.js")})
+        # Layout A: production's systemd drop-in, NODE_OPTIONS=--require /opt/meshcentral/bin/harden-image-size.js.
+        # Layout B: no preload; the fork retires image-size with its preload (D4, DEP-21).
+        preload = dup_layout.preload_path(layout)
+        runtime = layout_node(layout)
+        env = node_env(runtime, {"NODE_OPTIONS": "--require " + str(preload)} if preload else None)
         pid = dup_process.spawn(f"meshcentral-{layout}", mc_command(layout), cwd=root, env=env, log_path=log_path)
-        dup_process.wait_for_port(port, 300, alive=lambda: dup_process.pid_alive(pid), what=f"layout {layout}", host=host)
+        dup_process.wait_for_port(port, 300, alive=lambda: dup_process.pid_alive(pid), what=f"layout {layout}", host=host,
+                                  log_path=log_path)
         write_json(REPORTS / f"start-{layout}.json", {"pid": pid, "log": str(log_path), "port": port, "bind": host,
+                                                      "node": runtime.version, "preload": str(preload) if preload else None,
                                                       "started": datetime.now(timezone.utc).isoformat()})
         log(f"  layout {layout} pid {pid} on https://{host}:{port} ({LAYOUTS[layout]['cert']}); log {log_path}")
 
@@ -176,6 +184,16 @@ def cmd_checklist(args):
         log(f"layout {layout}: {counts}")
 
 
+def cmd_pin_check(args):
+    require_root_marker()
+    if is_running("B"):
+        raise DupError("layout B is running; stop it first (the check starts it with a changed agent binary)")
+    dup_mongo.start()
+    report = dup_checklist.run_pin_failure_check("B", mc_command("B"))
+    if report["status"] != "PASS":
+        raise DupError(f"pin check failed: {report['detail']}")
+
+
 def cmd_reset(args):
     """Drop the duplicate databases and delete the layout trees (data dirs, certs, config). Keep tools,
     downloads, mongod and its users. Rebuild with setup (A) or layout-b (B)."""
@@ -184,8 +202,10 @@ def cmd_reset(args):
     for layout in layouts:
         stop_layout(layout)
     dup_mongo.start()
+    # Every database first: the MongoDB driver used for the drops lives in a layout tree deleted below.
     for layout in layouts:
         dup_mongo.drop_database(layout)
+    for layout in layouts:
         root = layout_root(layout)
         if root.exists():
             shutil.rmtree(root)
@@ -215,25 +235,23 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     bind_help = "address MeshCentral listens on: 127.0.0.1 (default) or a host-only/private address for the VM"
     sub.add_parser("setup").add_argument("--bind", default="127.0.0.1", help=bind_help)
-    b = sub.add_parser("layout-b")
+    b = sub.add_parser("layout-b", help="the fork package (MeshCentral 1.3.1 + fork) on Node 24, npm ci against the wrapper lock")
     b.add_argument("--bind", default="127.0.0.1", help=bind_help)
-    group = b.add_mutually_exclusive_group(required=True)
-    group.add_argument("--tarball")
-    group.add_argument("--standin", action="store_true", help="use the pinned stock `npm pack meshcentral@1.2.5`")
-    group.add_argument("--stage1", action="store_true",
-                       help="B-stage1: the wrapper's fork tarball, layout A's data and web folders without shadow cores, and A's config")
-    b.add_argument("--retire-overrides", action="store_true",
-                   help="with --stage1, B-stage2: also apply the D16 web cutover (no default3 overrides, no r0 canary script or customFiles entry)")
+    group = b.add_mutually_exclusive_group()
+    group.add_argument("--agents", help="pack the fork first with `pack.js --agents <dir>` in the MeshCentral checkout")
+    group.add_argument("--tarball", help="an already packed fork tarball; npm ci refuses it unless the wrapper lock pins it")
     for name in ("start", "stop", "checklist", "reset"):
         p = sub.add_parser(name)
         p.add_argument("--layout", choices=list(LAYOUTS) + ["all"])
         if name == "checklist":
             p.add_argument("--label")
+    sub.add_parser("pin-check", help="layout B must refuse to start when a pinned agent binary changes")
     sub.add_parser("status")
     sub.add_parser("teardown")
     args = parser.parse_args(argv)
     handler = {"setup": cmd_setup, "layout-b": cmd_layout_b, "start": cmd_start, "stop": cmd_stop,
-               "status": cmd_status, "checklist": cmd_checklist, "reset": cmd_reset, "teardown": cmd_teardown}[args.command]
+               "status": cmd_status, "checklist": cmd_checklist, "pin-check": cmd_pin_check,
+               "reset": cmd_reset, "teardown": cmd_teardown}[args.command]
     try:
         handler(args)
     except DupError as error:
