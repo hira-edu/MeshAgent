@@ -1,12 +1,18 @@
 """Build the duplicate layouts.
 
 Layout A reproduces /opt/meshcentral as production has it today:
-  1. `npm ci` of the wrapper (lockfile integrity-checked),
+  1. `npm ci` of the deployment wrapper (MeshCentral/deploy, lockfile integrity-checked), with
+     node_modules/meshcentral then replaced by the pinned stock npm package production runs,
   2. deploy.py's own publish map applied to the local tree instead of SCP,
   3. the read-only production capture (layout-a.tar) extracted with its mtimes.
 Layout B installs a MeshCentral tarball into node_modules/meshcentral with no overrides.
+Layout B-stage1 installs the wrapper's own fork tarball and builds layout A's data and web folders
+the same way as A (deploy.py's map without the package roles, then the capture).
 """
+import base64
+import hashlib
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -14,7 +20,7 @@ import subprocess
 import tarfile
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from dup_common import (
     DUP_ROOT, LAYOUT_A_TAR, MESHCENTRAL_VERSION, PRODUCTION_HASHES, PRODUCTION_UNTRACKED, REPORTS, WORKTREE_ROOT,
@@ -41,8 +47,39 @@ def source_repo():
     return Path(common.stdout.strip()).resolve().parent
 
 
-def wrapper_repo():
-    return source_repo().parent / "MeshCentral"
+def meshcentral_repo():
+    """The MeshCentral checkout: MESHCENTRAL_ROOT (as for the tests), else the source repo's sibling."""
+    configured = os.environ.get("MESHCENTRAL_ROOT")
+    root = Path(configured).resolve() if configured else source_repo().parent / "MeshCentral"
+    if not (root / "meshagent.js").is_file() or not (root / "agents").is_dir():
+        raise DupError(f"{root} is not a MeshCentral fork checkout (no meshagent.js and agents/); set MESHCENTRAL_ROOT")
+    return root
+
+
+WRAPPER_PACKAGE_NAME = "meshcentral-deploy"
+
+
+def wrapper_dir():
+    """The deployment wrapper (Stage 1 layout): MeshCentral/deploy, named meshcentral-deploy."""
+    directory = meshcentral_repo() / "deploy"
+    manifest = directory / "package.json"
+    try:
+        name = read_json(manifest).get("name")
+    except (OSError, ValueError, DupError) as error:
+        raise DupError(f"Deployment wrapper not found: {manifest} is not readable ({error}). "
+                       "The wrapper moved to deploy/ in Stage 1; use a checkout with that layout.") from error
+    if name != WRAPPER_PACKAGE_NAME:
+        raise DupError(f"{manifest} is named {name!r}, not {WRAPPER_PACKAGE_NAME!r}")
+    return directory
+
+
+def resolve_source(repo, local_path):
+    """Resolve a deploy.py local_path. "../MeshCentral/..." means the MeshCentral checkout (meshcentral_repo),
+    everything else is relative to the MeshAgent checkout production was built from."""
+    parts = PurePosixPath(local_path.replace("\\", "/")).parts
+    if parts[:2] == ("..", "MeshCentral"):
+        return meshcentral_repo().joinpath(*parts[2:])
+    return (repo / local_path).resolve()
 
 
 def load_deploy():
@@ -79,20 +116,44 @@ def remote_to_local(deploy, remote_path, root):
     return root.joinpath(*relative.split("/"))
 
 
+def wrapper_tarball_spec(wrapper):
+    """The wrapper's meshcentral dependency when it is a local tarball (file:dist/...), else None."""
+    spec = (read_json(wrapper / "package.json").get("dependencies") or {}).get("meshcentral", "")
+    if not spec.startswith("file:"):
+        return None
+    relative = PurePosixPath(spec[len("file:"):])
+    if relative.is_absolute() or ".." in relative.parts:
+        raise DupError(f"Wrapper meshcentral dependency {spec!r} must stay inside the wrapper")
+    return relative
+
+
 def install_wrapper(name, extra_packages=()):
     """Copy the wrapper package.json and lockfile and run `npm ci` (integrity-checked against the lock).
-    extra_packages (layout B's tarball) go into the same `npm install --no-save` as the Windows-only
-    modules, because a later `npm install` would prune packages it did not install."""
+    Since Stage 1 the wrapper installs the fork package from a tarball packed from the checkout
+    (deploy/dist); it is copied beside the layout's package.json so the lockfile pins it.
+    extra_packages (a tarball that replaces node_modules/meshcentral) go into the same
+    `npm install --no-save` as the Windows-only modules, because a later `npm install` would prune
+    packages it did not install."""
     root = layout_root(name)
-    wrapper = wrapper_repo()
+    wrapper = wrapper_dir()
     root.mkdir(parents=True, exist_ok=True)
-    record = {}
+    record = {"wrapper": str(wrapper)}
     for filename in ("package.json", "package-lock.json"):
         source = wrapper / filename
         if not source.is_file():
             raise DupError(f"Wrapper file missing: {source}")
         shutil.copyfile(source, root / filename)
         record[filename] = sha256_file(source)
+    tarball = wrapper_tarball_spec(wrapper)
+    if tarball is not None:
+        source = wrapper.joinpath(*tarball.parts)
+        if not source.is_file():
+            raise DupError(f"The wrapper installs meshcentral from {source}, which does not exist; "
+                           "pack it first with `node deploy/scripts/pack.js` in the MeshCentral checkout")
+        target = root.joinpath(*tarball.parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        record["wrapper_tarball"] = {"path": tarball.as_posix(), "sha256": sha256_file(target)}
     npm(["ci", "--no-audit", "--no-fund"], cwd=root)
     installed = read_json(root / "node_modules" / "meshcentral" / "package.json")
     if installed.get("version") != MESHCENTRAL_VERSION:
@@ -135,7 +196,7 @@ def collect_agent_artifacts(deploy, repo):
         if config["remote_filename"].endswith(EXCLUDED_SUFFIXES):
             excluded.append({"name": name, "reason": "production identity manifest (D8); MeshCentral does not serve .msh files"})
             continue
-        local_path = (repo / config["local_path"]).resolve()
+        local_path = resolve_source(repo, config["local_path"])
         if not local_path.is_file():
             raise DupError(f"deploy.py artifact {name} is missing at {local_path}; build the agent first")
         entries.append({"name": name, "remote_filename": config["remote_filename"], "local_path": str(local_path),
@@ -150,16 +211,15 @@ def collect_agent_artifacts(deploy, repo):
     return entries, excluded
 
 
-def versioned_loader(deploy, repo, root):
+def versioned_loader(deploy, staged_path, root):
     """The meshcentral.js deploy.py publishes.
 
-    deploy.py stages it with prepare_versioned_core_loader, which reads the loader installed on the
-    server over SSH and writes the result to CORE_ARTIFACTS["meshcentral.js"]["local_path"]. That staged
-    file is what production received. Production's installed loader had been versioned by an earlier
-    deploy, so the staged file keeps CRLF on lines a fresh run on pristine 1.2.5 writes with LF. The staged
-    file is used only if deploy.py's transforms leave it unchanged and it equals a fresh run on the
-    layout's own npm copy apart from line endings."""
-    staged_path = (repo / deploy.CORE_ARTIFACTS["meshcentral.js"]["local_path"]).resolve()
+    Since Stage 1 deploy.py stages the fork's committed loader (CORE_ARTIFACTS["meshcentral.js"]), which
+    holds production's bytes: production's installed loader had been versioned by an earlier deploy, so
+    it keeps CRLF on lines a fresh run on pristine 1.2.5 writes with LF. The file is used only if deploy.py's
+    transforms leave it unchanged and it equals a fresh run on the layout's own stock npm copy apart from
+    line endings."""
+    staged_path = Path(staged_path)
     if not staged_path.is_file():
         raise DupError(f"deploy.py's staged loader is missing at {staged_path}")
     staged = staged_path.read_bytes()
@@ -181,15 +241,25 @@ def versioned_loader(deploy, repo, root):
                     "equals_fresh_transform_ignoring_line_endings": True}
 
 
-def collect_core_artifacts(deploy, repo, root):
+def is_package_path(deploy, remote_path):
+    """True for publish paths inside the installed package (node_modules/meshcentral)."""
+    return remote_path.startswith(deploy.MESHCENTRAL_BASE.rstrip("/") + "/node_modules/meshcentral/")
+
+
+def collect_core_artifacts(deploy, repo, root, include_package=True):
     entries = []
     for name, config in deploy.CORE_ARTIFACTS.items():
-        entry = {"name": name, "remote_relative_path": config["remote_relative_path"],
-                 "publish_targets": deploy.get_artifact_publish_targets(config)}
+        targets = deploy.get_artifact_publish_targets(config)
+        if not include_package:
+            targets = tuple(role for role in targets if not is_package_path(
+                deploy, deploy.get_core_publish_path(role, config["remote_relative_path"])))
+            if not targets:
+                continue
+        entry = {"name": name, "remote_relative_path": config["remote_relative_path"], "publish_targets": targets}
         if name == "meshcentral.js":
-            entry["bytes"], entry["loader"] = versioned_loader(deploy, repo, root)
+            entry["bytes"], entry["loader"] = versioned_loader(deploy, resolve_source(repo, config["local_path"]), root)
         else:
-            local_path = (repo / config["local_path"]).resolve()
+            local_path = resolve_source(repo, config["local_path"])
             if not local_path.is_file():
                 raise DupError(f"deploy.py core artifact {name} is missing at {local_path}")
             entry["local_path"] = str(local_path)
@@ -197,19 +267,28 @@ def collect_core_artifacts(deploy, repo, root):
     return entries
 
 
-def publish_locally(name):
-    """Apply deploy.py's publish map (publish_staged_payloads) to the local tree."""
+def publish_locally(name, include_package=True):
+    """Apply deploy.py's publish map (publish_staged_payloads) to the local tree.
+
+    include_package=False leaves node_modules/meshcentral alone (B-stage1: the package is the fork
+    tarball), so only the data and web folders get deploy.py's copies."""
     deploy = load_deploy()
     repo = source_repo()
     root = layout_root(name)
     agents, excluded = collect_agent_artifacts(deploy, repo)
-    cores = collect_core_artifacts(deploy, repo, root)
+    cores = collect_core_artifacts(deploy, repo, root, include_package)
     copies = []
+    skipped_package_paths = []
     for directory in list(deploy.PUBLISH_ROLE_DIRS.values()) + list(deploy.CORE_PUBLISH_ROLE_DIRS.values()):
-        remote_to_local(deploy, directory, root).mkdir(parents=True, exist_ok=True)
+        if include_package or not is_package_path(deploy, directory.rstrip("/") + "/"):
+            remote_to_local(deploy, directory, root).mkdir(parents=True, exist_ok=True)
     for entry in agents:
         for role in entry["publish_targets"]:
-            target = remote_to_local(deploy, deploy.get_publish_path(role, entry["remote_filename"]), root)
+            remote_path = deploy.get_publish_path(role, entry["remote_filename"])
+            if not include_package and is_package_path(deploy, remote_path):
+                skipped_package_paths.append(remote_path)
+                continue
+            target = remote_to_local(deploy, remote_path, root)
             shutil.copyfile(entry["local_path"], target)
             copies.append({"artifact": entry["name"], "role": role, "target": str(target.relative_to(root)),
                            "sha256": sha256_file(target)})
@@ -230,8 +309,10 @@ def publish_locally(name):
                 path.unlink()
                 log(f"  removed stray {path}")
     log(f"  published {len(copies)} files from deploy.py's map; excluded {len(excluded)} artifacts")
-    loader = next(e["loader"] for e in cores if e["name"] == "meshcentral.js")
-    return {"source_repo": str(repo), "copies": copies, "excluded": excluded, "loader": loader,
+    loader = next((e["loader"] for e in cores if e["name"] == "meshcentral.js"), None)
+    return {"source_repo": str(repo), "meshcentral_repo": str(meshcentral_repo()), "copies": copies,
+            "excluded": excluded, "loader": loader, "include_package": include_package,
+            "skipped_package_paths": skipped_package_paths,
             "not_reproduced": [
                 "refresh_remote_hashagents (SSH only); MeshCentral 1.2.5 never reads hashagents.json "
                 "(const reassignment inside try, meshcentral.js updateMeshAgentsTable)",
@@ -411,11 +492,31 @@ def compare_with_production(manifest_path):
     return report
 
 
+def verify_package_equals_tarball(root, tgz):
+    """node_modules/meshcentral must hold exactly the tarball's files (npm's bin rewrite excepted)."""
+    expected, bin_files = tarball_manifest(tgz)
+    installed_dir = root / "node_modules" / "meshcentral"
+    installed = {p.relative_to(installed_dir).as_posix(): sha256_file(p)
+                 for p in installed_dir.rglob("*") if p.is_file()}
+    # npm may add nothing to a package folder except a nested node_modules for bundled dependencies.
+    extra = sorted(p for p in installed if p not in expected and not p.startswith("node_modules/"))
+    missing = sorted(p for p in expected if p not in installed)
+    differs = sorted(p for p in expected if p in installed and installed[p] != expected[p])
+    if extra or missing or differs:
+        raise DupError(f"Installed tree != {tgz}: extra {extra[:5]}, missing {missing[:5]}, differs {differs[:5]}")
+    return {"tarball": str(tgz), "tarball_sha256": sha256_file(tgz), "files": len(expected),
+            "npm_bin_line_endings_rewritten": bin_files}
+
+
 def build_layout_a():
     root = layout_root("A")
     if (root / "node_modules").exists():
         raise DupError(f"{root} already has node_modules; run reset/teardown before setup")
-    record = {"wrapper": install_wrapper("A")}
+    upstream = upstream_tarball()
+    record = {"variant": "A", "wrapper": install_wrapper("A", [upstream])}
+    # Production runs the stock npm package with deploy.py's copies on top; check the stock part
+    # before the copies change it.
+    record["upstream_package"] = verify_package_equals_tarball(root, upstream)
     record["publish"] = publish_locally("A")
     record["capture"] = extract_production_capture("A")
     record["module_timestamps"] = overlay_module_timestamps("A")
@@ -454,53 +555,77 @@ def tarball_manifest(tgz):
     return rows, sorted(bins)
 
 
-def build_layout_b(tgz):
-    """Install a fork tarball into node_modules/meshcentral with no override copies."""
-    tgz = Path(tgz).resolve()
-    if not tgz.is_file():
-        raise DupError(f"Tarball not found: {tgz}")
+def build_layout_b(tgz=None, stage1=False):
+    """Layout B.
+
+    tgz: install that tarball into node_modules/meshcentral with no override copies.
+    stage1: B-stage1, the Stage 1 fork as production would run it. The package is the wrapper's own
+    fork tarball (npm ci checks it against the lockfile integrity), and the data and web folders are
+    built the way layout A builds them: deploy.py's map without its package roles, then the
+    production capture with its module mtimes. The config is generated with layout A's profile."""
+    if stage1 == (tgz is not None):
+        raise DupError("layout B needs exactly one of a tarball or the Stage 1 variant")
     root = layout_root("B")
     if (root / "node_modules").exists():
         raise DupError(f"{root} already has node_modules; run `reset --layout B` first")
-    record = {"tarball": str(tgz), "tarball_sha256": sha256_file(tgz), "wrapper": install_wrapper("B", [tgz])}
-    expected, bin_files = tarball_manifest(tgz)
-    installed_dir = root / "node_modules" / "meshcentral"
-    installed = {p.relative_to(installed_dir).as_posix(): sha256_file(p)
-                 for p in installed_dir.rglob("*") if p.is_file()}
-    # npm may add nothing to a package folder except a nested node_modules for bundled dependencies.
-    extra = sorted(p for p in installed if p not in expected and not p.startswith("node_modules/"))
-    missing = sorted(p for p in expected if p not in installed)
-    differs = sorted(p for p in expected if p in installed and installed[p] != expected[p])
-    if extra or missing or differs:
-        raise DupError(f"Installed tree != tarball: extra {extra[:5]}, missing {missing[:5]}, differs {differs[:5]}")
-    for override in (root / "meshcentral-web", root / "meshcentral-data" / "meshcore.js",
-                     root / "meshcentral-data" / "modules_meshcore", root / "meshcentral-data" / "agents"):
-        if override.exists():
-            raise DupError(f"Layout B must not hold override copies: {override}")
-    record["tree_equals_tarball"] = {"files": len(expected), "npm_bin_line_endings_rewritten": bin_files}
+    if stage1:
+        record = {"variant": "stage1", "wrapper": install_wrapper("B")}
+        if "wrapper_tarball" not in record["wrapper"]:
+            raise DupError("B-stage1 needs a wrapper that installs the fork from a packed tarball (file:dist/...)")
+        tgz = root.joinpath(*PurePosixPath(record["wrapper"]["wrapper_tarball"]["path"]).parts)
+    else:
+        tgz = Path(tgz).resolve()
+        if not tgz.is_file():
+            raise DupError(f"Tarball not found: {tgz}")
+        record = {"variant": "B", "wrapper": install_wrapper("B", [tgz])}
+    record["tarball"], record["tarball_sha256"] = str(tgz), sha256_file(tgz)
+    record["tree_equals_tarball"] = verify_package_equals_tarball(root, tgz)
+    if stage1:
+        record["publish"] = publish_locally("B", include_package=False)
+        record["capture"] = extract_production_capture("B")
+        record["module_timestamps"] = overlay_module_timestamps("B")
+        # deploy.py's package roles were left out, so the package must still equal the tarball.
+        verify_package_equals_tarball(root, tgz)
+    else:
+        for override in (root / "meshcentral-web", root / "meshcentral-data" / "meshcore.js",
+                         root / "meshcentral-data" / "modules_meshcore", root / "meshcentral-data" / "agents"):
+            if override.exists():
+                raise DupError(f"Layout B must not hold override copies: {override}")
     record["bin"] = install_bin("B")
     record["manifest"] = str(write_manifest("B", "built"))
+    if stage1:
+        record["vs_production"] = compare_with_production(record["manifest"])["summary"]
     write_json(REPORTS / "layout-B-build.json", record)
-    log(f"  layout B: node_modules/meshcentral equals {tgz.name} ({len(expected)} files)")
+    log(f"  layout B ({record['variant']}): node_modules/meshcentral equals {tgz.name} "
+        f"({record['tree_equals_tarball']['files']} files)")
     return record
 
 
-def pack_standin():
-    """`npm pack meshcentral@1.2.5` as the Stage 1 stand-in, checked against the wrapper lockfile integrity."""
-    import base64
-    import hashlib
-    target = DUP_ROOT / "downloads" / "standin"
+def layout_variant(name):
+    """"A", "B" or "stage1", from the layout's build record."""
+    record = read_json(REPORTS / f"layout-{name}-build.json")
+    return record.get("variant", name)
+
+
+UPSTREAM_PIN = WORKTREE_ROOT / "test" / "lib" / "meshcentral_upstream_reference.json"
+
+
+def upstream_tarball():
+    """The stock npm package production runs, checked against the pin the tests use
+    (test/lib/meshcentral_upstream_reference.json). Layout A installs it; `layout-b --standin` too."""
+    pin = read_json(UPSTREAM_PIN)
+    if pin.get("name") != "meshcentral" or pin.get("version") != MESHCENTRAL_VERSION:
+        raise DupError(f"{UPSTREAM_PIN} pins {pin.get('name')}@{pin.get('version')}, expected meshcentral@{MESHCENTRAL_VERSION}")
+    algorithm, expected = pin["integrity"].split("-", 1)
+    if algorithm != "sha512":
+        raise DupError(f"Unexpected upstream integrity algorithm {algorithm}")
+    target = DUP_ROOT / "downloads" / "upstream"
     target.mkdir(parents=True, exist_ok=True)
     tgz = target / f"meshcentral-{MESHCENTRAL_VERSION}.tgz"
     if not tgz.is_file():
         npm(["pack", f"meshcentral@{MESHCENTRAL_VERSION}", "--pack-destination", str(target)], cwd=target)
-    lock = read_json(wrapper_repo() / "package-lock.json")
-    integrity = lock["packages"]["node_modules/meshcentral"]["integrity"]
-    algorithm, expected = integrity.split("-", 1)
-    if algorithm != "sha512":
-        raise DupError(f"Unexpected lockfile integrity algorithm {algorithm}")
     actual = base64.b64encode(hashlib.sha512(tgz.read_bytes()).digest()).decode("ascii")
     if actual != expected:
-        raise DupError(f"Stand-in tarball integrity {actual} != lockfile {expected}")
-    log(f"  stand-in {tgz} matches the lockfile integrity")
+        raise DupError(f"Upstream tarball integrity {actual} != pinned {expected} ({UPSTREAM_PIN})")
+    log(f"  upstream {tgz} matches the pinned integrity")
     return tgz

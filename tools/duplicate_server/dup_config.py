@@ -88,8 +88,8 @@ def configured_bind(layout):
 # --------------------------------------------------------------------------- generation
 
 def template_path():
-    from dup_layout import wrapper_repo
-    return wrapper_repo() / "meshcentral-data" / "config.json.template"
+    from dup_layout import wrapper_dir
+    return wrapper_dir() / "meshcentral-data" / "config.json.template"
 
 
 def dup_value(kind, key, layout, spec, context):
@@ -122,11 +122,19 @@ def dup_value(kind, key, layout, spec, context):
     raise DupError(f"Unknown dup kind {kind!r} for {key}")
 
 
-def generate(layout, mongodb_uri, bind="127.0.0.1"):
-    """Build the config dict and a record of every key that differs from production."""
+def generate(layout, mongodb_uri, bind="127.0.0.1", profile=None):
+    """Build the config dict and a record of every key that differs from production.
+
+    profile selects which layout's production values apply (the "layouts" lists in
+    production_flags.json); it defaults to the layout. B-stage1 uses profile "A": production's
+    config, including customFiles, on layout B's ports, database and fresh secrets."""
+    profile = profile or layout
+    if profile not in LAYOUTS:
+        raise DupError(f"Unknown config profile {profile!r}")
     flags = load_flags()
     template = json.loads(template_path().read_text(encoding="utf-8"))
     record = {"template": str(template_path()), "evidence": str(EXTRA_VALUES_PATH), "bind": validate_bind(bind),
+              "profile": profile,
               "dropped_template_keys": [], "from_evidence": [], "substituted": [], "omitted": [], "duplicate_only": []}
     context = {"mongodb": mongodb_uri, "bind": validate_bind(bind), "extra": load_extra_values()}
 
@@ -142,7 +150,7 @@ def generate(layout, mongodb_uri, bind="127.0.0.1"):
             elif "omit" in spec:
                 record["omitted"].append({"key": f"{label}.{key}", "reason": spec["omit"]})
             elif "evidence" in spec:
-                if layout not in spec.get("layouts", list(LAYOUTS)):
+                if profile not in spec.get("layouts", list(LAYOUTS)):
                     record["omitted"].append({"key": f"{label}.{key}", "reason": spec["reason"]})
                     continue
                 result[key] = context["extra"][spec["evidence"]]
@@ -169,8 +177,8 @@ def generate(layout, mongodb_uri, bind="127.0.0.1"):
     return config, record
 
 
-def write_config(layout, mongodb_uri, bind="127.0.0.1"):
-    config, record = generate(layout, mongodb_uri, bind)
+def write_config(layout, mongodb_uri, bind="127.0.0.1", profile=None):
+    config, record = generate(layout, mongodb_uri, bind, profile)
     text = json.dumps(config, indent=2) + "\n"
     hits = scan_text(text, load_denylist())
     if hits:

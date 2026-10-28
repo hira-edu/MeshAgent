@@ -13,6 +13,7 @@ python tools\duplicate_server\dupserver.py start                    # layout A o
 python tools\duplicate_server\dupserver.py checklist                # plan section 5 checks for layout A
 python tools\duplicate_server\dupserver.py layout-b --tarball <tgz> [--bind <ip>] # layout B from a fork tarball
 python tools\duplicate_server\dupserver.py layout-b --standin       # layout B from npm pack meshcentral@1.2.5
+python tools\duplicate_server\dupserver.py layout-b --stage1        # B-stage1: fork tarball + A's data/web + A's config
 python tools\duplicate_server\dupserver.py start --layout B         # layout B on https://127.0.0.1:4432
 python tools\duplicate_server\dupserver.py checklist --layout B --label <name>
 python tools\duplicate_server\dupserver.py status
@@ -34,12 +35,16 @@ probe output and checklist results.
    `C:\mc-dup\mongo`. Setup creates a fresh admin user (localhost exception) and an app user that owns
    only `meshcentral_dupA` and `meshcentral_dupB`. Credentials are in `C:\mc-dup\secrets`.
 3. **Layout A** (`C:\mc-dup\A`, the same relative layout as `/opt/meshcentral`):
-   - `npm ci` of the MeshCentral wrapper's `package.json` and lockfile, with the integrity checked
-     against the lock;
+   - `npm ci` of the deployment wrapper (`MeshCentral/deploy`: `package.json`, lockfile and the packed
+     fork tarball it pins, made by `node deploy/scripts/pack.js`), with the integrity checked against
+     the lock. `node_modules/meshcentral` is then replaced by the stock npm `meshcentral@1.2.5`
+     production runs, checked against the pin in `test/lib/meshcentral_upstream_reference.json`, and
+     the installed tree must equal that tarball;
    - `deploy.py`'s own publish map, imported read-only. `ARTIFACTS`, `CORE_ARTIFACTS`,
      `get_publish_path`, `get_core_publish_path` and `validate_local_service_bundle_artifacts` are used
-     as they are. Sources resolve against the main MeshAgent checkout and its sibling `MeshCentral`,
-     where production was deployed from;
+     as they are. MeshAgent sources resolve against the main MeshAgent checkout (or
+     `MC_DUP_SOURCE_REPO`); `../MeshCentral/...` sources resolve against `MESHCENTRAL_ROOT`, or the
+     main checkout's sibling `MeshCentral`;
    - `evidence/production-layout-a/layout-a.tar` extracted over the tree with its mtimes;
    - then `layout-a-modules-posix.tar` (posix format) applied to `meshcentral-data/meshcore*.js` and
      `modules_meshcore*`, which sets their nanosecond mtimes. Those mtimes are the module versions
@@ -62,6 +67,14 @@ probe output and checklist results.
 **Layout B** installs a tarball into `node_modules/meshcentral` (`npm install --no-save <tgz>`) and
 copies no overrides. The installed tree must equal the tarball. The only allowed difference is npm's
 bin linker rewriting CRLF to LF in declared `bin` files.
+
+**B-stage1** (`layout-b --stage1`) is the Stage 1 fork as production would run it. The package is the
+wrapper's own fork tarball, installed by `npm ci` against the lockfile integrity. The data and web
+folders are built the way layout A builds them: `deploy.py`'s map without the roles that write inside
+`node_modules/meshcentral`, then both production captures. The package must still equal the tarball
+afterwards. The config uses layout A's profile, including `customFiles`, on layout B's ports, database
+and fresh secrets. The checklist compares B-stage1 with production like layout A (1c, 7b, 7d, bin,
+views) and adds 1d, "node_modules/meshcentral equals the tarball".
 
 ## Checklist
 

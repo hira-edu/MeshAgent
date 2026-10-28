@@ -265,7 +265,10 @@ def compare_versions_to_capture(probe, timestamps=None):
 def run_checklist(layout, label=None):
     results = Results(layout)
     root = layout_root(layout)
-    label = label or ("production-today" if layout == "A" else "target")
+    variant = dup_layout.layout_variant(layout)
+    # Layout A and B-stage1 must both reproduce production, so both get the production comparisons.
+    production_checks = variant in ("A", "stage1")
+    label = label or {"A": "production-today", "stage1": "stage1"}.get(variant, "target")
     log_path, start_record = latest_start_log(layout)
     log_text = log_path.read_text(encoding="utf-8", errors="replace")
 
@@ -280,14 +283,15 @@ def run_checklist(layout, label=None):
     for name in ("package.json", "package-lock.json"):
         current = dup_layout.sha256_file(root / name)
         results.add("1b", f"{name} unchanged since setup", "PASS" if current == built["wrapper"][name] else "FAIL", current)
-    if layout == "A":
+    if production_checks:
         comparison = dup_layout.compare_with_production(now_manifest)
         results.add("1c", "tree vs production inventory (hashes.tsv)", "INFO",
                     {"summary": comparison["summary"], "content_differs": comparison["content_differs"],
                      "production_only": comparison["production_only"], "duplicate_only": comparison["duplicate_only"],
                      "mtime_differs": comparison["mtime_differs"]})
-    else:
-        results.add("1c", "node_modules/meshcentral equals the tarball", "PASS", built["tree_equals_tarball"])
+    if variant != "A":
+        results.add("1d" if production_checks else "1c", "node_modules/meshcentral equals the tarball", "PASS",
+                    built["tree_equals_tarball"])
 
     # 2. Clean start.
     install_lines = [l for l in log_text.splitlines() if "Installing modules" in l or "npm install" in l.lower()]
@@ -327,7 +331,7 @@ def run_checklist(layout, label=None):
                    "coreTextSha256": core["coreTextSha256"],
                    "modules": [{"name": m["name"], "version": m["version"]} for m in core["modules"]]}
     results.add("7a", f"served {windows_core} core composition", "INFO", composition)
-    if layout == "A":
+    if production_checks:
         expected = production_data_modules()
         windows_expected = {n: e for n, e in expected.items() if not n.startswith("linux-")}
         problems = []
@@ -365,7 +369,7 @@ def run_checklist(layout, label=None):
     for archid in ("3", "4", "43"):
         info = probe["agentBinaries"].get(archid) or {}
         binaries[archid] = {k: info.get(k) for k in ("localname", "relativePath", "sha256", "size", "unsigned")}
-        if layout == "A":
+        if production_checks:
             expected_path = f"meshcentral-data/agents/{info.get('localname')}"
             prod = production.get(expected_path)
             binaries[archid]["production"] = {"path": expected_path, "sha256": prod["sha256"] if prod else None}
@@ -373,7 +377,7 @@ def run_checklist(layout, label=None):
                 problems.append(f"arch {archid}: selected {info.get('relativePath')}, production serves {expected_path}")
             elif prod is None or info.get("sha256") != prod["sha256"]:
                 problems.append(f"arch {archid}: sha256 {info.get('sha256')} != production {prod and prod['sha256']}")
-    if layout == "A":
+    if production_checks:
         results.add("bin", "agent binaries for arch 3/4/43 = production selection and hash", "PASS" if not problems else "FAIL",
                     {"binaries": binaries, "problems": problems})
     else:
@@ -391,7 +395,7 @@ def run_checklist(layout, label=None):
             served, scores = identify_view(html, candidates)
             entry = {"lang": lang, "minify": minify, "http": status, "served": served,
                      "scores": {k: (round(v, 3) if v is not None else None) for k, v in scores.items()}}
-            if layout == "A":
+            if production_checks:
                 entry["production_expected"] = expected_production_view(bool(minify), lang)
                 if served != entry["production_expected"]:
                     problems.append(f"lang={lang} minify={minify}: served {served}, production {entry['production_expected']}")
@@ -400,13 +404,13 @@ def run_checklist(layout, label=None):
             if status != 200:
                 problems.append(f"lang={lang} minify={minify}: HTTP {status}")
             views.append(entry)
-    title = "default3 view selection = production" if layout == "A" else "default3 view selection"
+    title = "default3 view selection = production" if production_checks else "default3 view selection"
     results.add("views", title, "PASS" if not problems else "FAIL", {"views": views, "problems": problems})
 
     for item, title in PENDING_VM:
         results.add(item, title, "PENDING-VM", "needs the test agent on the throwaway VM")
 
-    report = {"layout": layout, "label": label, "created": datetime.now(timezone.utc).isoformat(),
+    report = {"layout": layout, "variant": variant, "label": label, "created": datetime.now(timezone.utc).isoformat(),
               "start": start_record, "results": results.items}
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = REPORTS / f"checklist-{layout}-{label}-{stamp}.json"

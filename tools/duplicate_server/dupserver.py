@@ -6,7 +6,7 @@
     python tools/duplicate_server/dupserver.py checklist [--layout A|B]
     python tools/duplicate_server/dupserver.py status
     python tools/duplicate_server/dupserver.py stop [--layout A|B|all]
-    python tools/duplicate_server/dupserver.py layout-b (--tarball <tgz> | --standin) [--bind 127.0.0.1]
+    python tools/duplicate_server/dupserver.py layout-b (--tarball <tgz> | --standin | --stage1) [--bind 127.0.0.1]
     python tools/duplicate_server/dupserver.py reset [--layout A|B|all]
     python tools/duplicate_server/dupserver.py teardown
 
@@ -59,12 +59,13 @@ def create_web_admin(layout):
     return creds
 
 
-def configure_layout(layout, bind):
-    """bind is the address MeshCentral listens on (portBind, mpsPortBind). mongod stays on 127.0.0.1."""
+def configure_layout(layout, bind, profile=None):
+    """bind is the address MeshCentral listens on (portBind, mpsPortBind). mongod stays on 127.0.0.1.
+    profile picks which layout's production config values apply (B-stage1 uses A's)."""
     dup_config.validate_bind(bind)
     dup_mongo.start()
     dup_mongo.initialize_users()
-    dup_config.write_config(layout, dup_mongo.connection_uri(layout), bind)
+    dup_config.write_config(layout, dup_mongo.connection_uri(layout), bind, profile)
     create_web_admin(layout)
 
 
@@ -85,9 +86,12 @@ def cmd_setup(args):
 def cmd_layout_b(args):
     require_root_marker()
     dup_config.validate_bind(args.bind)
-    tgz = dup_layout.pack_standin() if args.standin else Path(args.tarball)
-    dup_layout.build_layout_b(tgz)
-    configure_layout("B", args.bind)
+    if args.stage1:
+        dup_layout.build_layout_b(stage1=True)
+        configure_layout("B", args.bind, profile="A")
+    else:
+        dup_layout.build_layout_b(dup_layout.upstream_tarball() if args.standin else Path(args.tarball))
+        configure_layout("B", args.bind)
     log("layout B ready: run `start --layout B` then `checklist --layout B`")
 
 
@@ -212,7 +216,9 @@ def main(argv=None):
     b.add_argument("--bind", default="127.0.0.1", help=bind_help)
     group = b.add_mutually_exclusive_group(required=True)
     group.add_argument("--tarball")
-    group.add_argument("--standin", action="store_true", help="use `npm pack meshcentral@1.2.5` until the fork tarball exists")
+    group.add_argument("--standin", action="store_true", help="use the pinned stock `npm pack meshcentral@1.2.5`")
+    group.add_argument("--stage1", action="store_true",
+                       help="B-stage1: the wrapper's fork tarball plus layout A's data and web folders and A's config")
     for name in ("start", "stop", "checklist", "reset"):
         p = sub.add_parser(name)
         p.add_argument("--layout", choices=list(LAYOUTS) + ["all"])
