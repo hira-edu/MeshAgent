@@ -16,7 +16,8 @@ permissions and directory fsync; Windows fixtures stub only POSIX-only APIs.
 `docs/DEPLOYMENT.md`: the `reviewed_versions` policy and the
 `install_controller.py --upgrade` migration, tarball-only releases (no overlay
 mounts or seeded agent folders), the shadow-copy check (including the forbidden
-`agentbuilds` folder) and the host recovery snapshot,
+`agentbuilds` folder), the configuration path check (backup, recording, error-log
+and web paths must lie in the container's mounts) and the host recovery snapshot,
 the retired image-size preload (no preload started or required, the schema-3
 configuration migration, and the legacy host preload moved aside only after a
 committed promotion), the smoke assertions against fixture pages and installed

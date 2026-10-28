@@ -13,7 +13,8 @@ import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import posixpath
 import pwd
 import re
 import shutil
@@ -278,11 +279,94 @@ def check_shadow_copies(manifest):
     meshcentral_shadow_check.check(BASE, meshcentral_shadow_check.parse_allowlist(manifest['shadowAllowlist']))
 
 
+# The folders start() mounts into the container: written by the server, and read only.
+WRITABLE_MOUNTS = ('meshcentral-data', 'meshcentral-files', 'meshcentral-recordings', 'meshcentral-backups')
+READONLY_MOUNTS = ('meshcentral-web',)
+
+
+def server_config_paths(server_config):
+    """Return [(key, value, access)] for every host path the MeshCentral config names (fork at 1.3.1).
+
+    Keys are matched case-insensitively, as MeshCentral lowercases them (common.js objKeysToLower,
+    meshcentral.js getConfig). access is 'write' or 'read'. settings.datapath and settings.filespath are
+    not listed: the container's --datapath and --filespath override them (getConfig copies the command
+    line over config.settings).
+    """
+    def lower(value):
+        if isinstance(value, dict):
+            return {str(key).lower(): lower(item) for key, item in value.items()}
+        return value
+
+    config = lower(server_config) if isinstance(server_config, dict) else {}
+    settings = config.get('settings') if isinstance(config.get('settings'), dict) else {}
+    paths = []
+    # Autobackup runs unless it is false (meshcentral.js:2210-2212); backuppath goes through path.resolve
+    # (meshcentral.js:2232), so a relative value is taken from the working directory.
+    autobackup = settings.get('autobackup')
+    if autobackup not in (False, 'false') and isinstance(autobackup, dict) and isinstance(autobackup.get('backuppath'), str):
+        paths.append(('settings.autobackup.backuppath', autobackup['backuppath'], 'write'))
+    # mesherrors.txt is appended there (meshcentral.js:732).
+    if isinstance(settings.get('mesherrorlogpath'), str):
+        paths.append(('settings.mesherrorlogpath', settings['mesherrorlogpath'], 'write'))
+    domains = config.get('domains') if isinstance(config.get('domains'), dict) else {}
+    for name, domain in domains.items():
+        if name.startswith('_') or not isinstance(domain, dict):
+            continue  # domains whose name starts with "_" are deleted at start (meshcentral.js:1522)
+        label = 'domains[' + json.dumps(name) + ']'
+        recording = domain.get('sessionrecording')
+        # Recordings are written there (meshrelay.js:511-513, meshdesktopmultiplex.js:1013-1015,
+        # webserver.js:5456-5458) and listed and served from there (webserver.js:4443, meshuser.js:1206).
+        if isinstance(recording, dict) and isinstance(recording.get('filepath'), str) and recording['filepath']:
+            paths.append((label + '.sessionrecording.filepath', recording['filepath'], 'write'))
+        # Domain web overrides are served from there (meshcentral.js:1589-1595, webserver.js:4086).
+        for key in ('webviewspath', 'webpublicpath', 'webemailspath'):
+            if isinstance(domain.get(key), str):
+                paths.append((label + '.' + key, domain[key], 'read'))
+    return paths
+
+
+def check_server_config_paths(server_config, base=None):
+    """Refuse a MeshCentral config that names a host path the container does not mount.
+
+    The container runs with a read-only root and the working directory /opt/meshcentral, so the server
+    could neither write nor read such a path: backups or recordings would fail at run time. The error
+    names each key and its path and no other configuration value.
+    """
+    root = PurePosixPath(Path(base or BASE).as_posix())
+    allowed = {'write': [root / name for name in WRITABLE_MOUNTS],
+               'read': [root / name for name in WRITABLE_MOUNTS + READONLY_MOUNTS]}
+    problems = []
+    for key, value, access in server_config_paths(server_config):
+        resolved = PurePosixPath(posixpath.normpath(posixpath.join(str(root), value)))
+        if not any(resolved == folder or folder in resolved.parents for folder in allowed[access]):
+            problems.append(key + ' = ' + str(resolved) + ': the release container does not mount it, so the server '
+                            'cannot ' + access + ' it there (' + ('written' if access == 'write' else 'read') +
+                            ' paths must be under ' + ', '.join(str(folder) for folder in allowed[access]) + ')')
+        elif key == 'settings.autobackup.backuppath' and (resolved == root / 'meshcentral-data' or
+                                                        root / 'meshcentral-data' in resolved.parents):
+            problems.append(key + ' = ' + str(resolved) + ': MeshCentral refuses a backup path inside '
+                            'meshcentral-data and makes no backups (db.js checkBackupCapability)')
+    if problems:
+        raise ValueError('The MeshCentral configuration names paths outside the release container\'s mounts:\n  ' +
+                         '\n  '.join(problems))
+
+
+def check_server_config():
+    """check_server_config_paths on the meshcentral-data/config.json the container will read."""
+    path = BASE / 'meshcentral-data/config.json'
+    try:
+        server_config = json.loads(path.read_text(encoding='utf-8'))
+    except ValueError as error:
+        raise ValueError(str(path) + ' is not valid JSON (' + type(error).__name__ + ')') from None
+    check_server_config_paths(server_config)
+
+
 def start(config, release):
     manifest = validate_manifest(Path(release['directory']) / RELEASE_FOLDER, config['reviewed_versions'])
     # Runs at every start, including recovery and rollback, so data/web copies placed since the
     # release was promoted are refused rather than trusted.
     check_shadow_copies(manifest)
+    check_server_config()
     user = pwd.getpwnam('meshcentral')
     args = ['docker', 'run', '--detach', '--name', CONTAINER, '--restart', 'unless-stopped',
             '--network', 'host', '--read-only', '--cap-drop', 'ALL',
@@ -426,6 +510,7 @@ def promote(config, digest):
     # The same shadow check start() runs, before anything is stopped: a host that the candidate would
     # refuse is reported without an outage.
     check_shadow_copies(release_manifest(release))
+    check_server_config()
     # First migration: record the healthy host installation's shadow copies, the explicit allowlist
     # recover() checks before restarting the host service. Refuses before anything is stopped.
     host_allowlist = None if previous else meshcentral_shadow_check.snapshot(BASE)
