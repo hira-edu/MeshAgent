@@ -90,15 +90,21 @@ try {
 
     // CORE-46: recovery cores are closed over the served modules their modules require, except
     // served modules every supported agent embeds with the API the recovery modules use.
+    // Each entry names the served module that calls it and the calls it makes.
     const agentEmbedded = {
         // Embedded since 2020 (MeshAgent 39a4f997); QueryKey with typed values (_type) since 2019.
         // Later changes touched only QueryKeyLastModified, which win-system-paths does not call.
-        'win-registry': 'QueryKey'
+        'win-registry': { usedBy: 'win-system-paths', apis: ['QueryKey'] },
+        // Embedded since 2020 (MeshAgent 39a4f997) with consoleUid() (2019) and Current().Active;
+        // recoverycore.js itself already calls the embedded consoleUid().
+        'user-sessions': { usedBy: 'win-terminal', apis: ['Current', 'consoleUid'] }
     };
     const polyfills = fs.readFileSync(path.join(__dirname, '..', 'microscript', 'ILibDuktape_Polyfills.c'), 'utf8');
-    for (const [name, api] of Object.entries(agentEmbedded)) {
+    for (const [name, { usedBy, apis }] of Object.entries(agentEmbedded)) {
         assert(polyfills.includes("addCompressedModule('" + name + "'"), name + ' must be embedded by the agent');
-        assert(fs.readFileSync(path.join(agents, 'modules_meshcore', 'win-system-paths.js'), 'utf8').includes('.' + api + '('), 'win-system-paths uses ' + name + '.' + api);
+        const userText = fs.readFileSync(path.join(agents, 'modules_meshcore', usedBy + '.js'), 'utf8');
+        assert(userText.includes("require('" + name + "')"), usedBy + ' requires ' + name);
+        for (const api of apis) assert(userText.includes('.' + api + '('), usedBy + ' uses ' + name + '.' + api);
     }
     const served = new Set(fs.readdirSync(path.join(agents, 'modules_meshcore')).filter(n => n.endsWith('.js')).map(n => n.slice(0, -3)).filter(n => !agentEmbedded[n]));
     for (const core of ['windows-recovery', 'windows-agentrecovery']) {
