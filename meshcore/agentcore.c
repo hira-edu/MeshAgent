@@ -632,7 +632,19 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 		return TRUE;
 	}
 
-	if (MeshRuntimeHost_LaunchLifecycleHostW(
+	DWORD updateError = GetLastError();
+	if (lifecycleExitCode == MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS)
+	{
+		// The update committed and the new package runs; a non-fatal step did not finish.
+		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update completed with warnings (exit=%lu)", lifecycleExitCode);
+		return TRUE;
+	}
+	MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update failed (exit=%lu LastError=%lu)", lifecycleExitCode, updateError);
+
+	// Diagnostic only: record the installed state after the failure. It never changes the result.
+	{
+		DWORD validateExitCode = ERROR_SUCCESS;
+		BOOL validated = MeshRuntimeHost_LaunchLifecycleHostW(
 			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UPDATE,
 			NULL,
 			NULL,
@@ -642,13 +654,10 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 			TRUE,
 			TRUE,
 			120000,
-			&lifecycleExitCode))
-	{
-		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update reported failure but final update validation passed");
-		return TRUE;
+			&validateExitCode);
+		MeshAgent_LogNativeInstallerEvent("...Post-failure update validation %s (exit=%lu)", validated ? "passed" : "failed", validateExitCode);
 	}
-
-	MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update failed (exit=%lu LastError=%lu)", lifecycleExitCode, GetLastError());
+	SetLastError(updateError != ERROR_SUCCESS ? updateError : ERROR_INSTALL_FAILURE);
 	return FALSE;
 }
 

@@ -4225,12 +4225,12 @@ ROLLBACK:
     ServiceBinding_Free(tx.originalBinding);
     for (size_t i = 0; i < _countof(tx.originalFileDacl); ++i) { free(tx.originalFileDacl[i]); }
     if (!success) { SetLastError(operationError); }
-    // The committed payload runs and its journal is resolved, but install,
-    // repair and update still report companions that did not reconcile.
+    // The committed payload runs and its journal is resolved, but companions that
+    // did not reconcile are still reported, as a warning distinct from failure.
     if (success && !companionsReconciled)
     {
-        ServiceDeploy_LogInstallEvent(L"[UPDATE] Committed %ls without reconciled recovery companions or firewall rules", serviceKeyName);
-        SetLastError(ERROR_INSTALL_FAILURE);
+        ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Committed %ls without reconciled recovery companions or firewall rules", serviceKeyName);
+        SetLastError(MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS);
         return FALSE;
     }
     return success;

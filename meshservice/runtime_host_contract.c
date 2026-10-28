@@ -3152,14 +3152,16 @@ void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine
         manifest.requireConfig);
 
     DWORD operationError = ok ? ERROR_SUCCESS : GetLastError();
-    ServiceDeploy_LogInstallEvent(L"[LIFECYCLE_HOST] Completed action=%ls status=%ls (Windows error hint=%lu)",
+    DWORD exitCode = MeshRuntimeHost_LifecycleExitCode(ok, operationError);
+    ServiceDeploy_LogInstallEvent(L"[LIFECYCLE_HOST] Completed action=%ls status=%ls exit=%lu (Windows error hint=%lu)",
         MeshRuntimeHost_LifecycleActionNameW(manifest.action),
-        ok ? L"success" : L"failed",
+        ok ? L"success" : (exitCode == MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS ? L"completed-with-warnings" : L"failed"),
+        exitCode,
         operationError);
     // ExitProcess bypasses CRT shutdown; preserve redirected validation JSON.
-    if (fflush(stdout) != 0) { ok = FALSE; }
+    if (fflush(stdout) != 0) { exitCode = ERROR_INSTALL_FAILURE; }
     (void)fflush(stderr);
-    ExitProcess(ok ? ERROR_SUCCESS : ERROR_INSTALL_FAILURE);
+    ExitProcess(exitCode);
 }
 
 void CALLBACK MeshLauncherCleanupW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
