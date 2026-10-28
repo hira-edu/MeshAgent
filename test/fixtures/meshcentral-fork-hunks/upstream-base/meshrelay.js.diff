@@ -1,0 +1,19 @@
+--- a/meshrelay.js
++++ b/meshrelay.js
+@@ -74,6 +74,7 @@
+     if ((rights == null) || (rights == MESHRIGHT_ADMIN)) { return true; }
+     if ((protocol == 1) && ((rights & MESHRIGHT_NOTERMINAL) != 0)) { return false; }
+     if ((protocol == 2) && ((rights & MESHRIGHT_NODESKTOP) != 0)) { return false; }
++    if ((protocol == 20) && ((rights & MESHRIGHT_NODESKTOP) != 0)) { return false; } // Desktop audio (fork relay protocol 20) is denied together with desktop
+     if ((protocol == 4) && ((rights & MESHRIGHT_NOREGISTRY) != 0)) { return false; }
+     if ((protocol == 5) && ((rights & MESHRIGHT_NOFILES) != 0)) { return false; }
+     return true;
+@@ -1042,7 +1043,7 @@
+                 if (typeof cookie.p == 'number') {
+                     var usages = [];
+                     if (cookie.p & 1) { usages.push(1); usages.push(6); usages.push(8); usages.push(9); } // Terminal
+-                    if (cookie.p & 2) { usages.push(2); } // Desktop
++                    if (cookie.p & 2) { usages.push(2); usages.push(20); } // Desktop, and desktop audio (relay protocol 20) which inherits the desktop share
+                     if (cookie.p & 4) { usages.push(5); usages.push(10); } // Files
+                     command.soptions.usages = usages;
+                 }

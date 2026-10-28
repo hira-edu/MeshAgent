@@ -90,12 +90,6 @@
       "state": "enforced",
       "reviewed": "Production's loader (sha256 68c45084, formerly patched at deploy time by deploy.py) plus S1.6. Three changes: core modules are added with a release version read from agents/module-versions.json, which pack.js writes from the last commit that changed packaged content (a missing manifest or module entry stops the server, naming the module; S1.6 1b34cff43 replaced the file-mtime version); only the preferred .js or .min.js copy of a module is sent; the proxy certificate is fetched with the certurl's own HTTPS hostname as SNI (align_proxy_certificate_sni)."
     },
-    "meshctrl.js": {
-      "state": "pending-rebase",
-      "forkBase": "1.2.1",
-      "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
-      "reviewed": "Identical to 1.2.1; no fork content. Lacks ServerVersion, --noregistry/--nosoftware, Defender and pending-reboot output, #8046, #8031, #7741, #7735, #7724."
-    },
     "meshdesktopmultiplex.js": {
       "state": "pending-rebase",
       "forkBase": "587973e8c",
@@ -103,10 +97,8 @@
       "reviewed": "Not reviewed hunk by hunk yet. Lacks #8006 and #7671; the consentAautoAccept typo is back and the terminaluservariable line is missing."
     },
     "meshrelay.js": {
-      "state": "pending-rebase",
-      "forkBase": "1.2.1",
-      "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
-      "reviewed": "1.2.1 plus one line (2747ad90d). Lacks #8006 rcookie null guard, 1.2.2 isProtocolAllowedByRights and #7671."
+      "state": "enforced",
+      "reviewed": "1.2.5 plus two fork hunks: guest share links that grant desktop also admit desktop audio (relay protocol 20, 2747ad90d); isProtocolAllowedByRights denies protocol 20 under NODESKTOP, like protocol 2 (plan S1). No upstream line is removed except the replaced share line."
     },
     "public/scripts/THIRD_PARTY_NOTICES.txt": {
       "state": "fork-only",
