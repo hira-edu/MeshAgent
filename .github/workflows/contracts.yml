@@ -28,15 +28,11 @@ env:
   # Precedence: dispatch input, then the repository variable, then main.
   MESHCENTRAL_REF: ${{ inputs.meshcentral_ref || vars.MESHCENTRAL_REF || 'main' }}
   # The fork does not carry the upstream release tags, and the upstream-base contract
-  # diffs against them. They are fetched from upstream and pinned to these commits, so a
+  # diffs against 1.2.5. The tag is fetched from upstream and pinned to this commit, so a
   # moved or replaced upstream tag fails the job instead of changing the baseline.
   MESHCENTRAL_UPSTREAM_URL: https://github.com/Ylianst/MeshCentral.git
   MESHCENTRAL_UPSTREAM_TAGS: >-
-    1.2.1=a2876029077b04a1708e2c92cbba96831f791b6a
     1.2.5=b09b1d60328de8e2d2f7387561ed51c64011c82a
-  # Optional override for the wrapper folder inside the MeshCentral checkout ('.' or
-  # 'deploy'). When unset, the folder is detected; see "Install MeshCentral wrapper".
-  MESHCENTRAL_WRAPPER_DIR: ${{ vars.MESHCENTRAL_WRAPPER_DIR }}
   # Node matches the duplicate server and production (SSOT D20). Python matches the
   # release workflow.
   NODE_VERSION: '20.20.2'
@@ -49,7 +45,39 @@ env:
   EXCLUDED_TESTS: |
     test/service_bundle_embedding_contract.js | Needs built MeshServiceRuntime executables (meshservice/x64/MeshServiceRuntime/MeshService-2022.exe and the ARM64 one) to extract and compare the embedded service DLL. The coordinated release workflow runs it after building ("Validate embedded service DLL parity").
     test/power_action_policy_lab_runtime.js | Lab-only: reads branding_config.local.json (local identities, never committed, and must not reach CI) and the gitignored meshcore/generated/meshagent_branding.h. Its tracked-source half, test/power_action_policy_contract.js, runs here.
-    test/deploy_service_host_export_runtime.py | Needs built x64 and ARM64 MeshServiceBundle DLLs (meshservice/{x64,ARM64}/MeshServiceBundle/MeshService-2022.dll), which this workflow does not build.
+    test/deploy_service_host_export_runtime.py | Needs built x64 and ARM64 MeshServiceBundle DLLs (meshservice/{x64,ARM64}/MeshServiceBundle/MeshService-2022.dll). No workflow in this repository builds them, so it runs only by hand after a local bundle build (docs/testing/README.md).
+    test/desktop_audio_bridge_runtime.js | Windows only: launches the built service DLL through rundll32 and captures the default render endpoint; off Windows it only prints a skip.
+    test/historical_migration_runtime.js | Destructive install/update/uninstall validation; requires --approved-host on a disposable Windows host with built packages.
+    test/http_request_alignment_runtime.js | Needs a built MeshAgent Windows binary (meshconsole/Release/MeshConsole64.exe) and runs it; there is no Windows build in this workflow. Run on an authorized Windows test host.
+    test/kvm_blockinput_runtime.js | Needs a built Windows service agent (MeshService-2022.exe) and an interactive Windows desktop session on an authorized test host.
+    test/kvm_bridge_connect_delay_runtime.js | Needs a built Windows service agent (MeshService-2022.exe) and an interactive Windows desktop session on an authorized test host.
+    test/kvm_bridge_crash_recovery_runtime.js | Needs a built Windows service agent (MeshService-2022.exe) and an interactive Windows desktop session on an authorized test host.
+    test/kvm_bridge_hardening_runtime.js | Needs a built Windows service agent (MeshService-2022.dll) and an interactive Windows desktop session on an authorized test host.
+    test/kvm_bridge_session_change_runtime.js | Needs a built Windows service agent (MeshService-2022.exe) and an interactive Windows desktop session on an authorized test host.
+    test/kvm_bridge_session_interrupt_runtime.js | Needs a built Windows service agent (MeshService-2022.exe) and an interactive Windows desktop session on an authorized test host.
+    test/kvm_capture_reconnect_runtime.js | Needs a built Windows service agent (an explicit MeshConsole64.exe) and an interactive Windows desktop session on an authorized test host.
+    test/kvm_elevated_input_runtime.js | Needs a built Windows service agent (MeshService-2022.exe) and an interactive Windows desktop session on an authorized test host.
+    test/kvm_initial_frame_runtime.js | Needs a built Windows service agent (MeshService-2022.exe) and an interactive Windows desktop session on an authorized test host.
+    test/kvm_multi_session_runtime.js | Needs a built Windows service agent (MeshService-2022.exe) and an interactive Windows desktop session on an authorized test host.
+    test/kvm_system_picture_runtime.js | Needs a built Windows service agent (MeshService-2022.exe) and an interactive Windows desktop session on an authorized test host.
+    test/large_file_transfer_runtime.js | Needs a built MeshAgent Windows binary (--runner MeshConsole64.exe) and runs it; there is no Windows build in this workflow. Run on an authorized Windows test host.
+    test/macos_install_runtime.js | Darwin only: runs the real /usr/bin/plutil and installs under POSIX paths (it prints SKIP elsewhere). This workflow has no macOS runner.
+    test/meshagent_provisioning_copy_runtime.js | Needs a built MeshAgent Windows binary (MeshService-Test.exe) and runs it; there is no Windows build in this workflow. Run on an authorized Windows test host.
+    test/meshcentral_certificate_admission_runtime.js | Live probe: connects to a running MeshCentral server named by --msh. No server runs here.
+    test/meshcentral_default3_mobile_connect_runtime.js | Needs the playwright package and a Chromium browser, which this workflow does not install.
+    test/meshcentral_desktop_startup_input_runtime.js | Needs the playwright package and a Chromium browser, which this workflow does not install.
+    test/meshcentral_inventory_runtime.js | Needs a built MeshAgent Windows binary (meshconsole/Release/MeshConsole64.exe) and runs it; there is no Windows build in this workflow. Run on an authorized Windows test host.
+    test/meshcentral_trackpad_adapter_runtime.js | Needs the playwright package and a Chromium browser, which this workflow does not install.
+    test/meshcentral_trackpad_loader_runtime.js | Needs the playwright package and a Chromium browser, which this workflow does not install. It also reads the served custom.js.
+    test/meshcentral_viewer_touch_harness_runtime.js | Needs the playwright package and a Chromium browser, which this workflow does not install.
+    test/partial_state_lifecycle_runtime.js | Runs -fullinstall/-fulluninstall of a built MeshService-2022.exe: changes the local Windows service on an approved test host.
+    test/ppl_diagnostic_runtime.js | Windows only: reads process protection state through PowerShell.
+    test/regression_cleanup_reporting_runtime.js | Builds and runs a .NET 10 fixture with dotnet run, which this workflow does not install.
+    test/scriptcontainer_lifecycle_runtime.js | Needs a built MeshAgent Windows binary (an explicit MeshConsole64.exe) and runs it; there is no Windows build in this workflow. Run on an authorized Windows test host.
+    test/scriptcontainer_startup_runtime.js | Needs a built MeshAgent Windows binary (an explicit MeshConsole64.exe) and runs it; there is no Windows build in this workflow. Run on an authorized Windows test host.
+    test/stress_churn_runtime.js | Runs -fullinstall/-fulluninstall of a built MeshService-2022.exe repeatedly: changes the local Windows service on an approved test host.
+    test/windows_inventory_runtime.js | Needs a built MeshAgent Windows binary (meshconsole/Release/MeshConsole64.exe) and runs it; there is no Windows build in this workflow. Run on an authorized Windows test host.
+    test/windows_terminal_failure_runtime.js | Needs a built MeshAgent Windows binary (meshconsole/Release/MeshConsole64.exe) and runs it; there is no Windows build in this workflow. Run on an authorized Windows test host.
 
 jobs:
   contracts:
@@ -127,27 +155,12 @@ jobs:
         id: wrapper
         run: |
           set -euo pipefail
-          # The deployment wrapper is the package.json named meshcentral-deploy. It sits at
-          # the repository root today and moves to deploy/ in Stage 1 (SSOT D1).
-          is_wrapper() {
-            local manifest="$MESHCENTRAL_ROOT/$1/package.json"
-            [ -f "$manifest" ] && [ "$(node -p 'require(process.argv[1]).name' "$manifest")" = meshcentral-deploy ]
-          }
-          if [ -n "${MESHCENTRAL_WRAPPER_DIR:-}" ]; then
-            dir="$MESHCENTRAL_WRAPPER_DIR"
-            is_wrapper "$dir" || { echo "::error::MESHCENTRAL_WRAPPER_DIR=$dir has no package.json named meshcentral-deploy"; exit 1; }
-          else
-            found=()
-            for candidate in . deploy; do
-              if is_wrapper "$candidate"; then found+=("$candidate"); fi
-            done
-            if [ "${#found[@]}" -ne 1 ]; then
-              echo "::error::Expected exactly one meshcentral-deploy package.json in MeshCentral (root or deploy/), found ${#found[@]}: ${found[*]:-none}. Set the MESHCENTRAL_WRAPPER_DIR variable."
-              exit 1
-            fi
-            dir="${found[0]}"
-          fi
-          wrapper="$(cd "$MESHCENTRAL_ROOT/$dir" && pwd)"
+          # The deployment wrapper is deploy/package.json, named meshcentral-deploy (Stage 1, SSOT D1).
+          wrapper="$MESHCENTRAL_ROOT/deploy"
+          manifest="$wrapper/package.json"
+          [ -f "$manifest" ] || { echo "::error::$manifest missing: MeshCentral $MESHCENTRAL_REF does not have the Stage 1 layout"; exit 1; }
+          name="$(node -p 'require(process.argv[1]).name' "$manifest")"
+          [ "$name" = meshcentral-deploy ] || { echo "::error::$manifest is named $name, not meshcentral-deploy"; exit 1; }
           test -f "$wrapper/package-lock.json" || { echo "::error::$wrapper/package-lock.json missing; npm ci needs it"; exit 1; }
           echo "MeshCentral wrapper: $wrapper"
           echo "MESHCENTRAL_WRAPPER_PATH=$wrapper" >> "$GITHUB_ENV"
@@ -240,6 +253,17 @@ jobs:
           while IFS= read -r t; do run_test js-contracts "$t" . node "$t"; done <<< "$tests"
           finish_group js-contracts
 
+      - name: Node runtimes (test/*_runtime.js)
+        # Behavioural probes that execute the agent modules and the MeshCentral fork in a vm with
+        # injected processes, files and timers. Probes that need built binaries, a Windows desktop,
+        # macOS, a browser or a live server are listed in EXCLUDED_TESTS with the reason.
+        if: ${{ !cancelled() && steps.wrapper.outcome == 'success' }}
+        run: |
+          source "$RUNNER_TEMP/test-runner.sh"
+          tests="$(expand 'test/*_runtime.js')" || exit 1
+          while IFS= read -r t; do run_test node-runtimes "$t" . node "$t"; done <<< "$tests"
+          finish_group node-runtimes
+
       - name: Python contracts (test/*_contract.py)
         if: ${{ !cancelled() && steps.wrapper.outcome == 'success' }}
         run: |
@@ -273,20 +297,12 @@ jobs:
           done
           finish_group deploy
 
-      - name: MeshCentral tests (node --test tests/*.test.js)
+      - name: MeshCentral tests (node --test deploy/tests/*.test.js)
         if: ${{ !cancelled() && steps.wrapper.outcome == 'success' }}
         run: |
           source "$RUNNER_TEMP/test-runner.sh"
-          # tests/ is at the MeshCentral root today; Stage 1 may move it beside the wrapper.
-          dirs=()
-          for candidate in tests deploy/tests; do
-            if [ -d "$MESHCENTRAL_ROOT/$candidate" ]; then dirs+=("$candidate"); fi
-          done
-          [ "${#dirs[@]}" -gt 0 ] || { echo "::error::No tests/ or deploy/tests/ folder in $MESHCENTRAL_ROOT"; exit 1; }
-          for d in "${dirs[@]}"; do
-            tests="$(cd "$MESHCENTRAL_ROOT" && expand "$d/*.test.js")" || exit 1
-            while IFS= read -r t; do run_test meshcentral "$t" "$MESHCENTRAL_ROOT" node --test "$t"; done <<< "$tests"
-          done
+          tests="$(cd "$MESHCENTRAL_ROOT" && expand 'deploy/tests/*.test.js')" || exit 1
+          while IFS= read -r t; do run_test meshcentral "$t" "$MESHCENTRAL_ROOT" node --test "$t"; done <<< "$tests"
           finish_group meshcentral
 
       - name: Summarise results

@@ -91,11 +91,13 @@ MeshCentral contracts and runtime tests find MeshCentral through
   generators), `deploy/meshcentral-web/public/scripts/custom.js` (the served
   `custom.js`) and `deploy/meshcentral-data` (local server state). A test that
   reads a wrapper file fails on a checkout without it.
-- The installed package: exactly one of `deploy/node_modules/meshcentral` or a
-  root `node_modules/meshcentral` left from the old wrapper layout. Neither or
-  both fails; delete the stale root `node_modules` if both exist. Install it in
+- The installed package: `deploy/node_modules/meshcentral`. Install it in
   `deploy/` with `npm run pack` (packs the fork into `deploy/dist/`, which the
-  wrapper lockfile pins) and then `npm ci`.
+  wrapper lockfile pins) and then `npm ci`. A root `node_modules/meshcentral` is
+  a stale install from before Stage 1 and fails with `Stale pre-Stage-1
+  meshcentral install`, whether the checkout came from `MESHCENTRAL_ROOT` or the
+  sibling fallback. Point `MESHCENTRAL_ROOT` at a checkout or worktree without a
+  root `node_modules`, or remove it.
 - The pinned upstream reference: the stock npm package named in
   `test/lib/meshcentral_upstream_reference.json` (`meshcentral` 1.2.5), which
   tests compare the fork with. Tests never download it. Populate it once per
@@ -136,6 +138,27 @@ absent. `deploy.py` and
 they ignore `MESHCENTRAL_ROOT`.
 
 ### MeshCentral fork contracts
+
+Contracts that guard behaviour execute the code they guard instead of matching
+its text. They load the fork file in a vm, or slice functions with
+`test/lib/source_extract.js` and run them with stubbed surroundings
+(`node test/source_extract_contract.js` tests the helper). Its `sourceBetween`
+and `extractFunction` throw when a marker or function is missing, so a check
+never passes on an empty slice. These run that way:
+
+- `meshcentral_agent_send_queue_contract.js`: the desktop multiplexor's agent
+  send queue (ordering, backlog pause and resume, replaced-agent completions,
+  traffic accounting).
+- `meshcentral_agent_redir_binary_frame_contract.js`: frame reassembly and
+  jumbo frames in `agent-redir-ws-0.1.1.js` and its `-min` build.
+- `meshcentral_desktop_same_size_contract.js`: a same-size screen command
+  restarts the viewer stream, in `agent-desktop-0.0.2.js` and its `-min` build.
+- `meshcentral_agent_update_hash_contract.js`: which hash the agent update
+  uses, through `CreateMeshAgent` in the fork and installed `meshagent.js`.
+- `meshcentral_service_host_selfupdate_contract.js`: the JavaScript updater in
+  both agent cores and the installer's Windows update delegation; its native C
+  checks read the sliced functions.
+- `promise_rejection_contract.js`: rejection propagation in `modules/promise.js`.
 
 `test/meshcentral_upstream_base_contract.js` checks that the MeshCentral fork
 package equals the pinned upstream reference plus reviewed changes. Its scope is
@@ -197,14 +220,11 @@ views and scripts, and the two viewer `-min` files) runs in the MeshCentral
 checkout with the toolchain pinned in `deploy/package.json`:
 
 ```powershell
-node deploy/scripts/regenerate.js --check --allow-pending ja-jp
+node deploy/scripts/regenerate.js --check
 ```
 
-It needs `npm ci` in `deploy/` and writes nothing with `--check`. Without
-`--allow-pending ja-jp` it fails on the stale `*_ja-jp` translations upstream
-1.2.5 ships, which its generators no longer produce. With it, those files are
-still listed, marked as skipped. `ja-jp` is the only pending id; others are
-refused.
+It needs `npm ci` in `deploy/` and writes nothing with `--check`. Every
+generated file must match; the fork ships no `*_ja-jp` translations (SSOT D23).
 
 `test/meshcentral_custom_js_script_refs_contract.js` reads only the string
 literals in the served `custom.js`,
@@ -218,9 +238,21 @@ fixture or options.
 
 ### Runtime probes
 
-Behavioral probes that require built files and exercise the agent at runtime.
-They generally follow `test/*_runtime.js` and must be run after a build so the
-binaries they load are present.
+Behavioral probes that exercise the agent at runtime. They generally follow
+`test/*_runtime.js`. Some execute the agent modules or the MeshCentral fork in a
+vm with injected processes, files and timers and need no build; the others load
+built binaries, so run them after a build.
+
+`.github/workflows/contracts.yml` runs every `test/*_runtime.js` on Linux,
+except the ones in its `EXCLUDED_TESTS` list, each with its reason: built
+Windows binaries, an interactive Windows desktop, a service install, macOS, a
+browser, a .NET SDK or a live server. A new runtime therefore runs in CI unless
+it is listed, and a listed path that no longer exists fails the job.
+
+`python test/deploy_service_host_export_runtime.py` checks that the built x64
+and ARM64 `MeshServiceBundle` DLLs export the service host entry points and that
+the deploy checks reject a DLL with one removed. No workflow builds those DLLs,
+so run it after a local bundle build.
 
 `python3 test/network_policy_branding_native.py` runs the production firewall
 label migration and WFP identity checks with in-memory COM/WFP stores and
@@ -922,6 +954,9 @@ python3 test/macos_message_helper_agent_runtime.py --agent /absolute/path/to/bui
 python3 test/js_timer_retention_runtime.py --agent /absolute/path/to/built/meshagent
 python3 test/posix_fs_modes_agent_runtime.py --agent /absolute/path/to/built/meshagent
 ```
+
+`macos_install_runtime.js` runs the real `/usr/bin/plutil` and installs under
+POSIX paths, so on any other platform it prints `SKIP (darwin only)` and exits 0.
 
 Installation probes redirect `/Library` writes into temporary directories and
 verify publication order, handled-failure cleanup, private file modes and retained

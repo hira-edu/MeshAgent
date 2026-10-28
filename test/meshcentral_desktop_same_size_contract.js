@@ -1,114 +1,117 @@
-const fs = require('fs');
-const path = require('path');
+'use strict';
+// Drives the fork's remote desktop viewer (agent-desktop-0.0.2.js and its -min build) in a vm and
+// checks that a screen-size command (7) for the size already shown is handled as a new stream, not
+// ignored: the agent sends one when capture restarts. Every screen command must reset the draw
+// queue (tiles from before it are dropped), re-send compression, unpause and the input-lock query,
+// and fire onScreenSizeChange. No browser or agent is used.
+const assert = require('assert');
+const vm = require('vm');
 const { forkFile } = require('./lib/meshcentral_paths');
+const { readSource, evidenceDirFromArgs, writeEvidence, runCases } = require('./lib/source_extract');
 
-function parseArgs(argv) {
-    const args = {};
-    for (let i = 2; i < argv.length; ++i) {
-        const token = argv[i];
-        if (!token.startsWith('--')) {
-            throw new Error(`Unexpected argument: ${token}`);
-        }
-        const key = token.substring(2);
-        const value = argv[i + 1];
-        if (value == null || value.startsWith('--')) {
-            args[key] = true;
-        } else {
-            args[key] = value;
-            i += 1;
-        }
-    }
-    return args;
+const assets = {
+    standard: forkFile('public/scripts/agent-desktop-0.0.2.js'),
+    minified: forkFile('public/scripts/agent-desktop-0.0.2-min.js')
+};
+
+function loadDesktop(filePath) {
+    const sandbox = {
+        console, Uint8Array, ArrayBuffer, String, Object, Math, JSON,
+        navigator: { platform: 'Linux x86_64', userAgent: 'contract' },
+        window: {}, document: {},
+        setTimeout() { return 0; }, clearTimeout() {}, setInterval() { return 0; }, clearInterval() {},
+        btoa: (text) => Buffer.from(text, 'binary').toString('base64'),
+        Image: function () {}
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(readSource(filePath, 'remote desktop viewer whose screen-size handling is driven'), sandbox, { filename: filePath });
+    assert.strictEqual(typeof sandbox.CreateAgentRemoteDesktop, 'function', filePath + ' must define CreateAgentRemoteDesktop');
+    return sandbox.CreateAgentRemoteDesktop;
 }
 
-function ensureDir(dirPath) {
-    fs.mkdirSync(dirPath, { recursive: true });
+function viewer(CreateAgentRemoteDesktop) {
+    const context = { setTransform() {}, clearRect() {}, drawImage() {}, fillRect() {}, putImageData() {} };
+    const canvas = { width: 0, height: 0, style: {}, getContext: () => context };
+    const desk = CreateAgentRemoteDesktop(canvas);
+    const sent = [];
+    const resizes = [];
+    desk.parent = { State: 3, send(data) { sent.push(data); }, xxStateChange() {} };
+    desk.onScreenSizeChange = (obj, width, height) => resizes.push([width, height]);
+    desk.onResize = () => {};
+    desk.State = 3;
+    return { desk, sent, resizes };
 }
 
-function writeJson(filePath, value) {
-    ensureDir(path.dirname(filePath));
-    fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+// Command 7, screen size: [0,7,0,8, w>>8, w, h>>8, h].
+function screen(desk, width, height) {
+    const view = new Uint8Array([0, 7, 0, 8, width >> 8, width & 0xFF, height >> 8, height & 0xFF]);
+    desk.ProcessBinaryCommand(7, 8, view);
 }
 
-function writeText(filePath, value) {
-    ensureDir(path.dirname(filePath));
-    fs.writeFileSync(filePath, value, 'utf8');
-}
+const bytes = (text) => Array.from(text, (ch) => ch.charCodeAt(0));
+const UNPAUSE = [0x00, 0x08, 0x00, 0x05, 0x00];
+const INPUT_LOCK_QUERY = [0x00, 87, 0x00, 0x05, 2];
 
-function assert(condition, message) {
-    if (!condition) {
-        throw new Error(message);
-    }
-}
-
-function evaluateStandardAsset(source) {
-    const startMarker = 'obj.ProcessScreenMsg = function (width, height) {';
-    const endMarker = 'obj.ProcessBinaryCommand = function (cmd, cmdsize, view) {';
-    const start = source.indexOf(startMarker);
-    const end = start >= 0 ? source.indexOf(endMarker, start) : -1;
-    const functionSource = start >= 0 && end > start ? source.slice(start, end) : '';
+function casesFor(CreateAgentRemoteDesktop) {
     return {
-        functionLocated: functionSource.length > 0,
-        acceptsSameSizeScreenPackets: !functionSource.includes('if ((obj.ScreenWidth == width) && (obj.ScreenHeight == height)) return;'),
-        updatesScreenDimensions: functionSource.includes('obj.ScreenWidth = obj.width = width;') &&
-            functionSource.includes('obj.ScreenHeight = obj.height = height;'),
-        resetsPendingDrawQueue: functionSource.includes('obj.resetStreamState();'),
-        refreshesCompressionHandshakeOnResize: functionSource.includes('obj.SendCompressionLevel(obj.ImageType);'),
-        sendsUnpauseOnResize: functionSource.includes('obj.SendUnPause();'),
-        sendsInputLockQueryOnResize: functionSource.includes('obj.SendRemoteInputLock(2);'),
-        firesResizeEventForAcceptedResize: functionSource.includes('if (obj.onScreenSizeChange != null) { obj.onScreenSizeChange(obj, obj.ScreenWidth, obj.ScreenHeight, obj.CanvasId); }')
-    };
-}
-
-function evaluateMinifiedAsset(source) {
-    // Minifiers may rename the viewer object when its reference counts change.
-    const objectName = source.match(/([\w$]+)\.ProcessScreenMsg=function\(/);
-    if (objectName) { source = source.replace(new RegExp('\\b' + objectName[1].replace(/\$/g, '\\$') + '\\b', 'g'), 'n'); }
-    return {
-        functionLocated: source.includes('n.ProcessScreenMsg=function(e,t){'),
-        acceptsSameSizeScreenPackets: !source.includes('n.ScreenWidth!=e||n.ScreenHeight!=t'),
-        updatesScreenDimensions: source.includes('n.ScreenWidth=n.width=e,n.ScreenHeight=n.height=t'),
-        resetsPendingDrawQueue: source.includes('n.resetStreamState(),'),
-        refreshesCompressionHandshakeOnResize: source.includes('n.SendCompressionLevel(n.ImageType),n.SendUnPause(),n.SendRemoteInputLock(2)'),
-        sendsInputLockQueryOnResize: source.includes('n.SendRemoteInputLock(2)'),
-        firesResizeEventForAcceptedResize: source.includes('null!=n.onScreenSizeChange&&n.onScreenSizeChange(n,n.ScreenWidth,n.ScreenHeight,n.CanvasId)')
-    };
-}
-
-function main() {
-    const args = parseArgs(process.argv);
-    const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const desktopPath = forkFile('public/scripts/agent-desktop-0.0.2.js');
-    const desktopMinPath = forkFile('public/scripts/agent-desktop-0.0.2-min.js');
-    const checks = {
-        standard: evaluateStandardAsset(fs.readFileSync(desktopPath, 'utf8')),
-        minified: evaluateMinifiedAsset(fs.readFileSync(desktopMinPath, 'utf8'))
-    };
-
-    for (const [assetName, assetChecks] of Object.entries(checks)) {
-        for (const [name, passed] of Object.entries(assetChecks)) {
-            assert(passed, `${assetName}.${name} failed`);
+        firstScreenSetsSizeAndStartsStream() {
+            const { desk, sent, resizes } = viewer(CreateAgentRemoteDesktop);
+            screen(desk, 1280, 720);
+            assert.strictEqual(desk.ScreenWidth, 1280);
+            assert.strictEqual(desk.ScreenHeight, 720);
+            assert.deepStrictEqual(resizes, [[1280, 720]]);
+            const packets = sent.map(bytes);
+            assert(packets.some((p) => p[1] === 0x05 && p[3] === 0x0A), 'compression is sent');
+            assert(packets.some((p) => p.join() === UNPAUSE.join()), 'unpause is sent');
+            assert(packets.some((p) => p.join() === INPUT_LOCK_QUERY.join()), 'the input-lock state is queried');
+        },
+        sameSizeScreenRestartsTheStream() {
+            const { desk, sent, resizes } = viewer(CreateAgentRemoteDesktop);
+            screen(desk, 1280, 720);
+            sent.length = 0;
+            resizes.length = 0;
+            desk.PendingOperations.push([5, 2, {}, 0, 0]); // a tile decoded before the restart
+            desk.tilesReceived = 7;
+            desk.TilesDrawn = 2;
+            const generation = desk.drawGeneration;
+            screen(desk, 1280, 720);
+            assert.strictEqual(desk.PendingOperations.length, 0, 'tiles queued before the restart are dropped');
+            assert.strictEqual(desk.tilesReceived, 0, 'the tile counter restarts');
+            assert.strictEqual(desk.TilesDrawn, 0, 'the drawn counter restarts');
+            assert(desk.drawGeneration > generation, 'tiles still decoding from before the restart are discarded');
+            const packets = sent.map(bytes);
+            assert(packets.some((p) => p[1] === 0x05 && p[3] === 0x0A), 'compression is re-sent');
+            assert(packets.some((p) => p.join() === UNPAUSE.join()), 'unpause is re-sent');
+            assert(packets.some((p) => p.join() === INPUT_LOCK_QUERY.join()), 'the input-lock state is queried again');
+            assert.deepStrictEqual(resizes, [[1280, 720]], 'the size change is evented for the same size too');
+        },
+        newSizeIsApplied() {
+            const { desk, resizes } = viewer(CreateAgentRemoteDesktop);
+            screen(desk, 1280, 720);
+            screen(desk, 1920, 1080);
+            assert.strictEqual(desk.ScreenWidth, 1920);
+            assert.strictEqual(desk.ScreenHeight, 1080);
+            assert.strictEqual(desk.width, 1920);
+            assert.strictEqual(desk.height, 1080);
+            assert.deepStrictEqual(resizes, [[1280, 720], [1920, 1080]]);
         }
-    }
-
-    const report = {
-        desktopPath,
-        desktopMinPath,
-        checks
     };
-
-    if (evidenceDir) {
-        writeJson(path.join(evidenceDir, 'meshcentral_desktop_same_size_contract.json'), report);
-        writeText(path.join(evidenceDir, 'summary.txt'), [
-            `DESKTOP_PATH=${desktopPath}`,
-            `DESKTOP_MIN_PATH=${desktopMinPath}`,
-            'SUCCESS=true',
-            `STANDARD_CHECKS=${Object.entries(checks.standard).map(([name, passed]) => `${name}:${passed}`).join(',')}`,
-            `MINIFIED_CHECKS=${Object.entries(checks.minified).map(([name, passed]) => `${name}:${passed}`).join(',')}`
-        ].join('\n') + '\n');
-    } else {
-        process.stdout.write(JSON.stringify(report, null, 2) + '\n');
-    }
 }
 
-main();
+const report = { assets, results: {} };
+let failed = 0;
+for (const [name, filePath] of Object.entries(assets)) {
+    const run = runCases('meshcentral_desktop_same_size_contract ' + name, casesFor(loadDesktop(filePath)));
+    report.results[name] = run.results;
+    failed += run.failed;
+}
+if (failed) { process.exitCode = 1; }
+
+const evidenceDir = evidenceDirFromArgs(process.argv);
+if (evidenceDir) {
+    writeEvidence(evidenceDir, 'meshcentral_desktop_same_size_contract', report, [
+        'DESKTOP_PATH=' + assets.standard,
+        'DESKTOP_MIN_PATH=' + assets.minified,
+        'SUCCESS=' + (failed === 0)
+    ]);
+}

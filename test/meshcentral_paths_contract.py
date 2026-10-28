@@ -28,8 +28,7 @@ def make_fork(directory):
     return directory
 
 
-def install_package(root, layout_name, name="meshcentral"):
-    rel = dict(paths.PACKAGE_LAYOUTS)[layout_name]
+def install_package(root, rel, name="meshcentral"):
     directory = root / rel
     directory.mkdir(parents=True)
     (directory / "package.json").write_text(json.dumps({"name": name, "version": "1.2.5"}), encoding="utf-8")
@@ -112,44 +111,53 @@ def default_meshagent_root_is_two_levels_up():
     assert (paths.MESHAGENT_ROOT / "AGENTS.md").is_file(), "MESHAGENT_ROOT must be the MeshAgent checkout"
 
 
-def wrapper_root_layout():
+def deploy_package():
     agent, sibling = workspace(True)
-    directory = install_package(sibling, "wrapper-root")
-    assert directory == sibling / "node_modules" / "meshcentral"
-    assert paths.installed_package_dir({}, agent) == ("wrapper-root", directory)
-
-
-def deploy_layout():
-    agent, sibling = workspace(True)
-    directory = install_package(sibling, "deploy")
+    directory = install_package(sibling, paths.PACKAGE_DIR)
     assert directory == sibling / "deploy" / "node_modules" / "meshcentral"
-    found = paths.installed_package_dir({}, agent)
-    assert found.layout == "deploy" and found.path == directory
+    assert paths.installed_package_dir({}, agent) == directory
 
 
-def both_layouts_raise():
+def stale_root_install_is_refused_without_env():
+    # The local case: no MESHCENTRAL_ROOT, and the sibling checkout still has a pre-Stage-1 root install.
     agent, sibling = workspace(True)
-    a = install_package(sibling, "wrapper-root")
-    b = install_package(sibling, "deploy")
-    raises_with(lambda: paths.installed_package_dir({}, agent), ["ambiguous", "wrapper-root", a, "deploy", b])
+    install_package(sibling, paths.PACKAGE_DIR)
+    stale = install_package(sibling, paths.STALE_ROOT_PACKAGE_DIR)
+    raises_with(lambda: paths.installed_package_dir({}, agent),
+                ["Stale pre-Stage-1", stale, "MESHCENTRAL_ROOT is not set",
+                 sibling / "deploy" / "node_modules" / "meshcentral", "Set MESHCENTRAL_ROOT"])
 
 
-def no_layout_raises():
+def stale_root_install_is_refused_with_env():
+    agent, _ = workspace(False)
+    other = make_fork(unique("stale") / "MeshCentral")
+    stale = install_package(other, paths.STALE_ROOT_PACKAGE_DIR)
+    raises_with(lambda: paths.installed_package_dir({"MESHCENTRAL_ROOT": str(other)}, agent),
+                ["Stale pre-Stage-1", stale, f"MESHCENTRAL_ROOT points at {other}"])
+
+
+def root_install_is_never_used():
+    # A root install alone is not a fallback: it is refused, not returned.
+    agent, sibling = workspace(True)
+    install_package(sibling, paths.STALE_ROOT_PACKAGE_DIR)
+    raises_with(lambda: paths.installed_package_dir({}, agent), ["Stale pre-Stage-1"])
+
+
+def no_package_raises():
     agent, sibling = workspace(True)
     raises_with(lambda: paths.installed_package_dir({}, agent),
-                ["not found", "wrapper-root", sibling / "node_modules" / "meshcentral",
-                 "deploy", sibling / "deploy" / "node_modules" / "meshcentral"])
+                ["not found", sibling / "deploy" / "node_modules" / "meshcentral", "npm ci"])
 
 
-def layout_without_manifest_raises():
+def package_without_manifest_raises():
     agent, sibling = workspace(True)
     (sibling / "deploy" / "node_modules" / "meshcentral").mkdir(parents=True)
-    raises_with(lambda: paths.installed_package_dir({}, agent), ["layout deploy", "package.json"])
+    raises_with(lambda: paths.installed_package_dir({}, agent), ["no readable package.json"])
 
 
-def layout_with_other_package_raises():
+def package_with_other_name_raises():
     agent, sibling = workspace(True)
-    install_package(sibling, "wrapper-root", "not-meshcentral")
+    install_package(sibling, paths.PACKAGE_DIR, "not-meshcentral")
     raises_with(lambda: paths.installed_package_dir({}, agent), ['"not-meshcentral"', 'not "meshcentral"'])
 
 
@@ -407,9 +415,10 @@ def fetch_refuses_a_folder_it_did_not_make():
 CASES = [
     env_set_is_used, env_relative_is_resolved, env_missing_raises, env_not_a_directory_raises,
     env_without_markers_raises, empty_env_falls_back_to_sibling, sibling_present_is_used,
-    sibling_absent_raises, default_meshagent_root_is_two_levels_up, wrapper_root_layout, deploy_layout,
-    both_layouts_raise, no_layout_raises, layout_without_manifest_raises, layout_with_other_package_raises,
-    installed_package_needs_root, fork_file_is_under_root, fork_file_rejects_escapes, fork_file_needs_root,
+    sibling_absent_raises, default_meshagent_root_is_two_levels_up, deploy_package,
+    stale_root_install_is_refused_without_env, stale_root_install_is_refused_with_env,
+    root_install_is_never_used, no_package_raises, package_without_manifest_raises,
+    package_with_other_name_raises, installed_package_needs_root, fork_file_is_under_root, fork_file_rejects_escapes, fork_file_needs_root,
     wrapper_file_is_under_deploy, wrapper_missing_names_stage1, wrapper_with_other_name_raises,
     tree_digest_matches_node_fixture, upstream_default_cache_is_under_artifacts,
     upstream_verified_reference_is_returned, upstream_missing_names_the_command,

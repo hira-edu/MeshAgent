@@ -6,7 +6,9 @@
 //                    the sibling <MeshAgent root>/../MeshCentral, where the MeshAgent root is two
 //                    levels above this file. Worktrees under MeshAgent/.claude/worktrees have no
 //                    sibling, so they must set MESHCENTRAL_ROOT. Nothing missing is ever returned.
-// Installed package: one of the named layouts below. Exactly one must exist.
+// Installed package: <root>/deploy/node_modules/meshcentral, installed by the deployment wrapper
+//                    (Stage 1). A package at <root>/node_modules/meshcentral is a stale install from
+//                    before Stage 1 and is refused, because Node would resolve it first from the root.
 // Fork files:        files of the fork package at the repo root, such as meshagent.js.
 // Upstream package:  the stock npm package pinned in meshcentral_upstream_reference.json, extracted
 //                    into a git-ignored cache by test/lib/fetch_upstream_reference.py and verified
@@ -26,12 +28,10 @@ const ROOT_MARKERS = Object.freeze([
     Object.freeze({ rel: 'agents', kind: 'directory' })
 ]);
 
-const PACKAGE_LAYOUTS = Object.freeze([
-    // The wrapper's package.json and node_modules at the repo root (before Stage 1).
-    Object.freeze({ name: 'wrapper-root', rel: path.join('node_modules', 'meshcentral') }),
-    // The wrapper moved under deploy/ (Stage 1).
-    Object.freeze({ name: 'deploy', rel: path.join('deploy', 'node_modules', 'meshcentral') })
-]);
+// The installed package, relative to the MeshCentral root (Stage 1 layout).
+const PACKAGE_DIR = path.join('deploy', 'node_modules', 'meshcentral');
+// The pre-Stage-1 location. It is never used: its presence is an error (see installedPackageDir).
+const STALE_ROOT_PACKAGE_DIR = path.join('node_modules', 'meshcentral');
 
 class MeshCentralPathError extends Error {
     constructor(message) {
@@ -81,34 +81,38 @@ function meshcentralRoot(options) {
     return checkRoot(path.resolve(meshagentRoot, '..', 'MeshCentral'), 'sibling of the MeshAgent root ' + meshagentRoot + '; MESHCENTRAL_ROOT is not set');
 }
 
-// Returns { layout, dir } for the installed meshcentral npm package, or throws MeshCentralPathError
-// when neither layout or both layouts are present.
+// Returns { dir } for the installed meshcentral npm package, or throws MeshCentralPathError when it
+// is missing, is not the meshcentral package, or a stale pre-Stage-1 install sits at the root.
 function installedPackageDir(options) {
+    const env = (options && options.env) || process.env;
     const root = meshcentralRoot(options);
-    const candidates = PACKAGE_LAYOUTS.map((layout) => ({ layout: layout.name, dir: path.join(root, layout.rel) }));
-    const describe = candidates.map((candidate) => candidate.layout + ' (' + candidate.dir + ')').join(' and ');
-    const present = candidates.filter((candidate) => statOrNull(candidate.dir) !== null);
-    if (present.length === 0) {
-        throw new MeshCentralPathError('Installed meshcentral package not found: neither ' + describe + ' exists. Install the wrapper dependencies.');
+    const stale = path.join(root, STALE_ROOT_PACKAGE_DIR);
+    if (statOrNull(stale) !== null) {
+        const how = (env.MESHCENTRAL_ROOT !== undefined && env.MESHCENTRAL_ROOT !== '')
+            ? 'MESHCENTRAL_ROOT points at ' + root
+            : 'MESHCENTRAL_ROOT is not set, so the sibling checkout ' + root + ' is used';
+        throw new MeshCentralPathError('Stale pre-Stage-1 meshcentral install at ' + stale + ' (' + how + '). Since Stage 1 the package is installed only at ' +
+            path.join(root, PACKAGE_DIR) + '. Set MESHCENTRAL_ROOT to a MeshCentral checkout or worktree without a root node_modules, or remove ' + path.join(root, 'node_modules') + '.');
     }
-    if (present.length > 1) {
-        throw new MeshCentralPathError('Installed meshcentral package is ambiguous: both ' + describe + ' exist. Remove the stale layout.');
+    const dir = path.join(root, PACKAGE_DIR);
+    const stat = statOrNull(dir);
+    if (stat === null) {
+        throw new MeshCentralPathError('Installed meshcentral package not found at ' + dir + '. Install the wrapper dependencies (npm ci in ' + path.join(root, WRAPPER_DIR) + ').');
     }
-    const found = present[0];
-    if (!statOrNull(found.dir).isDirectory()) {
-        throw new MeshCentralPathError('Installed meshcentral package path ' + found.dir + ' (layout ' + found.layout + ') is not a directory.');
+    if (!stat.isDirectory()) {
+        throw new MeshCentralPathError('Installed meshcentral package path ' + dir + ' is not a directory.');
     }
-    const manifestPath = path.join(found.dir, 'package.json');
+    const manifestPath = path.join(dir, 'package.json');
     let manifest;
     try {
         manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     } catch (error) {
-        throw new MeshCentralPathError('Installed meshcentral package (layout ' + found.layout + ') has no readable package.json at ' + manifestPath + ': ' + error.message);
+        throw new MeshCentralPathError('Installed meshcentral package has no readable package.json at ' + manifestPath + ': ' + error.message);
     }
     if (manifest.name !== 'meshcentral') {
-        throw new MeshCentralPathError('Installed package at ' + found.dir + ' (layout ' + found.layout + ') is named ' + JSON.stringify(manifest.name) + ', not "meshcentral".');
+        throw new MeshCentralPathError('Installed package at ' + dir + ' is named ' + JSON.stringify(manifest.name) + ', not "meshcentral".');
     }
-    return { layout: found.layout, dir: found.dir };
+    return { dir };
 }
 
 // Returns the absolute path of a fork package file at the MeshCentral repo root. The root is
@@ -280,7 +284,8 @@ function upstreamPackageDir(options) {
 
 module.exports = {
     MESHAGENT_ROOT,
-    PACKAGE_LAYOUTS,
+    PACKAGE_DIR,
+    STALE_ROOT_PACKAGE_DIR,
     ROOT_MARKERS,
     REFERENCE_PIN_PATH,
     UPSTREAM_CACHE_ENV,

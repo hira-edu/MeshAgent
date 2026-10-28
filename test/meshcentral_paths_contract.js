@@ -17,9 +17,8 @@ function makeFork(dir) {
     return dir;
 }
 
-function installPackage(root, layoutName, name) {
-    const layout = paths.PACKAGE_LAYOUTS.find((entry) => entry.name === layoutName);
-    const dir = path.join(root, layout.rel);
+function installPackage(root, rel, name) {
+    const dir = path.join(root, rel);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: name || 'meshcentral', version: '1.2.5' }));
     return dir;
@@ -93,37 +92,46 @@ const cases = {
         assert.strictEqual(paths.MESHAGENT_ROOT, path.resolve(__dirname, '..'));
         assert(fs.existsSync(path.join(paths.MESHAGENT_ROOT, 'AGENTS.md')), 'MESHAGENT_ROOT must be the MeshAgent checkout');
     },
-    wrapperRootLayout() {
+    deployPackage() {
         const ws = workspace(true);
-        const dir = installPackage(ws.sibling, 'wrapper-root');
-        assert.deepStrictEqual(paths.installedPackageDir({ env: {}, meshagentRoot: ws.meshagentRoot }), { layout: 'wrapper-root', dir });
-        assert.strictEqual(dir, path.join(ws.sibling, 'node_modules', 'meshcentral'));
-    },
-    deployLayout() {
-        const ws = workspace(true);
-        const dir = installPackage(ws.sibling, 'deploy');
-        assert.deepStrictEqual(paths.installedPackageDir({ env: {}, meshagentRoot: ws.meshagentRoot }), { layout: 'deploy', dir });
+        const dir = installPackage(ws.sibling, paths.PACKAGE_DIR);
+        assert.deepStrictEqual(paths.installedPackageDir({ env: {}, meshagentRoot: ws.meshagentRoot }), { dir });
         assert.strictEqual(dir, path.join(ws.sibling, 'deploy', 'node_modules', 'meshcentral'));
     },
-    bothLayoutsThrow() {
+    staleRootInstallIsRefusedWithoutEnv() {
+        // The local case: no MESHCENTRAL_ROOT, and the sibling checkout still has a pre-Stage-1 root install.
         const ws = workspace(true);
-        const a = installPackage(ws.sibling, 'wrapper-root');
-        const b = installPackage(ws.sibling, 'deploy');
-        throwsWith(() => paths.installedPackageDir({ env: {}, meshagentRoot: ws.meshagentRoot }), ['ambiguous', 'wrapper-root', a, 'deploy', b]);
+        installPackage(ws.sibling, paths.PACKAGE_DIR);
+        const stale = installPackage(ws.sibling, paths.STALE_ROOT_PACKAGE_DIR);
+        throwsWith(() => paths.installedPackageDir({ env: {}, meshagentRoot: ws.meshagentRoot }),
+            ['Stale pre-Stage-1', stale, 'MESHCENTRAL_ROOT is not set', path.join(ws.sibling, 'deploy', 'node_modules', 'meshcentral'), 'Set MESHCENTRAL_ROOT']);
     },
-    noLayoutThrows() {
+    staleRootInstallIsRefusedWithEnv() {
+        const ws = workspace(false);
+        const other = makeFork(path.join(temp, 'stale' + (counter++), 'MeshCentral'));
+        const stale = installPackage(other, paths.STALE_ROOT_PACKAGE_DIR);
+        throwsWith(() => paths.installedPackageDir({ env: { MESHCENTRAL_ROOT: other }, meshagentRoot: ws.meshagentRoot }),
+            ['Stale pre-Stage-1', stale, 'MESHCENTRAL_ROOT points at ' + other]);
+    },
+    rootInstallIsNeverUsed() {
+        // A root install alone is not a fallback: it is refused, not returned.
+        const ws = workspace(true);
+        installPackage(ws.sibling, paths.STALE_ROOT_PACKAGE_DIR);
+        throwsWith(() => paths.installedPackageDir({ env: {}, meshagentRoot: ws.meshagentRoot }), ['Stale pre-Stage-1']);
+    },
+    noPackageThrows() {
         const ws = workspace(true);
         throwsWith(() => paths.installedPackageDir({ env: {}, meshagentRoot: ws.meshagentRoot }),
-            ['not found', 'wrapper-root', path.join(ws.sibling, 'node_modules', 'meshcentral'), 'deploy', path.join(ws.sibling, 'deploy', 'node_modules', 'meshcentral')]);
+            ['not found', path.join(ws.sibling, 'deploy', 'node_modules', 'meshcentral'), 'npm ci']);
     },
-    layoutWithoutManifestThrows() {
+    packageWithoutManifestThrows() {
         const ws = workspace(true);
         fs.mkdirSync(path.join(ws.sibling, 'deploy', 'node_modules', 'meshcentral'), { recursive: true });
-        throwsWith(() => paths.installedPackageDir({ env: {}, meshagentRoot: ws.meshagentRoot }), ['layout deploy', 'package.json']);
+        throwsWith(() => paths.installedPackageDir({ env: {}, meshagentRoot: ws.meshagentRoot }), ['no readable package.json']);
     },
-    layoutWithOtherPackageThrows() {
+    packageWithOtherNameThrows() {
         const ws = workspace(true);
-        installPackage(ws.sibling, 'wrapper-root', 'not-meshcentral');
+        installPackage(ws.sibling, paths.PACKAGE_DIR, 'not-meshcentral');
         throwsWith(() => paths.installedPackageDir({ env: {}, meshagentRoot: ws.meshagentRoot }), ['"not-meshcentral"', 'not "meshcentral"']);
     },
     installedPackageNeedsRoot() {

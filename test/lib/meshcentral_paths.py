@@ -6,7 +6,9 @@ MeshCentral root:  MESHCENTRAL_ROOT when set (it must exist and look like the fo
                    sibling <MeshAgent root>/../MeshCentral, where the MeshAgent root is two levels
                    above this file. Worktrees under MeshAgent/.claude/worktrees have no sibling, so
                    they must set MESHCENTRAL_ROOT. Nothing missing is ever returned.
-Installed package: one of the named layouts in PACKAGE_LAYOUTS. Exactly one must exist.
+Installed package: <root>/deploy/node_modules/meshcentral, installed by the deployment wrapper
+                   (Stage 1). A package at <root>/node_modules/meshcentral is a stale install from
+                   before Stage 1 and is refused, because Node would resolve it first from the root.
 Fork files:        files of the fork package at the repo root, such as meshagent.js.
 Upstream package:  the stock npm package pinned in meshcentral_upstream_reference.json, extracted
                    into a git-ignored cache by test/lib/fetch_upstream_reference.py and verified
@@ -23,28 +25,20 @@ Import from a test in test/:
 import json
 import os
 from pathlib import Path
-from typing import NamedTuple
 
 MESHAGENT_ROOT = Path(__file__).resolve().parents[2]
 
 # Files every MeshCentral fork checkout has at its root, before and after the Stage 1 restructure.
 ROOT_MARKERS = (("meshagent.js", "file"), ("agents", "directory"))
 
-PACKAGE_LAYOUTS = (
-    # The wrapper's package.json and node_modules at the repo root (before Stage 1).
-    ("wrapper-root", Path("node_modules") / "meshcentral"),
-    # The wrapper moved under deploy/ (Stage 1).
-    ("deploy", Path("deploy") / "node_modules" / "meshcentral"),
-)
+# The installed package, relative to the MeshCentral root (Stage 1 layout).
+PACKAGE_DIR = Path("deploy") / "node_modules" / "meshcentral"
+# The pre-Stage-1 location. It is never used: its presence is an error (see installed_package_dir).
+STALE_ROOT_PACKAGE_DIR = Path("node_modules") / "meshcentral"
 
 
 class MeshCentralPathError(RuntimeError):
     pass
-
-
-class InstalledPackage(NamedTuple):
-    layout: str
-    path: Path
 
 
 def _exists(target):
@@ -87,36 +81,38 @@ def meshcentral_root(env=None, meshagent_root=None):
 
 
 def installed_package_dir(env=None, meshagent_root=None):
-    """Return InstalledPackage(layout, path) for the installed meshcentral npm package.
+    """Return the absolute folder of the installed meshcentral npm package.
 
-    Raises MeshCentralPathError when neither layout or both layouts are present.
+    Raises MeshCentralPathError when it is missing, is not the meshcentral package, or a stale
+    pre-Stage-1 install sits at the root.
     """
+    env = os.environ if env is None else env
     root = meshcentral_root(env, meshagent_root)
-    candidates = [InstalledPackage(name, root / rel) for name, rel in PACKAGE_LAYOUTS]
-    describe = " and ".join(f"{c.layout} ({c.path})" for c in candidates)
-    present = [c for c in candidates if _exists(c.path)]
-    if not present:
+    stale = root / STALE_ROOT_PACKAGE_DIR
+    if _exists(stale):
+        how = (f"MESHCENTRAL_ROOT points at {root}" if env.get("MESHCENTRAL_ROOT")
+               else f"MESHCENTRAL_ROOT is not set, so the sibling checkout {root} is used")
         raise MeshCentralPathError(
-            f"Installed meshcentral package not found: neither {describe} exists. Install the wrapper dependencies.")
-    if len(present) > 1:
+            f"Stale pre-Stage-1 meshcentral install at {stale} ({how}). Since Stage 1 the package is "
+            f"installed only at {root / PACKAGE_DIR}. Set MESHCENTRAL_ROOT to a MeshCentral checkout or "
+            f"worktree without a root node_modules, or remove {root / 'node_modules'}.")
+    directory = root / PACKAGE_DIR
+    if not _exists(directory):
         raise MeshCentralPathError(
-            f"Installed meshcentral package is ambiguous: both {describe} exist. Remove the stale layout.")
-    found = present[0]
-    if not found.path.is_dir():
-        raise MeshCentralPathError(
-            f"Installed meshcentral package path {found.path} (layout {found.layout}) is not a directory.")
-    manifest_path = found.path / "package.json"
+            f"Installed meshcentral package not found at {directory}. Install the wrapper dependencies "
+            f"(npm ci in {root / WRAPPER_DIR}).")
+    if not directory.is_dir():
+        raise MeshCentralPathError(f"Installed meshcentral package path {directory} is not a directory.")
+    manifest_path = directory / "package.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise MeshCentralPathError(
-            f"Installed meshcentral package (layout {found.layout}) has no readable package.json at "
-            f"{manifest_path}: {error}") from error
+            f"Installed meshcentral package has no readable package.json at {manifest_path}: {error}") from error
     if manifest.get("name") != "meshcentral":
         raise MeshCentralPathError(
-            f"Installed package at {found.path} (layout {found.layout}) is named "
-            f"{json.dumps(manifest.get('name'))}, not \"meshcentral\".")
-    return found
+            f"Installed package at {directory} is named {json.dumps(manifest.get('name'))}, not \"meshcentral\".")
+    return directory
 
 
 # The deployment wrapper (Stage 1 layout): <root>/deploy, whose package.json is named
