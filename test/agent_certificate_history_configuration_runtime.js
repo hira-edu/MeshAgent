@@ -9,9 +9,17 @@ const vm = require('vm');
 const {EventEmitter} = require('events');
 const {spawnSync} = require('child_process');
 const {createRequire} = require('module');
-const {installedPackageDir} = require('./lib/meshcentral_paths');
+const {forkFile, installedPackageDir} = require('./lib/meshcentral_paths');
 const forge = createRequire(path.join(installedPackageDir().dir, 'package.json'))('node-forge');
 const {certificateHashes, endpointCertificate} = require('../tools/configure_agent_certificate_history');
+
+// Since Stage 1 deploy.py ships the fork's agentcertificatehistory.js, so the copy tested here must
+// be the one the server loads.
+{
+    const normalise = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+    assert.strictEqual(normalise(forkFile('agentcertificatehistory.js')), normalise(path.resolve(__dirname, '../tools/configure_agent_certificate_history.js')),
+        'MeshCentral agentcertificatehistory.js must equal MeshAgent tools/configure_agent_certificate_history.js');
+}
 
 async function main() {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'certificate-history-'));
