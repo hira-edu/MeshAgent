@@ -13,15 +13,6 @@
         "public/scripts/agent-redir-ws-0.1.1-min.js"
       ]
     },
-    "desktop-audio-control": {
-      "script": "deploy/scripts/build-desktop-audio-control.js",
-      "args": [
-        "--check"
-      ],
-      "covers": [
-        "the generated desktop audio block at the end of public/scripts/agent-redir-ws-0.1.1.js and public/scripts/agent-redir-ws-0.1.1-min.js"
-      ]
-    },
     "views-translations": {
       "script": "deploy/scripts/regenerate.js",
       "args": [
@@ -51,7 +42,7 @@
       "relation": "minified",
       "source": "public/scripts/agent-redir-ws-0.1.1.js",
       "builder": "viewer",
-      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain, viewer; D25): translate.js minifyall of agent-redir-ws-0.1.1.js up to the generated desktop audio block, followed by that block."
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain, viewer; D25): translate.js minifyall of agent-redir-ws-0.1.1.js."
     },
     "views/default3-min.handlebars": {
       "state": "built",

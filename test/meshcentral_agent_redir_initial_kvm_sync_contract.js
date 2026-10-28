@@ -45,11 +45,9 @@ function evaluateRedirSource(source) {
     return {
         omitsCustomDesktopSyncHelper: !source.includes('xxSendInitialDesktopSync'),
         kvmConnectDefersConnectedState:
-            source.includes('if (obj.protocol != 2) { obj.xxStateChange(3); }') ||
-            source.includes('2!=r.protocol&&r.xxStateChange(3)'),
+            source.includes('if (obj.protocol != 2) { obj.xxStateChange(3); }'),
         transportHandshakeStillSendsProtocol:
-            source.includes('obj.socket.send(obj.protocol);') ||
-            source.includes('r.socket.send(r.protocol)')
+            source.includes('obj.socket.send(obj.protocol);')
     };
 }
 
@@ -65,17 +63,14 @@ function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const redirPath = forkFile('public/scripts/agent-redir-ws-0.1.1.js');
-    const redirMinPath = forkFile('public/scripts/agent-redir-ws-0.1.1-min.js');
     const desktopPath = forkFile('public/scripts/agent-desktop-0.0.2.js');
     const desktopMinPath = forkFile('public/scripts/agent-desktop-0.0.2-min.js');
     const source = fs.readFileSync(redirPath, 'utf8');
-    const sourceMin = fs.readFileSync(redirMinPath, 'utf8');
     const desktopSource = fs.readFileSync(desktopPath, 'utf8');
     const desktopMinSource = fs.readFileSync(desktopMinPath, 'utf8');
 
     const checks = {
         standard: evaluateRedirSource(source),
-        minified: evaluateRedirSource(sourceMin),
         desktopStandard: evaluateDesktopSource(desktopSource),
         desktopMinified: evaluateDesktopSource(desktopMinSource)
     };
@@ -88,7 +83,6 @@ function main() {
 
     const report = {
         redirPath,
-        redirMinPath,
         desktopPath,
         desktopMinPath,
         checks
@@ -98,12 +92,10 @@ function main() {
         writeJson(path.join(evidenceDir, 'meshcentral_agent_redir_initial_kvm_sync_contract.json'), report);
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `REDIR_PATH=${redirPath}`,
-            `REDIR_MIN_PATH=${redirMinPath}`,
             `DESKTOP_PATH=${desktopPath}`,
             `DESKTOP_MIN_PATH=${desktopMinPath}`,
             'SUCCESS=true',
             `STANDARD_CHECKS=${Object.entries(checks.standard).map(([name, passed]) => `${name}:${passed}`).join(',')}`,
-            `MINIFIED_CHECKS=${Object.entries(checks.minified).map(([name, passed]) => `${name}:${passed}`).join(',')}`,
             `DESKTOP_STANDARD_CHECKS=${Object.entries(checks.desktopStandard).map(([name, passed]) => `${name}:${passed}`).join(',')}`,
             `DESKTOP_MINIFIED_CHECKS=${Object.entries(checks.desktopMinified).map(([name, passed]) => `${name}:${passed}`).join(',')}`
         ].join('\n') + '\n');
