@@ -417,8 +417,6 @@ function main() {
             !sources.serviceMain.includes('strcasecmp(argv[1], "--selftest")') &&
             !sources.serviceMain.includes('strncasecmp(argv[1], "--selftest=", 11)') &&
             !sources.serviceMain.includes('strcasecmp(argv[i], "--selftest")') &&
-            sources.agentcore.includes('MeshRuntimeHost_LaunchSelfTestHostW(args, timeoutMs, &exitCode)') &&
-            sources.agentcore.includes('MeshRuntimeHost_LaunchSelfTestHostW(selfTestArgs, 900000, &exitCode)') &&
             !sources.agentcore.includes('MeshAgent_RunChildProcess') &&
             !sources.agentcore.includes('CreateProcessW(NULL, cmdLine') &&
             !sources.agentcore.includes('selfTestBinary') &&

@@ -253,14 +253,20 @@ function main() {
     const diagnosticLogPathBody = extractFunction(diagnosticLog, 'static __inline BOOL MeshDiagnosticLog_GetPathW');
     assert(nativeLogBody.includes('MeshDiagnosticLog_Write("lifecycle", buffer);'), 'native install log must use the unified diagnostics log');
     assert(diagnosticLogPathBody.includes('branding->logFileName') && !diagnosticLogPathBody.includes('C:\\\\ProgramData'), 'diagnostics log path must come from active branding, not a literal ProgramData fallback');
-    assert(agentCore.includes('MeshAgent_GetActiveServiceLogsDirW(logDir, _countof(logDir))'), 'native evidence paths must use active branded logs directory');
     assert(!nativeLogBody.includes('CSIDL_COMMON_APPDATA'), 'native install log must not synthesize a ProgramData fallback path');
     const preProtectionBody = extractFunction(agentCore, 'static BOOL MeshAgent_BuildDefaultPreProtectionCapturePathW');
     assert(preProtectionBody.includes('MeshAgent_GetActiveServiceLogsDirW'), 'default pre-protection capture path must use active branded logs directory');
     assert(preProtectionBody.includes('L"%s\\\\preprotection"'), 'default pre-protection capture path must be under logs\\preprotection');
     assert(!preProtectionBody.includes('SERVICE_FALLBACK_SERVICE_NAME'), 'default pre-protection capture path must not use the generic service fallback name');
-    const snapshotBody = extractFunction(agentCore, 'static void MeshAgent_CopyEvidenceSnapshot');
-    assert(!snapshotBody.includes('C:\\\\ProgramData\\\\%s'), 'evidence snapshot must not invent a legacy ProgramData fallback');
+    // NAT-15: the native regression harness is gone. Grouped regression lives in
+    // test/run_grouped_regression.js and keeps its evidence outside the repository.
+    ['MeshAgent_RunNativeRegression', 'MeshAgent_CopyEvidenceSnapshot', 'MeshAgent_FindRepoRootW', 'L"%s\\\\docs\\\\testing"'].forEach((marker) => {
+        assert(!agentCore.includes(marker), `agent binaries must not carry the native regression harness (${marker})`);
+    });
+    // NAT-16: installs and updates on endpoints do not stage agent-selftest.js. The self-test loads
+    // the module through require (upstream behaviour); test harnesses stage an override themselves.
+    assert(agentCore.includes(`duk_peval_string(agent->meshCoreCtx, "require('agent-selftest')();")`), 'self-test must load agent-selftest through require, as upstream does');
+    assert(!agentCore.includes('agent-selftest.js') && !agentCore.includes('MeshAgent_StageSelfTestModule'), 'agent binaries must not copy agent-selftest.js during install or update');
 
     const serviceMain = readRepoFile(repoRoot, 'meshservice/ServiceMain.c');
     assert(!serviceMain.includes('MeshService_GetUserRuntimeDirectoryNameW'), 'GUI runtime directory helper must not exist after direct self-launch staging removal');

@@ -227,6 +227,7 @@ static BOOL shutdown_gate(const wchar_t* stage) {
 #define ServiceDeploy_ResolveUpdateTransaction(tx,n) resolve(tx)
 #define ServiceDeploy_ReconcileCommittedTransaction(p,n,tx,c) reconcile(tx,c)
 #define ERROR_INSTALL_FAILURE 1603
+#define MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS 0x20000001UL
 #define ServiceDeploy_DeleteUpdateTransactionArtifacts(...) (++deletedArtifacts)
 #define ServiceDeploy_BuildSiblingPathWithExtension(e,x,o,c) sibling(x,o)
 #define ServiceDeploy_PathExists(p) (wcscmp(p,L"agent.mshx") != 0)

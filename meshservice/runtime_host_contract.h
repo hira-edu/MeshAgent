@@ -55,6 +55,20 @@ extern "C" {
 #define MESH_LIFECYCLE_ACTION_VALIDATE_UNINSTALL_W L"validate-uninstall"
 #define MESH_LIFECYCLE_ACTION_VALIDATE_PACKAGE_W   L"validate-package"
 
+/* Lifecycle host exit codes. COMPLETED_WITH_WARNINGS means the operation committed
+ * and the new package runs, but a non-fatal step (for example reconciling recovery
+ * companions or firewall rules) did not finish. Bit 29 marks an application-defined
+ * code, so it can never collide with a Win32 error code. Any other failure is
+ * ERROR_INSTALL_FAILURE. */
+#define MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS 0x20000001UL
+
+static __inline DWORD MeshRuntimeHost_LifecycleExitCode(BOOL ok, DWORD operationError)
+{
+    if (ok) { return ERROR_SUCCESS; }
+    return (operationError == MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS) ?
+        MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS : ERROR_INSTALL_FAILURE;
+}
+
 typedef enum MeshRuntimeHostLifecycleAction
 {
     MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNKNOWN = 0,

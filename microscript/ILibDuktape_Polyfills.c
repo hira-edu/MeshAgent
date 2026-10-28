@@ -212,6 +212,16 @@ duk_ret_t ILibDuktape_Polyfills_Buffer_from(duk_context *ctx)
 	char *buffer;
 	size_t bufferLen;
 
+	if (nargs == 1 && (duk_is_buffer(ctx, 0) || duk_is_buffer_data(ctx, 0)))
+	{
+		// Buffer.from(buffer) copies the bytes the source shows (a slice copies only the
+		// slice), as in Node. duk_get_lstring() returns no data for a buffer.
+		char *source = (char*)duk_require_buffer_data(ctx, 0, &strlength);
+		buffer = duk_push_fixed_buffer(ctx, strlength);
+		if (strlength > 0) { memcpy_s(buffer, strlength, source, strlength); }
+		duk_push_buffer_object(ctx, -1, 0, strlength, DUK_BUFOBJ_NODEJS_BUFFER);
+		return(1);
+	}
 	if (nargs == 1)
 	{
 		str = (char*)duk_get_lstring(ctx, 0, &strlength);
@@ -1883,9 +1893,13 @@ ILibTransport_DoneState ILibDuktape_Stream_Writable_WriteSink(struct ILibDuktape
 	ILibTransport_DoneState retVal = ILibTransport_DoneState_INCOMPLETE;
 	duk_push_this(stream->ctx);																		// [writable]
 	int bufmode = Duktape_GetIntPropertyValue(stream->ctx, -1, "bufferMode", 0);
+	// decodeStrings (Node's Writable option; opt-in here, default off for existing writers):
+	// text written as a string reaches _write as a Buffer of its UTF-8 bytes, so _write
+	// always receives a Buffer.
+	int decodeStrings = Duktape_GetBooleanProperty(stream->ctx, -1, "decodeStrings", 0);
 	duk_get_prop_string(stream->ctx, -1, "_write");													// [writable][_write]
 	duk_swap_top(stream->ctx, -2);																	// [_write][this]
-	if(duk_stream_flags_isBuffer(stream->Reserved))
+	if(decodeStrings || duk_stream_flags_isBuffer(stream->Reserved))
 	{
 		if (bufmode == 0)
 		{
@@ -1975,6 +1989,7 @@ duk_ret_t ILibDuktape_Stream_newWritable(duk_context *ctx)
 		if (h != NULL) { duk_push_heapptr(ctx, h); duk_put_prop_string(ctx, -2, "_write"); }
 		h = Duktape_GetHeapptrProperty(ctx, 0, "final");
 		if (h != NULL) { duk_push_heapptr(ctx, h); duk_put_prop_string(ctx, -2, "_final"); }
+		if (Duktape_GetBooleanProperty(ctx, 0, "decodeStrings", 0)) { duk_push_true(ctx); duk_put_prop_string(ctx, -2, "decodeStrings"); }
 	}
 	return(1);
 }
@@ -2035,6 +2050,7 @@ duk_ret_t ILibDuktape_Stream_newDuplex(duk_context *ctx)
 		{
 			ILibDuktape_CreateEventWithSetterEx(ctx, "_read", ILibDuktape_Stream_readonlyError);
 		}
+		if (Duktape_GetBooleanProperty(ctx, 0, "decodeStrings", 0)) { duk_push_true(ctx); duk_put_prop_string(ctx, -2, "decodeStrings"); }
 	}
 	return(1);
 }

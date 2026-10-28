@@ -67,6 +67,7 @@ static int queries, failQueryAt, stopCalls, pendingControls, interrogates;
 static int allowOn, allowOff, closed, processOpens, kills, processCloses;
 static int deniedControlAccess, rejectStops, rejectWhileStarting, pendingRace, autoStart, exclusive;
 static int openProcessFails, terminateFails, queryWarnings, timeoutWarnings, ownershipWarnings, noProcessWarnings;
+static int syncOpens, syncCloses, syncWaits, lingerWarnings; static DWORD processExitDelay, syncWaitTimeout;
 static DWORD elapsed(void) { return ticks - origin; }
 static SC_HANDLE open_scm(void) { return (SC_HANDLE)(uintptr_t)1; }
 static SC_HANDLE open_service(DWORD access) {
@@ -83,6 +84,7 @@ static void log_event(const wchar_t* fmt) {
     if(wcsstr(fmt,L"stop timed out"))++timeoutWarnings;
     if(wcsstr(fmt,L"exclusive process ownership"))++ownershipWarnings;
     if(wcsstr(fmt,L"no process to terminate"))++noProcessWarnings;
+    if(wcsstr(fmt,L"has not exited"))++lingerWarnings;
     lastError=183;
 }
 static BOOL query_status(SC_HANDLE h, BYTE* buffer, DWORD size, DWORD* needed) {
@@ -106,6 +108,7 @@ static BOOL control_service(SC_HANDLE h, DWORD control, SERVICE_STATUS* status) 
     memcpy(status,&current,sizeof(*status)); return TRUE;
 }
 static HANDLE open_process(DWORD access, BOOL inherit, DWORD pid) {
+    if(access==SYNCHRONIZE) { assert(!inherit && pid==123); ++syncOpens; return (HANDLE)(uintptr_t)4; }
     assert(access==(PROCESS_TERMINATE|SYNCHRONIZE) && !inherit && pid==123);
     ++processOpens; if(openProcessFails){lastError=ERROR_ACCESS_DENIED;return NULL;}
     return (HANDLE)(uintptr_t)3;
@@ -115,8 +118,19 @@ static BOOL terminate_process(HANDLE h, DWORD code) {
     if(terminateFails){lastError=ERROR_ACCESS_DENIED;return FALSE;}
     finishAt=elapsed()+750; return TRUE;
 }
-static DWORD wait_process(HANDLE h, DWORD timeout) { assert(h==(HANDLE)(uintptr_t)3 && timeout==5000); return 0; }
-static BOOL close_process(HANDLE h) { assert(h==(HANDLE)(uintptr_t)3); ++processCloses; lastError=183; return TRUE; }
+/* Handle 4 is the service process opened before the stop: it exits processExitDelay ms after STOPPED. */
+static DWORD wait_process(HANDLE h, DWORD timeout) {
+    if(h==(HANDLE)(uintptr_t)4) {
+        ++syncWaits; syncWaitTimeout=timeout;
+        if(processExitDelay<=timeout) { ticks+=processExitDelay; return 0; }
+        ticks+=timeout; return 0x102;
+    }
+    assert(h==(HANDLE)(uintptr_t)3 && timeout==5000); return 0;
+}
+static BOOL close_process(HANDLE h) {
+    if(h==(HANDLE)(uintptr_t)4) { ++syncCloses; lastError=183; return TRUE; }
+    assert(h==(HANDLE)(uintptr_t)3); ++processCloses; lastError=183; return TRUE;
+}
 #define OpenSCManagerW(...) open_scm()
 #define OpenServiceW(s,n,a) open_service(a)
 #define CloseServiceHandle close_service
@@ -145,8 +159,9 @@ static void reset(DWORD state) {
     allowOn=allowOff=closed=processOpens=kills=processCloses=0;
     deniedControlAccess=rejectStops=rejectWhileStarting=pendingRace=autoStart=0; exclusive=1;
     openProcessFails=terminateFails=queryWarnings=timeoutWarnings=ownershipWarnings=noProcessWarnings=0;
+    syncOpens=syncCloses=syncWaits=lingerWarnings=0; processExitDelay=0; syncWaitTimeout=UINT32_MAX;
 }
-static void cleanup_checks(void) { assert(closed==2 && allowOff==(allowOn>0) && processCloses==processOpens-((openProcessFails&&processOpens)?1:0)); }
+static void cleanup_checks(void) { assert(closed==2 && allowOff==(allowOn>0) && processCloses==processOpens-((openProcessFails&&processOpens)?1:0) && syncCloses==syncOpens); }
 static BOOL run(DWORD timeout, BOOL force) {
     BOOL result=ServiceDeploy_StopServiceAndWait(L"Agent",timeout,force);
     cleanup_checks(); assert(!pendingControls); return result;
@@ -178,7 +193,20 @@ int main(void) {
     reset(SERVICE_STOP_PENDING); openProcessFails=1; assert(!run(2000,TRUE)); assert(!kills&&lastError==ERROR_ACCESS_DENIED);
     reset(SERVICE_STOP_PENDING); terminateFails=1; assert(!run(2000,TRUE)); assert(kills==1&&lastError==ERROR_ACCESS_DENIED);
     reset(SERVICE_STOP_PENDING); failQueryAt=7; assert(!run(2000,TRUE)); assert(kills==1&&lastError==ERROR_ACCESS_DENIED);
-    puts("service stop: 21 cases passed (pending states, deadlines, retries, query faults, ownership, termination faults and cleanup)");
+    /* After STOPPED, wait for the service process itself, inside the same budget. */
+    reset(SERVICE_RUNNING); finishAt=2500; processExitDelay=300; assert(run(5000,FALSE));
+    assert(syncOpens==1&&syncWaits==1&&syncWaitTimeout==2500&&elapsed()==2800&&!lingerWarnings&&!kills);
+    reset(SERVICE_RUNNING); current.dwServiceType=SERVICE_WIN32_OWN_PROCESS; exclusive=0; finishAt=1000; processExitDelay=200; assert(run(5000,FALSE));
+    assert(syncWaits==1&&elapsed()==1200);
+    reset(SERVICE_RUNNING); finishAt=2500; processExitDelay=10000; assert(run(5000,TRUE));
+    assert(syncWaits==1&&lingerWarnings==1&&elapsed()==5000&&!kills);
+    /* A shared host process, an unknown PID or an already stopped service is not waited on. */
+    reset(SERVICE_RUNNING); exclusive=0; finishAt=2500; processExitDelay=10000; assert(run(5000,FALSE)); assert(!syncOpens&&!syncWaits&&elapsed()==2500);
+    reset(SERVICE_RUNNING); current.dwProcessId=0; finishAt=2500; assert(run(5000,FALSE)); assert(!syncOpens);
+    reset(SERVICE_STOPPED); assert(run(5000,FALSE)); assert(!syncOpens);
+    /* A stop that never completes does not wait on the process handle. */
+    reset(SERVICE_RUNNING); rejectStops=1; assert(!run(2000,FALSE)); assert(syncOpens==1&&!syncWaits);
+    puts("service stop: 28 cases passed (pending states, deadlines, retries, query faults, ownership, termination faults, process exit after STOPPED and cleanup)");
     return 0;
 }
 '''

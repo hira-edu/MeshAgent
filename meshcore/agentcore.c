@@ -227,11 +227,6 @@ static int MeshAgent_ResolveControlChannelAddress(MeshAgentHostContainer *agent,
 }
 
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
-static void MeshAgent_EnsureDirectoryW(const wchar_t* path);
-static BOOL MeshAgent_FindRepoRootW(wchar_t* output, size_t outputLen);
-static BOOL MeshAgent_StageSelfTestModule(const wchar_t* installDir);
-static void MeshAgent_StageSelfTestModuleBestEffort(void);
-static void MeshAgent_StageSelfTestModuleForCurrentExeBestEffort(void);
 static void MeshAgent_EnsureCoreModuleRuntimeGlobals(duk_context* ctx);
 BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath);
 
@@ -266,96 +261,6 @@ static void MeshAgent_LogNativeInstallerEvent(const char* fmt, ...)
 
 	MeshDiagnosticLog_Write("lifecycle", buffer);
 
-}
-
-static BOOL MeshAgent_RunNativeServiceFullInstall(struct MeshAgentHostContainer* agentHost)
-{
-	if (agentHost == NULL || agentHost->exePath == NULL) { return FALSE; }
-	WCHAR exePathW[MAX_PATH * 4];
-	DWORD lifecycleExitCode = ERROR_SUCCESS;
-	ILibUTF8ToWideEx(agentHost->exePath, -1, exePathW, (int)(sizeof(exePathW) / sizeof(WCHAR)));
-
-	MeshAgent_LogNativeInstallerEvent("...Running compatibility lifecycle installer");
-	const BOOL previouslyInstalled = ServiceDeploy_IsAlreadyInstalled();
-	MeshAgent_LogNativeInstallerEvent("...Lifecycle planner will evaluate existing state before install (detected installed: %s)", previouslyInstalled ? "yes" : "no");
-
-	if (MeshRuntimeHost_LaunchLifecycleHostW(
-			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL,
-			exePathW,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			TRUE,
-			TRUE,
-			600000,
-			&lifecycleExitCode))
-	{
-		MeshAgent_StageSelfTestModuleBestEffort();
-		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle installer completed successfully");
-		return TRUE;
-	}
-
-	if (MeshRuntimeHost_LaunchLifecycleHostW(
-			previouslyInstalled ? MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UPDATE : MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_INSTALL,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			TRUE,
-			TRUE,
-			120000,
-			&lifecycleExitCode))
-	{
-		MeshAgent_StageSelfTestModuleBestEffort();
-		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle installer reported failure but final %s validation passed",
-			previouslyInstalled ? "update" : "install");
-		return TRUE;
-	}
-
-	MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle installer failed (exit=%lu LastError=%lu). Legacy installer path disabled.", lifecycleExitCode, GetLastError());
-	return FALSE;
-}
-
-static BOOL MeshAgent_RunNativeServiceFullUninstall(void)
-{
-	DWORD lifecycleExitCode = ERROR_SUCCESS;
-	MeshAgent_LogNativeInstallerEvent("...Running compatibility lifecycle uninstaller");
-	if (MeshRuntimeHost_LaunchLifecycleHostW(
-			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			TRUE,
-			TRUE,
-			600000,
-			&lifecycleExitCode))
-	{
-		return TRUE;
-	}
-
-	// Treat a fully clean final state as success even if teardown reported a non-fatal error code.
-	if (MeshRuntimeHost_LaunchLifecycleHostW(
-			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			TRUE,
-			TRUE,
-			120000,
-			&lifecycleExitCode))
-	{
-		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle uninstaller reported failure but final uninstall validation passed");
-		return TRUE;
-	}
-
-	MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle uninstaller failed (exit=%lu LastError=%lu)", lifecycleExitCode, GetLastError());
-	return FALSE;
 }
 
 static void MeshAgent_GetServiceKeyNameW(wchar_t* buffer, size_t count)
@@ -402,42 +307,6 @@ static void MeshAgent_ApplyNativeLifecycleBrandingOverrides(struct MeshAgentHost
 #endif
 }
 
-static BOOL MeshAgent_WaitForServiceRunning(const wchar_t* serviceName, DWORD timeoutMs)
-{
-	if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
-	DWORD waited = 0;
-	BOOL running = FALSE;
-
-	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-	if (scm == NULL) { return FALSE; }
-	SC_HANDLE svc = OpenServiceW(scm, serviceName, SERVICE_QUERY_STATUS);
-	if (svc == NULL)
-	{
-		CloseServiceHandle(scm);
-		return FALSE;
-	}
-
-	while (waited < timeoutMs)
-	{
-		SERVICE_STATUS_PROCESS ssp = {0};
-		DWORD needed = 0;
-		if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &needed))
-		{
-			if (ssp.dwCurrentState == SERVICE_RUNNING)
-			{
-				running = TRUE;
-				break;
-			}
-		}
-		Sleep(1000);
-		waited += 1000;
-	}
-
-	CloseServiceHandle(svc);
-	CloseServiceHandle(scm);
-	return running;
-}
-
 static BOOL MeshAgent_WaitForServiceNotRunning(const wchar_t* serviceName, DWORD timeoutMs)
 {
 	if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
@@ -475,339 +344,6 @@ static BOOL MeshAgent_WaitForServiceNotRunning(const wchar_t* serviceName, DWORD
 	return FALSE;
 }
 
-static BOOL MeshAgent_WaitForServiceAbsent(const wchar_t* serviceName, DWORD timeoutMs)
-{
-	if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
-
-	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-	if (scm == NULL) { return FALSE; }
-
-	ULONGLONG start = GetTickCount64();
-	while ((GetTickCount64() - start) < timeoutMs)
-	{
-		SC_HANDLE svc = OpenServiceW(scm, serviceName, SERVICE_QUERY_STATUS);
-		if (svc == NULL)
-		{
-			DWORD err = GetLastError();
-			if (err == ERROR_SERVICE_DOES_NOT_EXIST)
-			{
-				CloseServiceHandle(scm);
-				return TRUE;
-			}
-			if (err == ERROR_SERVICE_MARKED_FOR_DELETE)
-			{
-				Sleep(500);
-				continue;
-			}
-			CloseServiceHandle(scm);
-			return FALSE;
-		}
-
-		CloseServiceHandle(svc);
-		Sleep(500);
-	}
-
-	CloseServiceHandle(scm);
-	return FALSE;
-}
-
-static BOOL MeshAgent_QueryServiceStatus(const wchar_t* serviceName, SERVICE_STATUS_PROCESS* status)
-{
-	if (serviceName == NULL || serviceName[0] == L'\0' || status == NULL) { return FALSE; }
-	ZeroMemory(status, sizeof(*status));
-
-	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-	if (scm == NULL) { return FALSE; }
-	SC_HANDLE svc = OpenServiceW(scm, serviceName, SERVICE_QUERY_STATUS);
-	if (svc == NULL)
-	{
-		CloseServiceHandle(scm);
-		return FALSE;
-	}
-
-	DWORD needed = 0;
-	BOOL ok = QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, (LPBYTE)status, sizeof(*status), &needed);
-	CloseServiceHandle(svc);
-	CloseServiceHandle(scm);
-	return ok;
-}
-
-static BOOL MeshAgent_WaitForServiceRestart(const wchar_t* serviceName, DWORD initialPid, DWORD timeoutMs)
-{
-	if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
-	BOOL sawNotRunning = FALSE;
-	BOOL sawPidChange = FALSE;
-	DWORD lastPid = initialPid;
-	ULONGLONG startTick = GetTickCount64();
-	ULONGLONG deadline = startTick + timeoutMs;
-
-	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-	if (scm == NULL) { return FALSE; }
-	SC_HANDLE svc = OpenServiceW(scm, serviceName, SERVICE_QUERY_STATUS);
-	if (svc == NULL)
-	{
-		CloseServiceHandle(scm);
-		return FALSE;
-	}
-
-	while (GetTickCount64() <= deadline)
-	{
-		SERVICE_STATUS_PROCESS ssp = {0};
-		DWORD needed = 0;
-		if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &needed))
-		{
-			if (ssp.dwCurrentState == SERVICE_RUNNING)
-			{
-				if (initialPid != 0 && ssp.dwProcessId != 0 && ssp.dwProcessId != initialPid)
-				{
-					sawPidChange = TRUE;
-					lastPid = ssp.dwProcessId;
-				}
-
-				if (sawNotRunning || sawPidChange || (initialPid == 0 && (GetTickCount64() - startTick >= 8000)))
-				{
-					if (sawPidChange)
-					{
-						MeshAgent_LogNativeInstallerEvent("...Service PID changed: %lu -> %lu", initialPid, lastPid);
-					}
-					else if (!sawNotRunning)
-					{
-						MeshAgent_LogNativeInstallerEvent("...Service restart did not change PID; accepting running state");
-					}
-					CloseServiceHandle(svc);
-					CloseServiceHandle(scm);
-					return TRUE;
-				}
-			}
-			else
-			{
-				sawNotRunning = TRUE;
-			}
-		}
-
-		Sleep(2000);
-	}
-
-	CloseServiceHandle(svc);
-	CloseServiceHandle(scm);
-	return FALSE;
-}
-
-static BOOL MeshAgent_SetServiceAllowStop(const wchar_t* serviceName, BOOL allow)
-{
-	if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
-
-	wchar_t paramsKeyPath[512];
-	_snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE,
-		L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceName);
-
-	HKEY hKey = NULL;
-	if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, paramsKeyPath, 0, NULL, 0, KEY_SET_VALUE, NULL, &hKey, NULL) != ERROR_SUCCESS)
-	{
-		return FALSE;
-	}
-
-	BOOL ok = TRUE;
-	if (allow)
-	{
-		DWORD value = 1;
-		ok = (RegSetValueExW(hKey, L"AllowStop", 0, REG_DWORD, (const BYTE*)&value, sizeof(value)) == ERROR_SUCCESS);
-	}
-	else
-	{
-		RegDeleteValueW(hKey, L"AllowStop");
-	}
-
-	RegCloseKey(hKey);
-	return ok;
-}
-
-static BOOL MeshAgent_StopServiceAndWait(SC_HANDLE svc, DWORD timeoutMs)
-{
-	if (svc == NULL) { return FALSE; }
-
-	SERVICE_STATUS_PROCESS ssp = {0};
-	DWORD needed = 0;
-	if (!QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &needed))
-	{
-		return FALSE;
-	}
-
-	if (ssp.dwCurrentState == SERVICE_STOPPED)
-	{
-		return TRUE;
-	}
-
-	ControlService(svc, SERVICE_CONTROL_STOP, (LPSERVICE_STATUS)&ssp);
-
-	DWORD waited = 0;
-	while (waited < timeoutMs)
-	{
-		if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &needed))
-		{
-			if (ssp.dwCurrentState == SERVICE_STOPPED) { return TRUE; }
-		}
-		Sleep(500);
-		waited += 500;
-	}
-
-	return FALSE;
-}
-
-static BOOL MeshAgent_RestartServiceForRegression(const wchar_t* serviceName, DWORD timeoutMs)
-{
-	if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
-
-	SERVICE_STATUS_PROCESS initialStatus = {0};
-	DWORD initialPid = 0;
-	if (MeshAgent_QueryServiceStatus(serviceName, &initialStatus))
-	{
-		initialPid = initialStatus.dwProcessId;
-	}
-
-	BOOL allowStopSet = MeshAgent_SetServiceAllowStop(serviceName, TRUE);
-	if (!allowStopSet)
-	{
-		MeshAgent_LogNativeInstallerEvent("...Warning: unable to set AllowStop for service");
-	}
-
-	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-	if (scm == NULL)
-	{
-		if (allowStopSet) { MeshAgent_SetServiceAllowStop(serviceName, FALSE); }
-		return FALSE;
-	}
-
-	SC_HANDLE svc = OpenServiceW(scm, serviceName, SERVICE_STOP | SERVICE_START | SERVICE_QUERY_STATUS);
-	if (svc == NULL)
-	{
-		CloseServiceHandle(scm);
-		if (allowStopSet) { MeshAgent_SetServiceAllowStop(serviceName, FALSE); }
-		return FALSE;
-	}
-
-	if (allowStopSet)
-	{
-		SERVICE_STATUS status = {0};
-		ControlService(svc, SERVICE_CONTROL_INTERROGATE, &status);
-	}
-
-	BOOL ok = FALSE;
-	if (!MeshAgent_StopServiceAndWait(svc, timeoutMs))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Service stop timed out");
-		goto cleanup;
-	}
-
-	if (!StartServiceW(svc, 0, NULL))
-	{
-		DWORD err = GetLastError();
-		if (err != ERROR_SERVICE_ALREADY_RUNNING)
-		{
-			MeshAgent_LogNativeInstallerEvent("...Service start failed (error=%lu)", err);
-			goto cleanup;
-		}
-	}
-
-	if (!MeshAgent_WaitForServiceRunning(serviceName, timeoutMs))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Service did not reach running state after restart");
-		goto cleanup;
-	}
-
-	if (!MeshAgent_WaitForServiceRestart(serviceName, initialPid, timeoutMs))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Service restart did not complete within timeout");
-		goto cleanup;
-	}
-
-	ok = TRUE;
-
-cleanup:
-	CloseServiceHandle(svc);
-	CloseServiceHandle(scm);
-	if (allowStopSet) { MeshAgent_SetServiceAllowStop(serviceName, FALSE); }
-	return ok;
-}
-
-static BOOL MeshAgent_WaitForNodeId(const wchar_t* serviceName, DWORD timeoutMs)
-{
-	if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
-	DWORD waited = 0;
-	BOOL found = FALSE;
-	WCHAR keyPath[512] = {0};
-	StringCchPrintfW(keyPath, _countof(keyPath), L"SOFTWARE\\Open Source\\%s", serviceName);
-
-	while (waited < timeoutMs)
-	{
-		HKEY hKey = NULL;
-		if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS)
-		{
-			wchar_t nodeId[256] = {0};
-			DWORD type = 0;
-			DWORD cb = (DWORD)sizeof(nodeId);
-			if (RegQueryValueExW(hKey, L"NodeId", NULL, &type, (LPBYTE)nodeId, &cb) == ERROR_SUCCESS &&
-				nodeId[0] != L'\0')
-			{
-				found = TRUE;
-				RegCloseKey(hKey);
-				break;
-			}
-			RegCloseKey(hKey);
-		}
-
-		Sleep(1000);
-		waited += 1000;
-	}
-	return found;
-}
-
-static BOOL MeshAgent_WaitForCoreModule(const wchar_t* dbPath, DWORD timeoutMs)
-{
-	if (dbPath == NULL || dbPath[0] == L'\0') { return FALSE; }
-
-	wchar_t dbPathMutable[MAX_PATH * 4] = {0};
-	StringCchCopyW(dbPathMutable, _countof(dbPathMutable), dbPath);
-	char dbPathUtf8[MAX_PATH * 4] = {0};
-	if (ILibWideToUTF8Ex(dbPathMutable, -1, dbPathUtf8, (int)sizeof(dbPathUtf8)) == 0) { return FALSE; }
-
-	DWORD waited = 0;
-	DWORD lastReported = 0;
-	while (waited < timeoutMs)
-	{
-		int coreLen = 0;
-		ILibSimpleDataStore ds = ILibSimpleDataStore_CreateEx2(dbPathUtf8, 0, 1);
-		if (ds != NULL)
-		{
-			coreLen = ILibSimpleDataStore_Get(ds, "CoreModule", NULL, 0);
-			ILibSimpleDataStore_Close(ds);
-			if (coreLen > 4)
-			{
-				return TRUE;
-			}
-		}
-		if ((waited - lastReported) >= 15000)
-		{
-			MeshAgent_LogNativeInstallerEvent("...Waiting for core module (%lu/%lu ms, currentLen=%d)", waited, timeoutMs, coreLen);
-			lastReported = waited;
-		}
-		Sleep(1000);
-		waited += 1000;
-	}
-
-	MeshAgent_LogNativeInstallerEvent("...Core module wait timed out after %lu ms", timeoutMs);
-	return FALSE;
-}
-
-static BOOL MeshAgent_CopyFileIfPresentW(const wchar_t* sourcePath, const wchar_t* destPath)
-{
-	if (sourcePath == NULL || destPath == NULL) { return FALSE; }
-	DWORD attr = GetFileAttributesW(sourcePath);
-	if (attr == INVALID_FILE_ATTRIBUTES) { return FALSE; }
-	SetFileAttributesW(destPath, FILE_ATTRIBUTE_NORMAL);
-	return (CopyFileW(sourcePath, destPath, FALSE) != 0);
-}
-
 static void MeshAgent_EnsureCoreModuleRuntimeGlobals(duk_context* ctx)
 {
 	if (ctx == NULL) { return; }
@@ -827,222 +363,6 @@ static void MeshAgent_EnsureCoreModuleRuntimeGlobals(duk_context* ctx)
 	duk_pop(ctx);
 }
 
-static BOOL MeshAgent_FindModulePathFromBaseDir(const wchar_t* baseDir, const wchar_t* moduleFileName, wchar_t* output, size_t outputLen)
-{
-	if (baseDir == NULL || baseDir[0] == L'\0' || moduleFileName == NULL || moduleFileName[0] == L'\0' || output == NULL || outputLen == 0)
-	{
-		return FALSE;
-	}
-
-	// Only the module directory directly beside the binary is trusted. Walking parent directories
-	// (or the process working directory) would let a standard user plant a module at a path such as
-	// C:\modules that the service then copies into the install directory and executes.
-	if (FAILED(StringCchPrintfW(output, outputLen, L"%s\\modules\\%s", baseDir, moduleFileName)) ||
-		GetFileAttributesW(output) == INVALID_FILE_ATTRIBUTES)
-	{
-		output[0] = L'\0';
-		return FALSE;
-	}
-	return TRUE;
-}
-
-static BOOL MeshAgent_FindModulePath(const wchar_t* moduleFileName, wchar_t* output, size_t outputLen)
-{
-	if (moduleFileName == NULL || output == NULL || outputLen == 0) { return FALSE; }
-	output[0] = L'\0';
-
-	wchar_t exeDir[MAX_PATH] = {0};
-	if (GetModuleFileNameW(NULL, exeDir, _countof(exeDir)) > 0)
-	{
-		wchar_t* lastSlash = wcsrchr(exeDir, L'\\');
-		if (lastSlash != NULL) { *lastSlash = L'\0'; }
-		if (MeshAgent_FindModulePathFromBaseDir(exeDir, moduleFileName, output, outputLen)) { return TRUE; }
-	}
-
-	output[0] = L'\0';
-	return FALSE;
-}
-
-static BOOL MeshAgent_StageModuleIfMissing(const wchar_t* installDir, const wchar_t* moduleFileName)
-{
-	if (installDir == NULL || installDir[0] == L'\0' || moduleFileName == NULL || moduleFileName[0] == L'\0') { return FALSE; }
-
-	wchar_t destPath[MAX_PATH] = {0};
-	StringCchPrintfW(destPath, _countof(destPath), L"%s\\%s", installDir, moduleFileName);
-
-	wchar_t sourcePath[MAX_PATH] = {0};
-	if (!MeshAgent_FindModulePath(moduleFileName, sourcePath, _countof(sourcePath))) { return FALSE; }
-
-	if (!MeshAgent_CopyFileIfPresentW(sourcePath, destPath)) { return FALSE; }
-	return (GetFileAttributesW(destPath) != INVALID_FILE_ATTRIBUTES);
-}
-
-static BOOL MeshAgent_StageSelfTestModule(const wchar_t* installDir)
-{
-	if (installDir == NULL || installDir[0] == L'\0') { return FALSE; }
-	if (!MeshAgent_StageModuleIfMissing(installDir, L"agent-selftest.js")) { return FALSE; }
-	return TRUE;
-}
-
-static void MeshAgent_StageSelfTestModuleBestEffort(void)
-{
-	ServiceInstallPaths paths;
-	ZeroMemory(&paths, sizeof(paths));
-
-	if (!ServiceDeploy_GetInstallPaths(&paths) || paths.installDir[0] == L'\0')
-	{
-		MeshAgent_LogNativeInstallerEvent("...Self-test module staging skipped: install paths unavailable");
-		return;
-	}
-
-	if (MeshAgent_StageSelfTestModule(paths.installDir))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Self-test module staged: %ls\\agent-selftest.js", paths.installDir);
-	}
-	else
-	{
-		MeshAgent_LogNativeInstallerEvent("...Self-test module staging failed (source module not found)");
-	}
-}
-
-static void MeshAgent_StageSelfTestModuleForCurrentExeBestEffort(void)
-{
-	wchar_t exePath[MAX_PATH * 4] = {0};
-	if (GetModuleFileNameW(NULL, exePath, _countof(exePath)) == 0) { return; }
-	wchar_t* slash = wcsrchr(exePath, L'\\');
-	if (slash == NULL) { return; }
-	*slash = L'\0';
-
-	if (MeshAgent_StageSelfTestModule(exePath))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Self-test module staged for current binary: %ls\\agent-selftest.js", exePath);
-	}
-}
-
-static BOOL MeshAgent_FileExistsW(const wchar_t* path)
-{
-	if (path == NULL || path[0] == L'\0') { return FALSE; }
-	DWORD attr = GetFileAttributesW(path);
-	return (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0);
-}
-
-static BOOL MeshAgent_FilesLikelyIdenticalW(const wchar_t* leftPath, const wchar_t* rightPath)
-{
-	if (!MeshAgent_FileExistsW(leftPath) || !MeshAgent_FileExistsW(rightPath)) { return FALSE; }
-
-	WIN32_FILE_ATTRIBUTE_DATA leftData;
-	WIN32_FILE_ATTRIBUTE_DATA rightData;
-	if (!GetFileAttributesExW(leftPath, GetFileExInfoStandard, &leftData) ||
-		!GetFileAttributesExW(rightPath, GetFileExInfoStandard, &rightData))
-	{
-		return FALSE;
-	}
-
-	if (leftData.nFileSizeHigh != rightData.nFileSizeHigh ||
-		leftData.nFileSizeLow != rightData.nFileSizeLow)
-	{
-		return FALSE;
-	}
-
-	if (leftData.ftLastWriteTime.dwHighDateTime != rightData.ftLastWriteTime.dwHighDateTime ||
-		leftData.ftLastWriteTime.dwLowDateTime != rightData.ftLastWriteTime.dwLowDateTime)
-	{
-		return FALSE;
-	}
-
-	return TRUE;
-}
-
-static BOOL MeshAgent_GetDirectoryNameW(const wchar_t* fullPath, wchar_t* outDir, size_t outDirLen)
-{
-	if (fullPath == NULL || outDir == NULL || outDirLen == 0) { return FALSE; }
-	if (FAILED(StringCchCopyW(outDir, outDirLen, fullPath))) { return FALSE; }
-	wchar_t* slash = wcsrchr(outDir, L'\\');
-	if (slash == NULL) { slash = wcsrchr(outDir, L'/'); }
-	if (slash == NULL) { return FALSE; }
-	*slash = L'\0';
-	return TRUE;
-}
-
-static HANDLE MeshAgent_OpenRegressionLog(void)
-{
-	WCHAR logPath[MAX_PATH * 4] = {0};
-	WCHAR logDir[MAX_PATH * 4] = {0};
-
-	// Prefer evidence directory in repo (docs/testing) to avoid log deletion during uninstall.
-	WCHAR repoRoot[MAX_PATH * 4] = {0};
-	if (MeshAgent_FindRepoRootW(repoRoot, _countof(repoRoot)))
-	{
-		WCHAR evidenceDir[MAX_PATH * 4] = {0};
-		StringCchPrintfW(evidenceDir, _countof(evidenceDir), L"%s\\docs", repoRoot);
-		MeshAgent_EnsureDirectoryW(evidenceDir);
-		StringCchPrintfW(evidenceDir, _countof(evidenceDir), L"%s\\docs\\testing", repoRoot);
-		MeshAgent_EnsureDirectoryW(evidenceDir);
-
-		StringCchCopyW(logDir, _countof(logDir), evidenceDir);
-		StringCchPrintfW(logPath, _countof(logPath), L"%s\\native-regression.log", logDir);
-	}
-	else if (MeshAgent_GetActiveServiceLogsDirW(logDir, _countof(logDir)))
-	{
-	}
-	else
-	{
-		return INVALID_HANDLE_VALUE;
-	}
-
-	CreateDirectoryW(logDir, NULL);
-	if (logPath[0] == L'\0')
-	{
-		StringCchPrintfW(logPath, _countof(logPath), L"%s\\native-regression.log", logDir);
-	}
-
-	SECURITY_ATTRIBUTES sa = {0};
-	sa.nLength = sizeof(sa);
-	sa.bInheritHandle = TRUE;
-
-	return CreateFileW(logPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &sa, OPEN_ALWAYS,
-		FILE_ATTRIBUTE_NORMAL, NULL);
-}
-
-static void MeshAgent_EnsureDirectoryW(const wchar_t* path)
-{
-	if (path == NULL || path[0] == L'\0') { return; }
-	DWORD attr = GetFileAttributesW(path);
-	if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) { return; }
-	CreateDirectoryW(path, NULL);
-}
-
-static BOOL MeshAgent_FindRepoRootW(wchar_t* output, size_t outputLen)
-{
-	if (output == NULL || outputLen == 0) { return FALSE; }
-	output[0] = L'\0';
-
-	wchar_t base[MAX_PATH * 4] = {0};
-	if (GetModuleFileNameW(NULL, base, _countof(base)) == 0) { return FALSE; }
-	wchar_t* slash = wcsrchr(base, L'\\');
-	if (slash != NULL) { *slash = L'\0'; }
-
-	// Only an ancestor that itself carries a .git entry qualifies, and the walk stops before the
-	// volume root: standard users can create directories there on a default Windows install, so
-	// a directory found at that level must never become a destination the service writes to.
-	for (int depth = 0; depth < 8; ++depth)
-	{
-		wchar_t testPath[MAX_PATH * 4] = {0};
-		if (wcschr(base, L'\\') == NULL) { break; }
-		StringCchPrintfW(testPath, _countof(testPath), L"%s\\.git", base);
-		if (GetFileAttributesW(testPath) != INVALID_FILE_ATTRIBUTES)
-		{
-			StringCchCopyW(output, outputLen, base);
-			return TRUE;
-		}
-		slash = wcsrchr(base, L'\\');
-		if (slash == NULL) { break; }
-		*slash = L'\0';
-	}
-
-	return FALSE;
-}
-
 static void MeshAgent_FormatTimestamp(wchar_t* buffer, size_t count)
 {
 	if (buffer == NULL || count == 0) { return; }
@@ -1050,61 +370,6 @@ static void MeshAgent_FormatTimestamp(wchar_t* buffer, size_t count)
 	GetLocalTime(&st);
 	StringCchPrintfW(buffer, count, L"%04u%02u%02u_%02u%02u%02u",
 		st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-}
-
-static void MeshAgent_CopyEvidenceFile(const wchar_t* srcPath, const wchar_t* destDir, const wchar_t* prefix, const wchar_t* fileName)
-{
-	if (srcPath == NULL || destDir == NULL || prefix == NULL || fileName == NULL) { return; }
-	if (GetFileAttributesW(srcPath) == INVALID_FILE_ATTRIBUTES) { return; }
-
-	wchar_t destPath[MAX_PATH * 4] = {0};
-	StringCchPrintfW(destPath, _countof(destPath), L"%s\\%s_%s", destDir, prefix, fileName);
-	CopyFileW(srcPath, destPath, FALSE);
-}
-
-static void MeshAgent_CopyEvidenceSnapshot(const wchar_t* phaseLabel)
-{
-	wchar_t repoRoot[MAX_PATH * 4] = {0};
-	if (!MeshAgent_FindRepoRootW(repoRoot, _countof(repoRoot))) { return; }
-
-	wchar_t docsDir[MAX_PATH * 4] = {0};
-	wchar_t testingDir[MAX_PATH * 4] = {0};
-	StringCchPrintfW(docsDir, _countof(docsDir), L"%s\\docs", repoRoot);
-	StringCchPrintfW(testingDir, _countof(testingDir), L"%s\\docs\\testing", repoRoot);
-	MeshAgent_EnsureDirectoryW(docsDir);
-	MeshAgent_EnsureDirectoryW(testingDir);
-
-	wchar_t timestamp[64] = {0};
-	MeshAgent_FormatTimestamp(timestamp, _countof(timestamp));
-	wchar_t prefix[128] = {0};
-	if (phaseLabel != NULL && phaseLabel[0] != L'\0')
-	{
-		StringCchPrintfW(prefix, _countof(prefix), L"%s_%s", timestamp, phaseLabel);
-	}
-	else
-	{
-		StringCchCopyW(prefix, _countof(prefix), timestamp);
-	}
-
-	ServiceInstallPaths paths;
-	ZeroMemory(&paths, sizeof(paths));
-	wchar_t installDir[MAX_PATH * 4] = {0};
-	wchar_t logsDir[MAX_PATH * 4] = {0};
-	if (ServiceDeploy_GetInstallPaths(&paths))
-	{
-		StringCchCopyW(installDir, _countof(installDir), paths.installDir);
-		StringCchCopyW(logsDir, _countof(logsDir), paths.logsDir);
-	}
-	else
-	{
-		return;
-	}
-
-	wchar_t srcPath[MAX_PATH * 4] = {0};
-	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\native-regression.log", logsDir);
-	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"native-regression.log");
-	if (MeshDiagnosticLog_GetPathW(srcPath, _countof(srcPath)))
-	{ MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"diagnostics.log"); }
 }
 
 static BOOL MeshAgent_WidePathToJsonValue(const wchar_t* input, char* output, size_t outputLen)
@@ -1303,445 +568,6 @@ BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath)
 	return TRUE;
 }
 
-static ULONGLONG MeshAgent_FileTimeToUint64(const FILETIME* ft)
-{
-	ULARGE_INTEGER val;
-	val.LowPart = ft->dwLowDateTime;
-	val.HighPart = ft->dwHighDateTime;
-	return val.QuadPart;
-}
-
-static BOOL MeshAgent_ReadFileTailW(const wchar_t* path, DWORD maxBytes, char** bufferOut, DWORD* lenOut, ULONGLONG* mtimeOut)
-{
-	if (path == NULL || bufferOut == NULL || lenOut == NULL) { return FALSE; }
-	*bufferOut = NULL;
-	*lenOut = 0;
-	if (mtimeOut != NULL) { *mtimeOut = 0; }
-
-	HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-		OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-	if (hFile == INVALID_HANDLE_VALUE) { return FALSE; }
-
-	FILETIME ftWrite;
-	if (mtimeOut != NULL && GetFileTime(hFile, NULL, NULL, &ftWrite))
-	{
-		*mtimeOut = MeshAgent_FileTimeToUint64(&ftWrite);
-	}
-
-	LARGE_INTEGER size;
-	if (!GetFileSizeEx(hFile, &size))
-	{
-		CloseHandle(hFile);
-		return FALSE;
-	}
-
-	LONGLONG readSize = size.QuadPart;
-	if (maxBytes > 0 && readSize > (LONGLONG)maxBytes) { readSize = maxBytes; }
-	LONGLONG offset = size.QuadPart - readSize;
-	if (offset < 0) { offset = 0; }
-
-	LARGE_INTEGER seek;
-	seek.QuadPart = offset;
-	SetFilePointerEx(hFile, seek, NULL, FILE_BEGIN);
-
-	char* buffer = (char*)malloc((size_t)readSize + 1);
-	if (buffer == NULL)
-	{
-		CloseHandle(hFile);
-		return FALSE;
-	}
-
-	DWORD bytesRead = 0;
-	if (!ReadFile(hFile, buffer, (DWORD)readSize, &bytesRead, NULL))
-	{
-		free(buffer);
-		CloseHandle(hFile);
-		return FALSE;
-	}
-	buffer[bytesRead] = '\0';
-	CloseHandle(hFile);
-
-	*bufferOut = buffer;
-	*lenOut = bytesRead;
-	return TRUE;
-}
-
-typedef struct MeshAgent_SelfTestProgress
-{
-	DWORD success;
-	DWORD kvmStepSeen;
-} MeshAgent_SelfTestProgress;
-
-typedef struct MeshAgent_RemoteDesktopRegressionMetrics
-{
-	DWORD majorBugRuns;
-	DWORD majorBugPasses;
-	DWORD readinessSamples;
-	DWORD readinessMinMs;
-	DWORD readinessMaxMs;
-	ULONGLONG readinessTotalMs;
-} MeshAgent_RemoteDesktopRegressionMetrics;
-
-static void MeshAgent_ParseSelfTestProgressLog(const wchar_t* path, MeshAgent_SelfTestProgress* progress)
-{
-	char* text = NULL;
-	DWORD textLen = 0;
-
-	if (progress == NULL) { return; }
-	ZeroMemory(progress, sizeof(MeshAgent_SelfTestProgress));
-	if (path == NULL || path[0] == L'\0') { return; }
-
-	if (!MeshAgent_ReadFileTailW(path, 2 * 1024 * 1024, &text, &textLen, NULL))
-	{
-		return;
-	}
-	if (text == NULL || textLen == 0)
-	{
-		if (text != NULL) { free(text); }
-		return;
-	}
-
-	progress->success = (strstr(text, "SelfTest complete: SUCCESS") != NULL) ? 1 : 0;
-	progress->kvmStepSeen = (strstr(text, "Step: testKVM") != NULL) ? 1 : 0;
-
-	free(text);
-}
-
-static void MeshAgent_InitRemoteDesktopMetrics(MeshAgent_RemoteDesktopRegressionMetrics* metrics)
-{
-	if (metrics == NULL) { return; }
-	ZeroMemory(metrics, sizeof(MeshAgent_RemoteDesktopRegressionMetrics));
-}
-
-static void MeshAgent_RecordReadinessSample(MeshAgent_RemoteDesktopRegressionMetrics* metrics, DWORD sampleMs)
-{
-	if (metrics == NULL) { return; }
-	if (metrics->readinessSamples == 0 || sampleMs < metrics->readinessMinMs)
-	{
-		metrics->readinessMinMs = sampleMs;
-	}
-	if (metrics->readinessSamples == 0 || sampleMs > metrics->readinessMaxMs)
-	{
-		metrics->readinessMaxMs = sampleMs;
-	}
-	metrics->readinessSamples += 1;
-	metrics->readinessTotalMs += sampleMs;
-}
-
-static BOOL MeshAgent_BuildTestingProgressLogPath(const wchar_t* phaseLabel, wchar_t* output, size_t outputLen)
-{
-	wchar_t repoRoot[MAX_PATH * 4] = {0};
-	wchar_t docsDir[MAX_PATH * 4] = {0};
-	wchar_t testingDir[MAX_PATH * 4] = {0};
-	wchar_t timestamp[64] = {0};
-	const wchar_t* label = phaseLabel;
-
-	if (output == NULL || outputLen == 0) { return FALSE; }
-	output[0] = L'\0';
-
-	if (!MeshAgent_FindRepoRootW(repoRoot, _countof(repoRoot)))
-	{
-		return FALSE;
-	}
-
-	StringCchPrintfW(docsDir, _countof(docsDir), L"%s\\docs", repoRoot);
-	StringCchPrintfW(testingDir, _countof(testingDir), L"%s\\docs\\testing", repoRoot);
-	MeshAgent_EnsureDirectoryW(docsDir);
-	MeshAgent_EnsureDirectoryW(testingDir);
-
-	MeshAgent_FormatTimestamp(timestamp, _countof(timestamp));
-	if (label == NULL || label[0] == L'\0') { label = L"selftest"; }
-	StringCchPrintfW(output, outputLen, L"%s\\%s_%s_progress.log", testingDir, timestamp, label);
-	return TRUE;
-}
-
-static BOOL MeshAgent_AppendSelfTestPathArg(wchar_t* args, size_t argsLen, const wchar_t* argName, const wchar_t* value)
-{
-	if (args == NULL || argName == NULL || value == NULL || value[0] == L'\0') { return FALSE; }
-	if (FAILED(StringCchCatW(args, argsLen, L" --"))) { return FALSE; }
-	if (FAILED(StringCchCatW(args, argsLen, argName))) { return FALSE; }
-	if (FAILED(StringCchCatW(args, argsLen, L"=\""))) { return FALSE; }
-	if (FAILED(StringCchCatW(args, argsLen, value))) { return FALSE; }
-	if (FAILED(StringCchCatW(args, argsLen, L"\""))) { return FALSE; }
-	return TRUE;
-}
-
-static BOOL MeshAgent_GetConfigValue(char* text, const char* key, char* valueOut, size_t valueOutLen)
-{
-	if (text == NULL || key == NULL || valueOut == NULL || valueOutLen == 0) { return FALSE; }
-
-	char* context = NULL;
-	for (char* line = strtok_s(text, "\n", &context); line != NULL; line = strtok_s(NULL, "\n", &context))
-	{
-		char* p = line;
-		char* cr = strchr(p, '\r');
-		if (cr != NULL) { *cr = '\0'; }
-		while (*p != '\0' && isspace((unsigned char)*p)) { ++p; }
-		if (*p == '\0' || *p == '#' || *p == ';') { continue; }
-
-		char* eq = strchr(p, '=');
-		if (eq == NULL) { continue; }
-		*eq = '\0';
-		char* keyPart = p;
-		char* valuePart = eq + 1;
-
-		char* end = keyPart + strlen(keyPart);
-		while (end > keyPart && isspace((unsigned char)*(end - 1))) { *(--end) = '\0'; }
-
-		while (*valuePart != '\0' && isspace((unsigned char)*valuePart)) { ++valuePart; }
-		end = valuePart + strlen(valuePart);
-		while (end > valuePart && isspace((unsigned char)*(end - 1))) { *(--end) = '\0'; }
-
-		if (_stricmp(keyPart, key) == 0)
-		{
-			strncpy_s(valueOut, valueOutLen, valuePart, _TRUNCATE);
-			return TRUE;
-		}
-	}
-
-	return FALSE;
-}
-
-static void MeshAgent_ExtractHost(const char* input, char* output, size_t outputLen)
-{
-	if (output == NULL || outputLen == 0) { return; }
-	output[0] = '\0';
-	if (input == NULL || input[0] == '\0') { return; }
-
-	const char* s = input;
-	while (*s != '\0' && isspace((unsigned char)*s)) { ++s; }
-	const char* scheme = strstr(s, "://");
-	if (scheme != NULL) { s = scheme + 3; }
-	while (*s == '/') { ++s; }
-
-	const char* end = s;
-	while (*end != '\0' && *end != '/' && *end != ':' && *end != '?' && *end != '#') { ++end; }
-	size_t len = (size_t)(end - s);
-	if (len >= outputLen) { len = outputLen - 1; }
-	memcpy(output, s, len);
-	output[len] = '\0';
-}
-
-static BOOL MeshAgent_FindFileByExtension(const wchar_t* dir, const wchar_t* ext, wchar_t* output, size_t outputLen)
-{
-	if (dir == NULL || ext == NULL || output == NULL || outputLen == 0) { return FALSE; }
-	output[0] = L'\0';
-
-	wchar_t pattern[MAX_PATH * 4] = {0};
-	StringCchPrintfW(pattern, _countof(pattern), L"%s\\*%s", dir, ext);
-	WIN32_FIND_DATAW fd;
-	HANDLE hFind = FindFirstFileW(pattern, &fd);
-	if (hFind == INVALID_HANDLE_VALUE) { return FALSE; }
-
-	StringCchPrintfW(output, outputLen, L"%s\\%s", dir, fd.cFileName);
-	FindClose(hFind);
-	return TRUE;
-}
-
-static BOOL MeshAgent_ValidateNetworkPersistence(DWORD timeoutMs)
-{
-	ServiceInstallPaths paths;
-	ZeroMemory(&paths, sizeof(paths));
-	if (!ServiceDeploy_GetInstallPaths(&paths))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Network persistence validation: install paths unavailable");
-		return FALSE;
-	}
-
-	wchar_t configPath[MAX_PATH * 4] = {0};
-	if (paths.confPath[0] != L'\0')
-	{
-		StringCchCopyW(configPath, _countof(configPath), paths.confPath);
-	}
-	else if (!MeshAgent_FindFileByExtension(paths.installDir, L".msh", configPath, _countof(configPath)))
-	{
-		MeshAgent_FindFileByExtension(paths.installDir, L".conf", configPath, _countof(configPath));
-	}
-
-	if (configPath[0] == L'\0')
-	{
-		MeshAgent_LogNativeInstallerEvent("...Network persistence validation: config file not found");
-		return FALSE;
-	}
-
-	char* configText = NULL;
-	DWORD configLen = 0;
-	if (!MeshAgent_ReadFileTailW(configPath, 256 * 1024, &configText, &configLen, NULL))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Network persistence validation: unable to read config");
-		return FALSE;
-	}
-
-	char serverId[256] = {0};
-	char meshServer[512] = {0};
-	char* temp = _strdup(configText);
-	if (temp != NULL)
-	{
-		MeshAgent_GetConfigValue(temp, "ServerID", serverId, sizeof(serverId));
-		free(temp);
-	}
-	temp = _strdup(configText);
-	if (temp != NULL)
-	{
-		MeshAgent_GetConfigValue(temp, "MeshServer", meshServer, sizeof(meshServer));
-		free(temp);
-	}
-	free(configText);
-
-	if (serverId[0] == '\0')
-	{
-		MeshAgent_LogNativeInstallerEvent("...Network persistence validation: ServerID missing");
-		return FALSE;
-	}
-
-	char expectedHost[256] = {0};
-	if (meshServer[0] != '\0')
-	{
-		MeshAgent_ExtractHost(meshServer, expectedHost, sizeof(expectedHost));
-	}
-
-	wchar_t logPath[MAX_PATH * 4] = {0};
-	if (!MeshDiagnosticLog_GetPathW(logPath, _countof(logPath))) { return FALSE; }
-
-	MeshAgent_LogNativeInstallerEvent("...Network persistence validation: waiting for control channel");
-	ULONGLONG start = GetTickCount64();
-	while ((GetTickCount64() - start) < timeoutMs)
-	{
-		char* logText = NULL;
-		DWORD logLen = 0;
-		ULONGLONG mtime = 0;
-		if (MeshAgent_ReadFileTailW(logPath, 512 * 1024, &logText, &logLen, &mtime))
-		{
-			BOOL recent = FALSE;
-			if (mtime != 0)
-			{
-				FILETIME nowFt;
-				GetSystemTimeAsFileTime(&nowFt);
-				ULONGLONG now = MeshAgent_FileTimeToUint64(&nowFt);
-				recent = (now > mtime) ? ((now - mtime) < (ULONGLONG)120 * 10000000ULL) : TRUE;
-			}
-
-			BOOL hasConnection = (strstr(logText, "Connection_Established") != NULL) ||
-				(strstr(logText, "serverConnectionState set to 2") != NULL);
-			BOOL hostOk = (expectedHost[0] == '\0') ||
-				(strstr(logText, expectedHost) != NULL);
-
-			free(logText);
-
-			if (hasConnection && hostOk && recent)
-			{
-				MeshAgent_LogNativeInstallerEvent("...Network persistence validation: control channel active");
-				return TRUE;
-			}
-		}
-
-		Sleep(2000);
-	}
-
-	MeshAgent_LogNativeInstallerEvent("...Network persistence validation failed: timeout");
-	return FALSE;
-}
-
-static BOOL MeshAgent_RunMajorBugSelfTest(
-	const wchar_t* serviceName,
-	const ServiceInstallPaths* selfTestPaths,
-	const wchar_t* mshPath,
-	const wchar_t* phaseLabel,
-	DWORD timeoutMs,
-	DWORD* exitCodeOut,
-	MeshAgent_RemoteDesktopRegressionMetrics* metrics)
-{
-	wchar_t args[4096] = {0};
-	wchar_t progressLogPath[MAX_PATH * 4] = {0};
-	DWORD exitCode = ERROR_SUCCESS;
-	BOOL ok = FALSE;
-	ULONGLONG started = 0;
-	DWORD elapsedMs = 0;
-	MeshAgent_SelfTestProgress progress;
-	ZeroMemory(&progress, sizeof(progress));
-
-	if (serviceName == NULL || serviceName[0] == L'\0')
-	{
-		SetLastError(ERROR_INVALID_PARAMETER);
-		return FALSE;
-	}
-
-	StringCchPrintfW(args, _countof(args),
-		L"--selfTest=1 --serviceName=\"%s\" --majorBug=1 --readonly=1 --skipServiceRestart=1 --skipCoreDump=1",
-		serviceName);
-
-	if (selfTestPaths != NULL)
-	{
-		if (selfTestPaths->installDir[0] != L'\0' &&
-			!MeshAgent_AppendSelfTestPathArg(args, _countof(args), L"installRoot", selfTestPaths->installDir))
-		{
-			return FALSE;
-		}
-		if (selfTestPaths->confPath[0] != L'\0' &&
-			!MeshAgent_AppendSelfTestPathArg(args, _countof(args), L"confPath", selfTestPaths->confPath))
-		{
-			return FALSE;
-		}
-	}
-	if (mshPath != NULL && mshPath[0] != L'\0' &&
-		!MeshAgent_AppendSelfTestPathArg(args, _countof(args), L"mshPath", mshPath))
-	{
-		return FALSE;
-	}
-
-	if (MeshAgent_BuildTestingProgressLogPath(phaseLabel, progressLogPath, _countof(progressLogPath)))
-	{
-		DeleteFileW(progressLogPath);
-		if (!MeshAgent_AppendSelfTestPathArg(args, _countof(args), L"progressLog", progressLogPath))
-		{
-			return FALSE;
-		}
-	}
-
-	started = GetTickCount64();
-	ok = MeshRuntimeHost_LaunchSelfTestHostW(args, timeoutMs, &exitCode);
-	elapsedMs = (DWORD)(GetTickCount64() - started);
-
-	if (progressLogPath[0] != L'\0')
-	{
-		MeshAgent_ParseSelfTestProgressLog(progressLogPath, &progress);
-	}
-
-	if (metrics != NULL)
-	{
-		metrics->majorBugRuns += 1;
-		if (ok)
-		{
-			metrics->majorBugPasses += 1;
-			MeshAgent_RecordReadinessSample(metrics, elapsedMs);
-		}
-	}
-
-	MeshAgent_LogNativeInstallerEvent(
-		"...Major-bug self-test [%ls]: exit=%lu elapsedMs=%lu success=%lu kvmStep=%lu",
-		(phaseLabel != NULL ? phaseLabel : L"majorbug"),
-		(unsigned long)exitCode,
-		(unsigned long)elapsedMs,
-		(unsigned long)progress.success,
-		(unsigned long)progress.kvmStepSeen);
-
-	if (exitCodeOut != NULL) { *exitCodeOut = exitCode; }
-	if (!ok)
-	{
-		return FALSE;
-	}
-
-	if (progressLogPath[0] != L'\0')
-	{
-		if (progress.success == 0 || progress.kvmStepSeen == 0)
-		{
-			MeshAgent_LogNativeInstallerEvent("...Major-bug self-test [%ls] progress markers unavailable; relying on process exit status", (phaseLabel != NULL ? phaseLabel : L"majorbug"));
-		}
-	}
-
-	return TRUE;
-}
-
 static BOOL MeshAgent_RunNativeServiceFullUpdate(
 	struct MeshAgentHostContainer* agentHost,
 	const wchar_t* updateExePath,
@@ -1802,12 +628,23 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 			600000,
 			&lifecycleExitCode))
 	{
-		MeshAgent_StageSelfTestModuleBestEffort();
 		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update completed successfully");
 		return TRUE;
 	}
 
-	if (MeshRuntimeHost_LaunchLifecycleHostW(
+	DWORD updateError = GetLastError();
+	if (lifecycleExitCode == MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS)
+	{
+		// The update committed and the new package runs; a non-fatal step did not finish.
+		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update completed with warnings (exit=%lu)", lifecycleExitCode);
+		return TRUE;
+	}
+	MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update failed (exit=%lu LastError=%lu)", lifecycleExitCode, updateError);
+
+	// Diagnostic only: record the installed state after the failure. It never changes the result.
+	{
+		DWORD validateExitCode = ERROR_SUCCESS;
+		BOOL validated = MeshRuntimeHost_LaunchLifecycleHostW(
 			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UPDATE,
 			NULL,
 			NULL,
@@ -1817,14 +654,10 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 			TRUE,
 			TRUE,
 			120000,
-			&lifecycleExitCode))
-	{
-		MeshAgent_StageSelfTestModuleBestEffort();
-		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update reported failure but final update validation passed");
-		return TRUE;
+			&validateExitCode);
+		MeshAgent_LogNativeInstallerEvent("...Post-failure update validation %s (exit=%lu)", validated ? "passed" : "failed", validateExitCode);
 	}
-
-	MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update failed (exit=%lu LastError=%lu)", lifecycleExitCode, GetLastError());
+	SetLastError(updateError != ERROR_SUCCESS ? updateError : ERROR_INSTALL_FAILURE);
 	return FALSE;
 }
 
@@ -1884,329 +717,6 @@ static BOOL MeshAgent_RunNativeServiceRestart(
 	return TRUE;
 }
 
-static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHost, const wchar_t* updateExePath, const wchar_t* updateDllPath)
-{
-	if (agentHost == NULL || agentHost->exePath == NULL) { return FALSE; }
-
-	WCHAR exePathW[MAX_PATH * 4];
-	ILibUTF8ToWideEx(agentHost->exePath, -1, exePathW, (int)(sizeof(exePathW) / sizeof(WCHAR)));
-
-	wchar_t serviceName[256] = {0};
-	MeshAgent_GetServiceKeyNameW(serviceName, _countof(serviceName));
-	MeshAgent_RemoteDesktopRegressionMetrics rdMetrics;
-	MeshAgent_InitRemoteDesktopMetrics(&rdMetrics);
-
-	MeshAgent_LogNativeInstallerEvent("=== Native Regression Start ===");
-	SetEnvironmentVariableW(L"MESHAGENT_SELFTEST", L"1");
-
-	DWORD exitCode = ERROR_SUCCESS;
-	if (!MeshRuntimeHost_LaunchLifecycleHostW(
-			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL,
-			exePathW,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			TRUE,
-			TRUE,
-			600000,
-			&exitCode))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Full install failed (exit=%lu)", exitCode);
-		return FALSE;
-	}
-
-	if (!MeshAgent_WaitForServiceRunning(serviceName, 60000))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Service did not reach running state");
-		return FALSE;
-	}
-
-	if (!MeshAgent_WaitForNodeId(serviceName, 60000))
-	{
-		MeshAgent_LogNativeInstallerEvent("...NodeId not available for service");
-		return FALSE;
-	}
-
-	if (!MeshRuntimeHost_LaunchLifecycleHostW(
-			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_INSTALL,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			TRUE,
-			TRUE,
-			120000,
-			&exitCode))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Install validation failed (exit=%lu)", exitCode);
-		return FALSE;
-	}
-	MeshAgent_CopyEvidenceSnapshot(L"install");
-
-	MeshAgent_LogNativeInstallerEvent("...Restarting service for regression validation");
-	if (!MeshAgent_RestartServiceForRegression(serviceName, 60000))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Service restart failed");
-		return FALSE;
-	}
-	MeshAgent_CopyEvidenceSnapshot(L"restart");
-
-	if (!MeshAgent_ValidateNetworkPersistence(60000))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Network persistence validation failed");
-		return FALSE;
-	}
-
-	ServiceInstallPaths selfTestPaths;
-	ZeroMemory(&selfTestPaths, sizeof(selfTestPaths));
-	if (!ServiceDeploy_GetInstallPaths(&selfTestPaths))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Unable to resolve install paths for self-test");
-		return FALSE;
-	}
-
-	if (!MeshAgent_StageSelfTestModule(selfTestPaths.installDir))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Failed to stage agent-selftest.js for self-test");
-		return FALSE;
-	}
-
-	if (!MeshAgent_WaitForCoreModule(selfTestPaths.dbPath, 900000))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Core module not available for self-test");
-		return FALSE;
-	}
-
-	wchar_t selfTestArgs[4096] = {0};
-	wchar_t mshPath[MAX_PATH * 4] = {0};
-
-	if (selfTestPaths.exePath[0] != L'\0')
-	{
-		StringCchCopyW(mshPath, _countof(mshPath), selfTestPaths.exePath);
-		wchar_t* dot = wcsrchr(mshPath, L'.');
-		if (dot != NULL)
-		{
-			StringCchCopyW(dot, _countof(mshPath) - (dot - mshPath), L".msh");
-		}
-		else
-		{
-			StringCchCatW(mshPath, _countof(mshPath), L".msh");
-		}
-	}
-
-	StringCchPrintfW(selfTestArgs, _countof(selfTestArgs), L"--selfTest=1 --serviceName=\"%s\" --fullRegression=1 --readonly=1 --skipServiceRestart=1", serviceName);
-	if (selfTestPaths.installDir[0] != L'\0' &&
-		!MeshAgent_AppendSelfTestPathArg(selfTestArgs, _countof(selfTestArgs), L"installRoot", selfTestPaths.installDir))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Unable to append installRoot self-test argument");
-		return FALSE;
-	}
-	if (selfTestPaths.confPath[0] != L'\0' &&
-		!MeshAgent_AppendSelfTestPathArg(selfTestArgs, _countof(selfTestArgs), L"confPath", selfTestPaths.confPath))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Unable to append confPath self-test argument");
-		return FALSE;
-	}
-	if (mshPath[0] != L'\0' &&
-		!MeshAgent_AppendSelfTestPathArg(selfTestArgs, _countof(selfTestArgs), L"mshPath", mshPath))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Unable to append mshPath self-test argument");
-		return FALSE;
-	}
-
-	if (!MeshAgent_RunMajorBugSelfTest(
-		serviceName,
-		&selfTestPaths,
-		(mshPath[0] != L'\0' ? mshPath : NULL),
-		L"majorbug_post_restart",
-		900000,
-		&exitCode,
-		&rdMetrics))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Post-restart major-bug self-test failed (exit=%lu); retrying once", exitCode);
-		if (!MeshAgent_RestartServiceForRegression(serviceName, 60000) ||
-			!MeshAgent_WaitForServiceRunning(serviceName, 120000) ||
-			!MeshAgent_WaitForNodeId(serviceName, 120000) ||
-			!MeshAgent_RunMajorBugSelfTest(
-				serviceName,
-				&selfTestPaths,
-				(mshPath[0] != L'\0' ? mshPath : NULL),
-				L"majorbug_post_restart_retry",
-				900000,
-				&exitCode,
-				&rdMetrics))
-		{
-			MeshAgent_LogNativeInstallerEvent("...Post-restart major-bug self-test retry failed (exit=%lu)", exitCode);
-			return FALSE;
-		}
-	}
-	MeshAgent_CopyEvidenceSnapshot(L"majorbug_post_restart");
-	if (!MeshAgent_WaitForServiceRunning(serviceName, 120000))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Service did not return to running state after post-restart major-bug test");
-		return FALSE;
-	}
-	if (!MeshAgent_WaitForNodeId(serviceName, 120000))
-	{
-		MeshAgent_LogNativeInstallerEvent("...NodeId unavailable after post-restart major-bug test");
-		return FALSE;
-	}
-
-	if (!MeshRuntimeHost_LaunchSelfTestHostW(selfTestArgs, 900000, &exitCode))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Self-test failed (exit=%lu)", exitCode);
-		return FALSE;
-	}
-	MeshAgent_CopyEvidenceSnapshot(L"selftest");
-
-	const wchar_t* updateSource = (updateExePath != NULL && updateExePath[0] != L'\0') ? updateExePath : exePathW;
-
-	if (!MeshRuntimeHost_LaunchLifecycleHostW(
-			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE,
-			updateSource,
-			updateDllPath,
-			NULL,
-			NULL,
-			NULL,
-			TRUE,
-			TRUE,
-			600000,
-			&exitCode))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Update failed (exit=%lu)", exitCode);
-		return FALSE;
-	}
-
-	if (!MeshAgent_WaitForServiceRunning(serviceName, 60000))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Service did not restart after update");
-		return FALSE;
-	}
-
-	if (!MeshRuntimeHost_LaunchLifecycleHostW(
-			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UPDATE,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			TRUE,
-			TRUE,
-			120000,
-			&exitCode))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Update validation failed (exit=%lu)", exitCode);
-		return FALSE;
-	}
-	MeshAgent_CopyEvidenceSnapshot(L"update");
-
-	if (!MeshAgent_WaitForCoreModule(selfTestPaths.dbPath, 900000))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Core module not available for post-update self-test");
-		return FALSE;
-	}
-
-	if (!MeshRuntimeHost_LaunchSelfTestHostW(selfTestArgs, 900000, &exitCode))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Post-update self-test failed (exit=%lu)", exitCode);
-		return FALSE;
-	}
-	MeshAgent_CopyEvidenceSnapshot(L"post_update_selftest");
-
-	if (!MeshAgent_RunMajorBugSelfTest(
-		serviceName,
-		&selfTestPaths,
-		(mshPath[0] != L'\0' ? mshPath : NULL),
-		L"majorbug_post_update",
-		900000,
-		&exitCode,
-		&rdMetrics))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Post-update major-bug self-test failed (exit=%lu); retrying once", exitCode);
-		if (!MeshAgent_RestartServiceForRegression(serviceName, 60000) ||
-			!MeshAgent_WaitForServiceRunning(serviceName, 120000) ||
-			!MeshAgent_WaitForNodeId(serviceName, 120000) ||
-			!MeshAgent_RunMajorBugSelfTest(
-				serviceName,
-				&selfTestPaths,
-				(mshPath[0] != L'\0' ? mshPath : NULL),
-				L"majorbug_post_update_retry",
-				900000,
-				&exitCode,
-				&rdMetrics))
-		{
-			MeshAgent_LogNativeInstallerEvent("...Post-update major-bug self-test retry failed (exit=%lu)", exitCode);
-			return FALSE;
-		}
-	}
-	MeshAgent_CopyEvidenceSnapshot(L"majorbug_post_update");
-	if (!MeshAgent_WaitForServiceRunning(serviceName, 120000))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Service did not return to running state after post-update major-bug test");
-		return FALSE;
-	}
-	if (!MeshAgent_WaitForNodeId(serviceName, 120000))
-	{
-		MeshAgent_LogNativeInstallerEvent("...NodeId unavailable after post-update major-bug test");
-		return FALSE;
-	}
-
-	if (rdMetrics.readinessSamples > 0)
-	{
-		DWORD readinessAvg = (DWORD)(rdMetrics.readinessTotalMs / rdMetrics.readinessSamples);
-		MeshAgent_LogNativeInstallerEvent(
-			"...Remote-desktop readiness metrics: majorBugRuns=%lu majorBugPasses=%lu readinessMs[min=%lu avg=%lu max=%lu]",
-			(unsigned long)rdMetrics.majorBugRuns,
-			(unsigned long)rdMetrics.majorBugPasses,
-			(unsigned long)rdMetrics.readinessMinMs,
-			(unsigned long)readinessAvg,
-			(unsigned long)rdMetrics.readinessMaxMs);
-	}
-	else
-	{
-		MeshAgent_LogNativeInstallerEvent("...Remote-desktop readiness metrics unavailable (no successful major-bug runs)");
-		return FALSE;
-	}
-
-	MeshAgent_CopyEvidenceSnapshot(L"pre_uninstall");
-	if (!MeshRuntimeHost_LaunchLifecycleHostW(
-			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			TRUE,
-			TRUE,
-			600000,
-			&exitCode))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Full uninstall failed (exit=%lu)", exitCode);
-		return FALSE;
-	}
-
-	if (!MeshRuntimeHost_LaunchLifecycleHostW(
-			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			NULL,
-			TRUE,
-			TRUE,
-			120000,
-			&exitCode))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Uninstall validation failed (exit=%lu)", exitCode);
-		return FALSE;
-	}
-	MeshAgent_CopyEvidenceSnapshot(L"uninstall");
-
-	MeshAgent_LogNativeInstallerEvent("=== Native Regression Complete ===");
-	return TRUE;
-}
 #endif
 
 #if !defined(WIN32) || !defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
@@ -2281,7 +791,6 @@ char exeNullPolicyGuid[] = { 0xB9, 0x96, 0x01, 0x58, 0x80, 0x54, 0x4A, 0x19, 0xB
 #define REMOTE_DESKTOP_ptrs		"\xFF_RemoteDesktopPTRS"
 #define DEFAULT_IDLE_TIMEOUT	120
 #define CONTROLCHANNEL_PONG_TIMEOUT_SECONDS 15
-#define CONTROLCHANNEL_PONG_MAX_RETRIES 3
 // A pong timer that fires this much later than scheduled means the event thread was stalled
 // (for example by a synchronous helper launch), not that the server stopped answering.
 #define CONTROLCHANNEL_PONG_STALL_SLACK_MS 2000
@@ -6203,26 +4712,10 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					util_keyhash2(peer, ILibScratchPad2); // Hash the server certificate public key (this is the old way)
 					if (memcmp(ILibScratchPad2, AuthRequest->serverHash, sizeof(AuthRequest->serverHash)) != 0) 
 					{
-						if (agent->tlsRelaxedValidation != 0)
-						{
-							agent->tlsInspectionDetected = 1;
-							if (agent->tlsInspectionLogged == 0)
-							{
-								agent->tlsInspectionLogged = 1;
-								MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: TLS inspection detected, continuing with post-connect certificate proof");
-								ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain),
-									ILibRemoteLogging_Modules_Agent_GuardPost,
-									ILibRemoteLogging_Flags_VerbosityLevel_1,
-									"AgentCore: corporate TLS inspection detected, continuing with signed websocket server proof");
-							}
-						}
-						else
-						{
 						printf("Bad server certificate hash\r\n");
 						authenticationFailed = 1;
 						ILIBLOGMESSAGEX("[AUTH_FAILURE] reason=tls_certificate_hash_mismatch");
 						break;
-						}
 					}
 				}
 				memcpy_s(agent->serverNonce, sizeof(agent->serverNonce), AuthRequest->serverNonce, sizeof(AuthRequest->serverNonce));
@@ -6349,14 +4842,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 						agent->serverAuthState |= 1;
 
 						// Store the server's TLS cert hash so in the future, we can skip server auth.
-						if (agent->tlsInspectionDetected == 0)
-						{
-							ILibSimpleDataStore_PutEx(agent->masterDb, "ServerTlsCertHash", 17, ILibScratchPad2, UTIL_SHA384_HASHSIZE);
-						}
-						else
-						{
-							ILibSimpleDataStore_DeleteEx(agent->masterDb, "ServerTlsCertHash", 17);
-						}
+						ILibSimpleDataStore_PutEx(agent->masterDb, "ServerTlsCertHash", 17, ILibScratchPad2, UTIL_SHA384_HASHSIZE);
 
 						// Send our agent information to the server
 						MeshServer_SendAgentInfo(agent, WebStateObject);
@@ -7134,9 +5620,9 @@ void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 	}
 
 	// Timers run on the same thread that reads the socket. When that thread was blocked past the
-	// pong deadline, or when the host is under high CPU/GPU load, this fires before the pong or pending
-	// frames are read, which would drop a healthy connection. Validate socket activity and allow up to
-	// CONTROLCHANNEL_PONG_MAX_RETRIES consecutive probes before concluding the peer is gone.
+	// pong deadline, this fires before the pong or pending frames are read, which would drop a
+	// healthy connection. Recent or buffered input extends the deadline. A timer that fired more
+	// than CONTROLCHANNEL_PONG_STALL_SLACK_MS late gets one re-ping; an on-time miss disconnects.
 	{
 		long long overdueMs = ILibGetUptime() - agent->controlChannel_pingSentTick - ((long long)CONTROLCHANNEL_PONG_TIMEOUT_SECONDS * 1000);
 		int pendingInput = MeshServer_ControlChannel_HasPendingInput(timedOutChannel);
@@ -7153,12 +5639,12 @@ void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 			return;
 		}
 
-		if (agent->controlChannel_pingSentTick != 0 && agent->controlChannel_pongGraceUsed < CONTROLCHANNEL_PONG_MAX_RETRIES)
+		if (agent->controlChannel_pingSentTick != 0 && overdueMs > CONTROLCHANNEL_PONG_STALL_SLACK_MS && agent->controlChannel_pongGraceUsed == 0)
 		{
-			agent->controlChannel_pongGraceUsed++;
+			agent->controlChannel_pongGraceUsed = 1;
 			agent->controlChannel_pingSentTick = ILibGetUptime();
-			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): PONG missed (probe %d/%d, overdueMs=%lld ms, pendingInput=%d); re-pinging (descriptor=%d)", agent->controlChannel_pongGraceUsed, CONTROLCHANNEL_PONG_MAX_RETRIES, overdueMs, pendingInput, descriptorValue);
-			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore/MeshServer_ControlChannel_IdleTimeout(): PONG missed (%d/%d, overdueMs=%lld ms), re-pinging", agent->controlChannel_pongGraceUsed, CONTROLCHANNEL_PONG_MAX_RETRIES, overdueMs);
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): PONG timer fired %lld ms late (event thread stalled); re-pinging once (descriptor=%d)", overdueMs, descriptorValue);
+			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore/MeshServer_ControlChannel_IdleTimeout(): PONG timer %lld ms late, re-pinging", overdueMs);
 			ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), Agent2PingData(agent), CONTROLCHANNEL_PONG_TIMEOUT_SECONDS, MeshServer_ControlChannel_IdleTimeout_PongTimeout, NULL);
 			if ((int)ILibWebClient_WebSocket_Ping(timedOutChannel) >= 0) { return; }
 			// The re-ping could not even be queued: the socket is gone, so reconnect now.
@@ -8011,21 +6497,7 @@ void MeshServer_Agent_SelfTest(MeshAgentHostContainer *agent)
 		free(CoreModule);
 	}
 
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
-	MeshAgent_StageSelfTestModuleForCurrentExeBestEffort();
-#endif
-
-	if (duk_peval_string(agent->meshCoreCtx,
-		"if (typeof Duktape !== 'undefined' && Duktape.modLoaded) {"
-		" try { for (var k in Duktape.modLoaded) {"
-		" if (k.indexOf('agent-selftest') >= 0) { delete Duktape.modLoaded[k]; }"
-		" } } catch (e) {} }"
-		" var __selfTestPath = null;"
-		" try { var __lastSlash = process.execPath.lastIndexOf('\\\\');"
-		" if (__lastSlash >= 0) { __selfTestPath = process.execPath.substring(0, __lastSlash + 1) + 'agent-selftest.js'; } } catch (e) {}"
-		" if (__selfTestPath != null) {"
-		" try { require(__selfTestPath)(); } catch (e1) { require('agent-selftest')(); }"
-		" } else { require('agent-selftest')(); }") != 0)
+	if (duk_peval_string(agent->meshCoreCtx, "require('agent-selftest')();") != 0)
 	{
 		printf("   -> Loading Test Script.................[FAILED] %s", duk_safe_to_string(agent->meshCoreCtx, -1));
 		exit(1);
@@ -8146,7 +6618,7 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 	}
 	else if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("Attempting to connect to Server..."); }
 
-	// High Fix #5: Prevent integer overflow in retry delay calculation
+	// Prevent integer overflow in retry delay calculation
 	// Define maximum delay constants to prevent overflow
 	#define MAX_RETRY_DELAY_MS 360000       // 6 minutes max
 	#define BASE_RETRY_DELAY_MS 500         // 500ms base
@@ -8213,32 +6685,20 @@ int ValidateMeshServer(ILibWebClient_RequestToken sender, int preverify_ok, STAC
 {
 	void **userObjects = ILibWebClient_RequestToken_GetUserObjects(sender);
 	MeshAgentHostContainer *agent = (userObjects != NULL) ? (MeshAgentHostContainer*)userObjects[0] : (MeshAgentHostContainer*)data;
+	int len;
 	UNREFERENCED_PARAMETER(certs);
 	UNREFERENCED_PARAMETER(address);
 
-	// Critical Fix #1: Validate TLS certificate chain during initial connection
-	// Previously always returned 1, deferring validation to websocket handshake.
-	// Now we check preverify_ok and allow connection only if OpenSSL validated the chain,
-	// OR if certificate pinning will be performed later (second round validation).
-	// Note: Second round validation in websocket still occurs for server identity check.
-	if (agent != NULL)
-	{
-		agent->tlsRelaxedValidation = 0;
-		agent->tlsInspectionDetected = 0;
-		agent->tlsInspectionLogged = 0;
-		memset(agent->serverWebHash, 0, sizeof(agent->serverWebHash));
+	if (agent == NULL) { return 1; }
+	memset(agent->serverWebHash, 0, sizeof(agent->serverWebHash));
+
+	len = ILibSimpleDataStore_Get(agent->masterDb, "validateWebCert", ILibScratchPad, sizeof(ILibScratchPad));
+	// Values here are 0 terminated, but the 0 is counted in size, so add one to the length check.
+	if ((len == 2 && strncmp("1", ILibScratchPad, 1) == 0) ||
+		(len == 5 && strncmp("true", ILibScratchPad, 4) == 0)) {
+		return preverify_ok;
 	}
-	if (preverify_ok == 0)
-	{
-		// OpenSSL certificate chain validation failed
-		// Log the failure but allow connection to proceed for second-round validation
-		// This keeps self-signed MeshCentral provisioning compatibility without enabling the later TLS-inspection fallback work.
-		ILibRemoteLogging_printf(NULL, ILibRemoteLogging_Modules_Agent_GuardPost,
-			ILibRemoteLogging_Flags_VerbosityLevel_1,
-			"ValidateMeshServer: TLS preverify failed, will validate in websocket handshake");
-	}
-	// Return 1 to allow second-round validation in websocket handshake
-	// The websocket handler performs certificate hash verification
+	// Server validation is always true here. We will do a second round within the websocket to see if the server is really valid or not.
 	return 1;
 }
 #endif
