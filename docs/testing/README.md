@@ -598,7 +598,7 @@ These checks read the sibling `../MeshCentral` checkout and its installed
 
 - `test/meshcentral_desktop_pointer_baseline_runtime.js` runs the fork's
   `agent-desktop-0.0.2.js` and `-min.js` in a Node VM. It drives desktop mouse
-  input, plus the touch and trackpad handlers sliced from the pinned upstream
+  input, plus the touch and trackpad handlers sliced from the fork's
   `default3` and `default-mobile` views, with a fake DOM and clock. It compares
   every mouse packet with the recorded traces, including known defects that must
   not change by accident.
@@ -608,7 +608,22 @@ These checks read the sibling `../MeshCentral` checkout and its installed
   `test/meshcentral_trackpad_sharing_coupling_contract.js` pin the view globals,
   element ids, canvas markups, lifecycle hooks and detection markers the trackpad
   adapters depend on. The guest pages' contracts also pin where their adapters
-  add the trackpad toggle, and what it looks like.
+  add the trackpad toggle, and what it looks like. They read the fork's own
+  views. How those differ from the pinned upstream package is checked hunk by
+  hunk in `test/meshcentral_upstream_base_contract.js`, so an upstream change
+  stays visible there.
+- `test/meshcentral_default3_mobile_connect_runtime.js` runs the whole Modern UI
+  page (the fork's `default3` and `default3-min`) in Chromium (Pixel 7) and
+  WebKit (iPhone 15) emulation. Only the control and relay sockets are fake.
+  It opens a device's Desktop tab, taps Connect, and records every packet the
+  viewer sends. It requires:
+  - no mouse button on connect;
+  - unpause and refresh retried by the page's wake;
+  - exactly one pointer move after about 3.5 s only when no frame arrives, and
+    none when a frame arrives.
+
+  `--view <file>` holds another page file to the same checks; production's old
+  overrides fail them with a left click at about 500 ms.
 - `test/meshcentral_viewer_min_build_contract.js` requires the served
   `agent-desktop-0.0.2-min.js` to equal the output of
   `../MeshCentral/scripts/build-viewer-min.js`.
@@ -628,7 +643,7 @@ These checks read the sibling `../MeshCentral` checkout and its installed
   the four view adapters (Modern UI, classic mobile, and the guest share pages
   for phones and for desktop browsers) in Chromium (real multi-touch through CDP)
   and WebKit.
-  The fixtures use each pinned view's exact canvas markup and its own touch,
+  The fixtures use each fork view's exact canvas markup and its own touch,
   mouse and trackpad code, with the real `agent-desktop` module recording
   packets. The test checks that:
   - with the flag off, or trackpad mode off, handler calls and packets are

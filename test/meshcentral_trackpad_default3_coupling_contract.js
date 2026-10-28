@@ -1,19 +1,22 @@
-// Pin every part of the upstream Modern UI view (default3) that the fork's trackpad adapter reads,
+// Pin every part of the Modern UI view (default3) that the fork's trackpad adapter reads,
 // calls or listens beneath, so a MeshCentral upgrade that moves any of them fails here instead of
 // letting the adapter and the view both process the same touches.
 const fs = require('fs');
 const path = require('path');
-const { meshcentralRoot, upstreamPackageDir } = require('./lib/meshcentral_paths');
+const { meshcentralRoot } = require('./lib/meshcentral_paths');
 
 const PINNED_MESHCENTRAL = '1.2.5';
-// Stock upstream, not the installed package: since Stage 1 the installed package is the fork.
-const moduleRoot = upstreamPackageDir();
-const scriptsDir = path.join(meshcentralRoot(), 'public', 'scripts');
+// The fork's own package source: since Stage 2 the fork serves its own views (the production
+// overrides are retired, D16, and #8104 is a fork commit). How these files differ from the pinned
+// upstream package is checked separately, hunk by hunk, by meshcentral_upstream_base_contract.js,
+// so an upstream change stays visible there.
+const moduleRoot = meshcentralRoot();
+const scriptsDir = path.join(moduleRoot, 'public', 'scripts');
 
 // Every input is required: a missing or empty file fails the contract and says what it was for.
 function read(file) {
-    const purpose = file.startsWith(moduleRoot + path.sep) ? `pinned upstream MeshCentral package file this contract pins to ${PINNED_MESHCENTRAL}`
-        : file.startsWith(scriptsDir + path.sep) ? 'fork script checked against the pinned upstream page' : 'coupling contract input';
+    const purpose = file.startsWith(scriptsDir + path.sep) ? 'fork script checked against the fork page'
+        : file.startsWith(moduleRoot + path.sep) ? `fork package file this contract pins (MeshCentral ${PINNED_MESHCENTRAL} base)` : 'coupling contract input';
     let text;
     try {
         text = fs.readFileSync(file, 'utf8');
@@ -35,8 +38,8 @@ function checks() {
     const mobileView = read(path.join(moduleRoot, 'views', 'default-mobile.handlebars'));
     const version = JSON.parse(read(path.join(moduleRoot, 'package.json'))).version;
     const fork = ['agent-desktop-0.0.2.js', 'agent-redir-ws-0.1.1.js'].map(f => read(path.join(scriptsDir, f)));
-    // Both upstream viewer scripts ship in the pinned package and are required, so neither can drop out
-    // of the GrabMouseInput check below.
+    // Both redirect scripts the page can load are required, so neither can drop out of the
+    // GrabMouseInput check below.
     const upstream = ['agent-redir-ws-0.1.1.js', 'agent-redir-rtc-0.1.0.js'].map(f => read(path.join(moduleRoot, 'public', 'scripts', f)));
     const staticCanvas = '<canvas id=Desk width=640 height=480 oncontextmenu="return false"\n                                onmousedown=dmousedown(event) onmouseup=dmouseup(event) onmousemove=dmousemove(event)\n                                onmousewheel=dmousewheel(event)\n                                ontouchstart=dtouchstart(event) ontouchmove=dtouchmove(event) ontouchend=dtouchend(event)></canvas>';
     const blankCanvas = "QH('DeskParent', '<canvas id=Desk oncontextmenu=\"return false\" onmousedown=dmousedown(event) onmouseup=dmouseup(event) onmousemove=dmousemove(event) ontouchstart=dtouchstart(event) ontouchmove=dtouchmove(event) ontouchend=dtouchend(event)></canvas>');";

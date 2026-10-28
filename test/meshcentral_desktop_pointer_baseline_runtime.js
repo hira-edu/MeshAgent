@@ -1,5 +1,5 @@
 // Pin the mouse packets the remote desktop viewer sends today for desktop mouse input and for
-// the upstream touch/trackpad handlers in the pinned MeshCentral views, so pointer changes can be
+// the touch/trackpad handlers in the fork's MeshCentral views, so pointer changes can be
 // shown not to alter them. No endpoint connection or OS input is used.
 // --print writes the current traces instead of checking them (used when re-pinning after a
 // reviewed MeshCentral upgrade).
@@ -7,11 +7,14 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
-const { meshcentralRoot, upstreamPackageDir } = require('./lib/meshcentral_paths');
+const { meshcentralRoot } = require('./lib/meshcentral_paths');
 
 const scriptsDir = path.join(meshcentralRoot(), 'public', 'scripts');
-// Stock upstream views, not the installed package: since Stage 1 the installed package is the fork.
-const viewsDir = path.join(upstreamPackageDir(), 'views');
+// The fork's own package source: since Stage 2 the fork serves its own views (the production
+// overrides are retired, D16, and #8104 is a fork commit). How these files differ from the pinned
+// upstream package is checked separately, hunk by hunk, by meshcentral_upstream_base_contract.js,
+// so an upstream change stays visible there.
+const viewsDir = path.join(meshcentralRoot(), 'views');
 const PINNED_MESHCENTRAL = '1.2.5';
 
 function hex(packet) { return packet.map(b => b.toString(16).padStart(2, '0')).join(''); }
