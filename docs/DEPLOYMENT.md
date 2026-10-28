@@ -29,8 +29,8 @@ fork's layout (see [Image build context](#image-build-context)). The Node/OS bas
 by digest/commit. BuildKit publishes provenance and an SBOM. Deployments promote
 the image digest; they do not rebuild or pull mutable tags on the VPS.
 
-The server package lock is aligned with the production MeshCentral 1.2.5 baseline.
-The VPS controller accepts only MeshCentral versions listed in the
+The MeshCentral fork package is upstream 1.3.1 plus the reviewed fork changes; production
+runs MeshCentral 1.2.5 until the fork is deployed. The VPS controller accepts only MeshCentral versions listed in the
 `reviewed_versions` allowlist of `/etc/meshcentral-deploy.json` (see
 [Reviewed MeshCentral versions](#reviewed-meshcentral-versions)). Database
 migrations are not run as an incidental part of a push.
@@ -206,6 +206,35 @@ or nested file fails the start and is named.
 manifest before starting it; anything the server wrote while running, or that
 was placed there since, is discarded. With a code-signing certificate configured,
 the server signs its agents into the writable `signed` folder again at start.
+
+### Fork agent binaries in the MeshCentral package
+
+Upstream 1.3.1 ships no agent binaries and downloads them from GitHub at start.
+The fork never downloads agents: it serves only the builds pinned by size and
+SHA384 in MeshCentral `agents/agent-defaults.json` (today `MeshService.exe`,
+`MeshService64.exe` and `MeshServiceARM64.exe`, Windows ids 3, 4 and 43, served
+unsigned). At start the server verifies every pin in its package `agents`
+folder; a missing or changed file, a manifest that pins nothing, or any
+`settings.agentDownloads` value other than `{ "enabled": false }` prints
+`ERROR: fork agent binaries: ...` and stops the server. Copies of 3, 4 and 43
+in `meshcentral-data/agents` are not used; agent files the fork does not build
+(Linux, macOS x86, MeshCmd and others) are not served.
+
+The binaries are not committed to MeshCentral. A passing
+`test/release_bundle_gate.js --meshagent-commit <sha>` writes
+`meshcentral-agent-defaults.json`, which becomes `agents/agent-defaults.json`
+(`node agents/release-manifest.js` writes the same format). The pack then stages
+the builds from the release output, checks each against its pin, and removes
+the copies afterwards:
+
+```powershell
+node agents/check-releases.js --directory <folder with the three exes>
+node deploy/scripts/pack.js --agents <folder with the three exes>
+```
+
+`pack.js` without `--agents` refuses a manifest whose builds are not in the
+package. The deploy lockfile pins the resulting tarball, so changing a build
+needs new pins, a repack and a new lock commit.
 
 ### Shadow-copy check
 
@@ -393,6 +422,19 @@ retained. To return to it after a successful first migration, stop the productio
 container, restore the pre-migration fleet configuration if needed, then enable
 and start `meshcentral.service`; verify health before allowing another release.
 Do not restore an old database snapshot as part of an application rollback.
+
+MeshCentral 1.3.1 changes no records, but on its first start on a 1.2.5 MongoDB
+database it adds indexes: `meshcentral` TypeDomainMeshNameCollation1,
+TypeDomainIdNameCollation1, Domain1 and TypeDomainNode1; `events`
+DomainIdsTime1, DomainUserTime1 and DomainUserActionTime1; `power` Domain1; and a
+new `plugins` collection with TypeAndName1. 1.2.5 counts indexes, so after a
+rollback it logs "Resetting main indexes...", "Resetting events indexes..." and
+"Resetting power events indexes..." and rebuilds its own set; queries on those
+collections scan until the rebuild finishes. To start 1.2.5 without the reset,
+drop exactly those indexes first. Take a `mongodump --archive --gzip` and save
+`getIndexes()` of the four collections immediately before moving to 1.3.1.
+1.3.1's autobackup needs Node 22 or later (`fs.promises.glob`); on Node 20 the
+backup zip step fails.
 
 ### Source edits on the VPS and local synchronization
 
