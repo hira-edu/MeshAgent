@@ -28,11 +28,10 @@ env:
   # Precedence: dispatch input, then the repository variable, then main.
   MESHCENTRAL_REF: ${{ inputs.meshcentral_ref || vars.MESHCENTRAL_REF || 'main' }}
   # The fork does not carry the upstream release tags, and the upstream-base contract
-  # diffs against them. They are fetched from upstream and pinned to these commits, so a
+  # diffs against 1.2.5. The tag is fetched from upstream and pinned to this commit, so a
   # moved or replaced upstream tag fails the job instead of changing the baseline.
   MESHCENTRAL_UPSTREAM_URL: https://github.com/Ylianst/MeshCentral.git
   MESHCENTRAL_UPSTREAM_TAGS: >-
-    1.2.1=a2876029077b04a1708e2c92cbba96831f791b6a
     1.2.5=b09b1d60328de8e2d2f7387561ed51c64011c82a
   # Node matches the duplicate server and production (SSOT D20). Python matches the
   # release workflow.
