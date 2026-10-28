@@ -130,7 +130,8 @@ host service. It creates the root-owned controller
 `/usr/local/sbin/meshcentral-ci-entry` forced-command entry, the `meshdeploy`
 account, its sudoers rule, and `/etc/meshcentral-deploy.json` (mode 0600). It
 does not stop MeshCentral, and it refuses to overwrite an existing configuration, account, or controller
-file. That key can submit only `deploy sha256:<digest>`; it cannot obtain a shell,
+file. That key can submit only `deploy sha256:<digest>` (production) and
+`deploy-preview sha256:<digest>` (the [preview instance](#preview-instance)); it cannot obtain a shell,
 upload arbitrary scripts, forward ports, or invoke an arbitrary sudo command.
 No SSH password fallback or trust-on-first-use host-key scan is used by CI.
 
@@ -148,7 +149,9 @@ sudo python3 tools/deployment/install_controller.py --upgrade
 `--upgrade` takes no installation options; the installed policy is kept and
 edited in place. It refuses while another controller operation holds the lock,
 while `transaction.json` exists (run `recover` first), or when the installation
-is incomplete. It then replaces the controller, CI entry, and shadow-check files
+is incomplete. The controller code is shared by every instance, so when the
+preview instance is installed it also holds the preview lock and refuses while a
+preview transaction exists. It then replaces the controller, CI entry, and shadow-check files
 and migrates the configuration atomically. A schema-1 configuration's single
 `meshcentral_version` becomes the first `reviewed_versions` entry; a schema-2
 configuration loses `image_size_mitigation_sha256` (the upgrade prints that it
@@ -594,6 +597,96 @@ release. In order, on the VPS, as root:
    `harden-image-size.js` and `30-harden-image-size.conf` to
    `/var/lib/meshcentral-deploy/retired-host-preload/<stamp>/` and reloads
    systemd; the deployment log names both files with their sha256.
+
+### Preview instance
+
+The preview server, `preview.high.support`, is a second, independent MeshCentral
+instance on the same VPS, deployed by the same controller and the same CI key.
+Every setting matches production except the instance-specific values below. The
+controller acts on exactly one instance per run: `--instance preview` selects
+the preview, and the default is production, whose paths, container and command
+line are unchanged.
+
+| | Production | Preview |
+| --- | --- | --- |
+| Forced command | `deploy sha256:<digest>` | `deploy-preview sha256:<digest>` |
+| Controller run | `meshcentral-release deploy`, unit `meshcentral-deploy` | `meshcentral-release --instance preview deploy`, unit `meshcentral-deploy-preview` |
+| Controller configuration | `/etc/meshcentral-deploy.json` | `/etc/meshcentral-deploy-preview.json` (`"instance": "preview"`) |
+| State and lock | `/var/lib/meshcentral-deploy` | `/var/lib/meshcentral-deploy-preview` |
+| Install root (host) | `/opt/meshcentral` | `/opt/meshcentral-preview` |
+| Container, account | `meshcentral-production`, `meshcentral` | `meshcentral-preview`, `meshcentral-preview` |
+| MeshCentral ports (127.0.0.1) | 4430, MPS 4433 | 4440, MPS 4441 |
+| MongoDB database | `meshcentral` | `meshcentral_preview` |
+| Health URL | the configured console URL | `https://preview.high.support/health.ashx` |
+
+The preview container mounts `/opt/meshcentral-preview/meshcentral-{data,files,web,recordings,backups}`
+at the image's own `/opt/meshcentral/meshcentral-*`, so MeshCentral's defaults
+inside the container are the preview folders. Paths in the preview's
+`config.json` are therefore written as the container sees them (for example
+`backupPath` `/opt/meshcentral/meshcentral-backups`); the configuration path
+check resolves them against `/opt/meshcentral` and refuses
+`/opt/meshcentral-preview/...`, which the container does not have. Each
+container carries the label `meshcentral-release.instance=<instance>`.
+
+The preview has no host service: its first deployment checks no incumbent,
+records no host snapshot and runs no `systemctl`; if it fails, the controller
+removes the candidate, restores `config.json` and leaves the preview stopped.
+Later deployments, `recover` and `rollback` work as for production, with the
+preview's own records. The image-size preload belongs to production's host
+service and is never touched by a preview run.
+
+Install the preview instance after the production controller has been upgraded
+from the same checkout, as root:
+
+```sh
+sudo python3 tools/deployment/install_controller.py --instance preview [--enable-fleet-update]
+```
+
+It refuses unless the production installation is complete and its installed
+code equals this checkout (run `--upgrade` first), and when the preview
+configuration, state directory, `meshcentral-preview` account or a non-empty
+`/opt/meshcentral-preview` already exists. It creates the account (system,
+no login), the five folders (mode 0750, owned by the account) and
+`/etc/meshcentral-deploy-preview.json` (mode 0600) with production's `image` and
+`reviewed_versions`. It writes nothing of production's and takes no
+`--public-key`, `--image` or `--health-url`.
+
+The preview's MeshCentral configuration is written by the operator from
+`tools/deployment/meshcentral-preview-config.template.json` to
+`/opt/meshcentral-preview/meshcentral-data/config.json`: production's settings
+with the preview's host, ports, database and fresh keys. The preview generates
+its own certificates and agent keys (its own ServerID) at its first start. Its
+front door is the tracked Caddy site `tools/deployment/caddy/preview.high.support.caddy`
+(console and agents on 443, agent ports 4445 and 4446), imported at the end of
+`/etc/caddy/Caddyfile`, behind a DNS-only record for `preview.high.support`.
+
+Every preview run refuses, before anything is stopped and again at every start:
+
+- a controller configuration of another instance (`instance` absent means
+  production), a preview health URL other than the fixed one, or production's
+  configuration naming the preview health URL;
+- install root, state, configuration or mounted folders that are, contain or
+  lie inside another instance's, after resolving symbolic links;
+- stopping a container under the instance's name that is labelled for another
+  instance (production also accepts the unlabelled container of earlier
+  releases) or bind-mounts a folder outside the instance's install root;
+- a MeshCentral configuration that does not fit the instance: the preview must
+  set `port` 4440 and `mpsPort` 4441 (or 0) bound to `127.0.0.1`, `redirPort` 0,
+  `mongoDb` and `mongoDbName` `meshcentral_preview`, and `preview.high.support` as
+  `cert`, `agentAliasDNS` and default-domain `certUrl` host, with no `REPLACE_`
+  placeholder left. Production refuses the preview's ports, database and host.
+  Messages name keys, ports, database and host names only;
+- a certificate or key file in the preview's `meshcentral-data` equal (sha256) to
+  any of production's.
+
+```sh
+sudo /usr/local/libexec/meshcentral-release --instance preview status
+sudo journalctl -u meshcentral-deploy-preview --no-pager
+sudo docker logs --tail 100 meshcentral-preview
+sudo /usr/local/libexec/meshcentral-release --instance preview recover
+sudo /usr/local/libexec/meshcentral-release --instance preview rollback
+sudo python3 /usr/local/libexec/meshcentral_shadow_check.py --root /opt/meshcentral-preview --manifest <manifest>
+```
 
 ### Source edits on the VPS and local synchronization
 
