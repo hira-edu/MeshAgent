@@ -249,12 +249,30 @@ class ForcedCommandTests(unittest.TestCase):
                 ENTRY.command(value)
 
     def test_every_forced_command_names_a_controller_instance(self):
-        for name, (unit, arguments) in ENTRY.COMMANDS.items():
-            instance = arguments[1] if arguments else 'production'
+        for name, (instance, unit, arguments) in ENTRY.COMMANDS.items():
             self.assertEqual(list(arguments), [] if instance == 'production' else ['--instance', instance])
             self.assertIn(instance, MANAGER.INSTANCES)
             self.assertEqual(unit, 'meshcentral-deploy' + ('' if instance == 'production' else '-' + instance))
-        self.assertEqual(sorted(ENTRY.COMMANDS), ['deploy', 'deploy-preview'])
+            self.assertEqual(name, 'deploy' + ('' if instance == 'production' else '-' + instance))
+        self.assertEqual(sorted(ENTRY.INSTANCES), sorted(MANAGER.INSTANCES))
+
+    def test_a_key_limited_to_one_instance_cannot_deploy_the_other(self):
+        self.assertEqual(ENTRY.command('deploy-preview ' + DIGEST, only='preview'),
+                         ENTRY.command('deploy-preview ' + DIGEST))
+        self.assertEqual(ENTRY.command('deploy ' + DIGEST, only='production'), ENTRY.command('deploy ' + DIGEST))
+        with self.assertRaisesRegex(ValueError, 'This key may deploy only the preview instance'):
+            ENTRY.command('deploy ' + DIGEST, only='preview')
+        with self.assertRaisesRegex(ValueError, 'This key may deploy only the production instance'):
+            ENTRY.command('deploy-preview ' + DIGEST, only='production')
+
+    def test_entry_arguments_are_one_command_with_an_optional_instance_limit(self):
+        self.assertEqual(ENTRY.parse_arguments(['deploy ' + DIGEST]), (None, 'deploy ' + DIGEST))
+        self.assertEqual(ENTRY.parse_arguments(['--only', 'preview', 'deploy-preview ' + DIGEST]),
+                         ('preview', 'deploy-preview ' + DIGEST))
+        for argv in ([], ['deploy', DIGEST], ['--only', 'staging', 'deploy ' + DIGEST], ['--only', 'preview'],
+                     ['--only=preview', 'deploy-preview ' + DIGEST], ['deploy ' + DIGEST, '--only', 'preview']):
+            with self.subTest(argv=argv), self.assertRaisesRegex(ValueError, 'Usage'):
+                ENTRY.parse_arguments(argv)
 
 
 class PreviewPromotionTests(TwoInstanceCase):

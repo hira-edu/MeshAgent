@@ -651,6 +651,13 @@ no login), the five folders (mode 0750, owned by the account) and
 `reviewed_versions`. It writes nothing of production's and takes no
 `--public-key`, `--image` or `--health-url`.
 
+The installed CI key accepts both forced commands. The CI entry also accepts
+`--only <instance>` before the command, which limits a key to one instance: a
+second key whose `authorized_keys` forced command is
+`sudo -n /usr/local/sbin/meshcentral-ci-entry --only preview "$SSH_ORIGINAL_COMMAND"`
+can submit only `deploy-preview`, so an automatically deployed preview job does not
+hold a key that can deploy production.
+
 The preview's MeshCentral configuration is written by the operator from
 `tools/deployment/meshcentral-preview-config.template.json` to
 `/opt/meshcentral-preview/meshcentral-data/config.json`: production's settings
