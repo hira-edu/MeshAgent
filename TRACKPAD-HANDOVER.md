@@ -174,9 +174,6 @@ on `main`.
 
    The coupling tests currently pin 1.2.5.
 6. **Small independent fixes.**
-   - `tools/meshcentral_viewer_asset_parity.js` reports a failure when files
-     differ only in CRLF line endings. Normalise line endings before hashing
-     (P7).
    - Linux should reject combined or unknown button bytes (P2).
    - Optional: a negative wheel step is one unit off in `SendMouseMsg` (P4).
    - Two MeshCentral tests already failed before this work:
