@@ -45,6 +45,21 @@ const fsBinding = read(fsBindingPath);
 const updateHelper = read(updateHelperPath);
 const zipReader = read(zipReaderPath);
 
+// The architecture table the Windows helpers derive from (SRV-10), read from the fork's meshcentral.js.
+function readArchitectureTable() {
+    const source = read(forkFile('meshcentral.js'));
+    const signature = 'obj.meshAgentsArchitectureNumbers = {';
+    const start = source.indexOf(signature);
+    assert(start >= 0, 'meshcentral.js must define meshAgentsArchitectureNumbers');
+    let depth = 0;
+    for (let i = start + signature.length - 1; i < source.length; ++i) {
+        if (source[i] === '{') depth++;
+        if (source[i] === '}' && --depth === 0) return new Function('return ' + source.slice(start + signature.length - 1, i + 1) + ';')();
+    }
+    throw new Error('unterminated meshAgentsArchitectureNumbers');
+}
+const meshAgentsArchitectureNumbers = readArchitectureTable();
+
 const selectorFactory = new Function('obj', 'args', 'domain', 'parent', [
     extractFunction(server, 'function isWindowsServiceAgentArchitecture(agentId)'),
     extractFunction(server, 'function isWindowsAgentArchitecture(agentId)'),
@@ -60,7 +75,7 @@ function select(id, agentHash, options = {}) {
     };
     const args = { agentupdatesystem: options.system };
     const domain = {};
-    const parent = { parent: { meshAgentBinaries: {} } };
+    const parent = { parent: { meshAgentBinaries: {}, meshAgentsArchitectureNumbers } };
     const compare = selectorFactory(obj, args, domain, parent);
     return compare({ id, hash: 'NEW', fileHash: 'RAW', zhash: 'ZIP' }, agentHash);
 }
