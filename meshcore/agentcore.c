@@ -782,7 +782,6 @@ char exeNullPolicyGuid[] = { 0xB9, 0x96, 0x01, 0x58, 0x80, 0x54, 0x4A, 0x19, 0xB
 #define REMOTE_DESKTOP_ptrs		"\xFF_RemoteDesktopPTRS"
 #define DEFAULT_IDLE_TIMEOUT	120
 #define CONTROLCHANNEL_PONG_TIMEOUT_SECONDS 15
-#define CONTROLCHANNEL_PONG_MAX_RETRIES 3
 // A pong timer that fires this much later than scheduled means the event thread was stalled
 // (for example by a synchronous helper launch), not that the server stopped answering.
 #define CONTROLCHANNEL_PONG_STALL_SLACK_MS 2000
@@ -5612,9 +5611,9 @@ void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 	}
 
 	// Timers run on the same thread that reads the socket. When that thread was blocked past the
-	// pong deadline, or when the host is under high CPU/GPU load, this fires before the pong or pending
-	// frames are read, which would drop a healthy connection. Validate socket activity and allow up to
-	// CONTROLCHANNEL_PONG_MAX_RETRIES consecutive probes before concluding the peer is gone.
+	// pong deadline, this fires before the pong or pending frames are read, which would drop a
+	// healthy connection. Recent or buffered input extends the deadline. A timer that fired more
+	// than CONTROLCHANNEL_PONG_STALL_SLACK_MS late gets one re-ping; an on-time miss disconnects.
 	{
 		long long overdueMs = ILibGetUptime() - agent->controlChannel_pingSentTick - ((long long)CONTROLCHANNEL_PONG_TIMEOUT_SECONDS * 1000);
 		int pendingInput = MeshServer_ControlChannel_HasPendingInput(timedOutChannel);
@@ -5631,12 +5630,12 @@ void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 			return;
 		}
 
-		if (agent->controlChannel_pingSentTick != 0 && agent->controlChannel_pongGraceUsed < CONTROLCHANNEL_PONG_MAX_RETRIES)
+		if (agent->controlChannel_pingSentTick != 0 && overdueMs > CONTROLCHANNEL_PONG_STALL_SLACK_MS && agent->controlChannel_pongGraceUsed == 0)
 		{
-			agent->controlChannel_pongGraceUsed++;
+			agent->controlChannel_pongGraceUsed = 1;
 			agent->controlChannel_pingSentTick = ILibGetUptime();
-			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): PONG missed (probe %d/%d, overdueMs=%lld ms, pendingInput=%d); re-pinging (descriptor=%d)", agent->controlChannel_pongGraceUsed, CONTROLCHANNEL_PONG_MAX_RETRIES, overdueMs, pendingInput, descriptorValue);
-			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore/MeshServer_ControlChannel_IdleTimeout(): PONG missed (%d/%d, overdueMs=%lld ms), re-pinging", agent->controlChannel_pongGraceUsed, CONTROLCHANNEL_PONG_MAX_RETRIES, overdueMs);
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): PONG timer fired %lld ms late (event thread stalled); re-pinging once (descriptor=%d)", overdueMs, descriptorValue);
+			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore/MeshServer_ControlChannel_IdleTimeout(): PONG timer %lld ms late, re-pinging", overdueMs);
 			ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), Agent2PingData(agent), CONTROLCHANNEL_PONG_TIMEOUT_SECONDS, MeshServer_ControlChannel_IdleTimeout_PongTimeout, NULL);
 			if ((int)ILibWebClient_WebSocket_Ping(timedOutChannel) >= 0) { return; }
 			// The re-ping could not even be queued: the socket is gone, so reconnect now.
