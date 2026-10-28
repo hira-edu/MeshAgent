@@ -1,24 +1,34 @@
 #!/usr/bin/env python3
 """G4: refuse to run MeshCentral while files outside the package shadow it.
 
-MeshCentral 1.2.5 prefers copies in its data and web folders over the files in its package:
+MeshCentral (the fork at 1.3.1, and 1.2.5 before it) prefers copies in its data and web folders
+over the files in its package:
 
 - ``meshcentral-data/meshcore.js`` makes the core, ``meshcore.min.js`` and both
-  ``modules_meshcore[_min]`` folders come from the data folder only (meshcentral.js:2932-2938,
-  2978-2983); an empty ``modules_meshcore_min`` is still used when minifycore is on;
-- ``meshcentral-data/agents`` and ``signedagents`` beat the package agents per file
-  (meshcentral.js:3624-3629);
+  ``modules_meshcore[_min]`` folders come from the data folder only (updateMeshCore); an empty
+  ``modules_meshcore_min`` is still used when minifycore is on;
+- ``meshcentral-data/agents`` beats the package per file for agents not marked unsigned, for
+  ``agent-translations.json`` and for the MeshCentral tools (updateMeshAgentsTable, updateMeshTools),
+  and ``signedagents`` holds the server's signed copies;
 - plugins load only from ``meshcentral-data/plugins`` and are merged into the cores;
 - ``meshcentral-web/views`` and ``public`` beat the package per file, and a
   ``meshcentral-web/emails`` folder hides the package emails entirely.
 
 Every regular file in those places must be listed, with its sha256, in the allowlist of the
 release that is about to run. Anything unlisted, changed, linked or special fails the check,
-naming each file. The check reads only; it never deletes or repairs anything.
+naming each file. Two rules are fixed rather than allowlisted:
 
-Importable (release_manager.start uses it, deploy.py can use the same function) and runnable:
+- ``.msh`` files directly in ``meshcentral-data/agents`` are per-environment provisioning (D14).
+  The server never reads them (no package file has that name), so they shadow nothing.
+- ``meshcentral-data/agentbuilds`` must not exist. Upstream 1.3.1 downloads its agents there; the
+  fork never downloads or reads it (it serves only the pinned package agents), so a copy there is
+  stale 1.3.1 state (N6) and is refused even when empty. It cannot be allowlisted.
 
-    meshcentral_shadow_check.py --root /opt/meshcentral --manifest release-overrides/manifest.json
+The check reads only; it never deletes or repairs anything.
+
+Importable (release_manager.start uses it) and runnable:
+
+    meshcentral_shadow_check.py --root /opt/meshcentral --manifest <release folder>/manifest.json
 """
 import argparse
 from fnmatch import fnmatchcase
@@ -37,6 +47,10 @@ SHADOW_FOLDERS = (DATA + '/agents', DATA + '/signedagents', DATA + '/plugins',
                   WEB + '/views', WEB + '/public', WEB + '/emails')
 # Folders that change what is served by existing at all, even when empty.
 PRESENCE_PATTERNS = (DATA + '/modules_meshcore*', WEB + '/emails')
+# Never allowed, whatever they hold (see the module docstring).
+FORBIDDEN = {DATA + '/agentbuilds': "upstream 1.3.1's agent download cache, which the fork never reads; remove it"}
+# Per-environment provisioning files the server never reads (D14): .msh files directly in this folder.
+PROVISIONING_FOLDER = DATA + '/agents'
 SHA256 = re.compile(r'[0-9a-f]{64}')
 
 
@@ -44,8 +58,21 @@ class ShadowCopyError(ValueError):
     """Raised when shadow copies would override the MeshCentral package."""
 
 
+def forbidden_root(relative):
+    """The FORBIDDEN entry that ``relative`` is, or lies under; None otherwise."""
+    return next((path for path in FORBIDDEN if relative == path or relative.startswith(path + '/')), None)
+
+
+def not_shadowing(relative):
+    """True for a per-environment .msh file directly in meshcentral-data/agents."""
+    pure = PurePosixPath(relative)
+    return pure.parent.as_posix() == PROVISIONING_FOLDER and pure.suffix == '.msh'
+
+
 def is_shadow_path(relative):
     """True when ``relative`` (POSIX, from the install root) is a place this check governs."""
+    if forbidden_root(relative):
+        return False
     parts = PurePosixPath(relative).parts
     if len(parts) >= 2 and parts[0] == DATA and any(fnmatchcase(parts[1], pattern) for pattern in DATA_PATTERNS):
         return True
@@ -64,6 +91,8 @@ def parse_allowlist(entries):
         if not isinstance(path, str) or not isinstance(digest, str) or not SHA256.fullmatch(digest):
             raise ValueError('shadowAllowlist entry needs a relative path and a lowercase sha256: ' + repr(entry))
         pure = PurePosixPath(path)
+        if isinstance(path, str) and forbidden_root(path):
+            raise ValueError('shadowAllowlist cannot allow ' + path + ': ' + FORBIDDEN[forbidden_root(path)])
         if (pure.is_absolute() or '..' in pure.parts or '.' in pure.parts or '\\' in path or
                 pure.as_posix() != path or not is_shadow_path(path)):
             raise ValueError('shadowAllowlist path must be a normalized path inside a governed folder: ' + path)
@@ -78,28 +107,24 @@ def _sha256(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def _governed_entries(root, hidden=(), overlays=None, allow_missing=False):
-    """Yield (kind, relative, path) for every governed entry: 'file', 'symlink', 'empty' or 'special'.
+def _governed_entries(root, allow_missing=False):
+    """Yield (kind, relative, path) for every governed entry: 'file', 'symlink', 'empty', 'special' or
+    'forbidden'.
 
     ``allow_missing`` treats an absent meshcentral-data or meshcentral-web as empty (a host
     installation without web overrides); a release container always mounts both.
     """
     root = Path(root)
-    overlays = dict(overlays or {})
-    hidden = {PurePosixPath(path).as_posix() for path in hidden}
     for folder in (DATA, WEB):
         path = root / folder
         if path.is_symlink() or (path.exists() and not path.is_dir()) or (not path.exists() and not allow_missing):
             raise ShadowCopyError('Cannot check shadow copies: ' + str(path) + ' is not a directory')
 
-    def covered(relative):
-        return any(relative == path or relative.startswith(path + '/') for path in hidden)
-
     def visit(relative, path):
-        if covered(relative):
-            return
         if path.is_symlink():
             yield 'symlink', relative, path
+        elif path.is_file() and not_shadowing(relative):
+            return
         elif path.is_dir():
             children = sorted(path.iterdir())
             if not children and any(fnmatchcase(relative, pattern) for pattern in PRESENCE_PATTERNS):
@@ -111,18 +136,22 @@ def _governed_entries(root, hidden=(), overlays=None, allow_missing=False):
         elif path.exists():
             yield 'special', relative, path
 
+    for relative in FORBIDDEN:
+        path = root / relative
+        if path.is_symlink() or path.exists():
+            yield 'forbidden', relative, path
     if (root / DATA).is_dir():
         for entry in sorted((root / DATA).iterdir()):
             relative = DATA + '/' + entry.name
             if relative not in SHADOW_FOLDERS and any(fnmatchcase(entry.name, pattern) for pattern in DATA_PATTERNS):
                 yield from visit(relative, entry)
     for relative in SHADOW_FOLDERS:
-        yield from visit(relative, Path(overlays.pop(relative)) if relative in overlays else root / relative)
-    if overlays:
-        raise ValueError('Overlays outside the governed folders: ' + ', '.join(sorted(overlays)))
+        yield from visit(relative, root / relative)
 
 
 def _problem(kind, relative, path, allowlist):
+    if kind == 'forbidden':
+        return relative + ': must not exist: ' + FORBIDDEN[relative]
     if kind == 'symlink':
         return relative + ': symbolic link'
     if kind == 'empty':
@@ -138,21 +167,17 @@ def _problem(kind, relative, path, allowlist):
     return None
 
 
-def find_shadow_files(root, allowlist, hidden=(), overlays=None, allow_missing=False):
-    """Return one message per shadowing file, or an empty list.
-
-    ``root`` holds meshcentral-data and meshcentral-web. ``hidden`` lists relative paths whose host
-    content is covered by a verified release mount, so MeshCentral never sees it. ``overlays`` maps a
-    relative folder to the host folder mounted in its place, which is scanned instead.
-    """
+def find_shadow_files(root, allowlist, allow_missing=False):
+    """Return one message per shadowing file, or an empty list. ``root`` holds meshcentral-data and
+    meshcentral-web, as the container mounts them."""
     problems = (_problem(kind, relative, path, allowlist)
-                for kind, relative, path in _governed_entries(root, hidden, overlays, allow_missing))
+                for kind, relative, path in _governed_entries(root, allow_missing))
     return [problem for problem in problems if problem]
 
 
-def check(root, allowlist, hidden=(), overlays=None, allow_missing=False):
+def check(root, allowlist, allow_missing=False):
     """Raise ShadowCopyError naming every shadowing file; return None when there are none."""
-    problems = find_shadow_files(root, allowlist, hidden, overlays, allow_missing)
+    problems = find_shadow_files(root, allowlist, allow_missing)
     if problems:
         raise ShadowCopyError('Shadow copies would override the MeshCentral package under ' + str(root) +
                               '. Remove them, or list them with their sha256 in the release manifest '
@@ -164,7 +189,7 @@ def snapshot(root):
 
     Used as the explicit allowlist that restoring that installation is checked against. Refuses
     an installation with entries an allowlist cannot express (links, special files, empty folders
-    that hide the package), naming each.
+    that hide the package, a forbidden folder), naming each.
     """
     allowlist, problems = {}, []
     for kind, relative, path in _governed_entries(root, allow_missing=True):

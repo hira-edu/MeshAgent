@@ -40,13 +40,16 @@ class ControllerTests(unittest.TestCase):
         self.state = self.root / 'state'
         self.state.mkdir()
         (self.base / 'meshcentral-data').mkdir(parents=True)
+        (self.base / 'meshcentral-web').mkdir()
         self.config_path = self.base / 'meshcentral-data/config.json'
         self.original_config = {'settings': {'noagentupdate': True, 'keep': 'private-fixture'}}
         self.config_path.write_text(json.dumps(self.original_config))
-        self.config = {'image': 'ghcr.io/fixture/release', 'schema': 3, 'reviewed_versions': ['1.2.5'],
+        self.config = {'image': 'ghcr.io/fixture/release', 'schema': 3, 'reviewed_versions': ['1.3.1'],
                        'health_url': 'https://fixture.invalid/health.ashx', 'enable_fleet_update': True}
+        # A prepared release: the manifest prepare() copies out of the image (schema 2, nothing to mount).
         self.release = self.root / 'release'
-        self.release.mkdir()
+        (self.release / 'release').mkdir(parents=True)
+        (self.release / 'release/manifest.json').write_text(json.dumps({'shadowAllowlist': []}))
         self.patches = {}
         if os.name == 'nt':
             patch = mock.patch.object(MANAGER.os, 'chown', create=True)
@@ -57,7 +60,7 @@ class ControllerTests(unittest.TestCase):
             patch = mock.patch.object(MANAGER, name, value)
             patch.start()
             self.addCleanup(patch.stop)
-        for name, result in {'run': '', 'prepare': self.release, 'seed_agents': self.release / 'runtime',
+        for name, result in {'run': '', 'prepare': self.release,
                              'start': None, 'remove_container': None, 'healthy': True}.items():
             patch = mock.patch.object(MANAGER, name, return_value=result)
             self.patches[name] = patch.start()
@@ -80,7 +83,7 @@ class ControllerTests(unittest.TestCase):
         self.assertIn(mock.call('systemctl', 'enable', '--now', 'meshcentral'), self.patches['run'].call_args_list)
 
     def test_failed_candidate_restores_previous_container(self):
-        previous = {'digest': PREVIOUS, 'directory': 'old', 'runtime': 'old-runtime'}
+        previous = {'digest': PREVIOUS, 'directory': 'old'}
         (self.state / 'active.json').write_text(json.dumps(previous))
         self.patches['start'].side_effect = [RuntimeError('candidate start'), None]
         with self.assertRaisesRegex(RuntimeError, 'candidate start'):
@@ -156,53 +159,30 @@ class InputTests(unittest.TestCase):
         self.assertFalse(SOURCES.requested(
             'push', legacy, dict(env, GITHUB_REF='refs/heads/master')))
 
-    def test_manifest_tamper_and_persistent_file_mount_are_rejected(self):
+    def test_overlay_release_and_persistent_file_mount_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            (root / 'data-core').mkdir()
-            source = root / 'data-core/meshcore.js'
-            source.write_bytes(b'code')
             manifest = {'schema': 1, 'meshcentral_version': '1.2.5',
                         'files': {'data-core/meshcore.js': hashlib.sha256(b'code').hexdigest()},
-                        'mounts': [{'source': 'data-core/meshcore.js', 'target': str(MANAGER.BASE / 'meshcentral-data') + '/meshcore.js'}]}
-            path = root / 'manifest.json'
-            path.write_text(json.dumps(manifest))
-            MANAGER.validate_manifest(root, ['1.2.5'])
-            with self.assertRaises(ValueError):
-                MANAGER.validate_manifest(root, ['1.2.6'])
-            source.write_bytes(b'tampered')
-            with self.assertRaisesRegex(ValueError, 'digest'):
-                MANAGER.validate_manifest(root, ['1.2.5'])
-            source.write_bytes(b'code')
-            manifest['mounts'][0]['target'] = str(MANAGER.BASE / 'meshcentral-data/config.json')
-            path.write_text(json.dumps(manifest))
-            with self.assertRaises(ValueError):
+                        'mounts': [{'source': 'data-core/meshcore.js',
+                                    'target': str(MANAGER.BASE / 'meshcentral-data/config.json')}]}
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, 'Overlay release refused'):
                 MANAGER.validate_manifest(root, ['1.2.5'])
 
-    def test_manifest_rejects_symlinks_inside_release_not_host_ancestors(self):
+    def test_release_folder_must_not_be_a_symlink(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             real = root / 'real'
             real.mkdir()
-            (real / 'meshcore.js').write_bytes(b'code')
-            link = root / 'data-core'
+            (real / 'manifest.json').write_text('{}')
+            link = root / 'release'
             try:
                 link.symlink_to(real, target_is_directory=True)
             except OSError as error:
                 self.skipTest('Directory symlinks are unavailable: ' + str(error))
-            manifest = {
-                'schema': 1,
-                'meshcentral_version': '1.2.5',
-                'files': {'data-core/meshcore.js': hashlib.sha256(b'code').hexdigest()},
-                'mounts': [{
-                    'source': 'data-core/meshcore.js',
-                    'target': str(MANAGER.BASE / 'meshcentral-data/meshcore.js'),
-                }],
-            }
-            (root / 'manifest.json').write_text(json.dumps(manifest))
-            with self.assertRaisesRegex(ValueError, 'regular files'):
-                MANAGER.validate_manifest(root, ['1.2.5'])
-
+            with self.assertRaisesRegex(ValueError, 'not a directory'):
+                MANAGER.validate_manifest(link, ['1.3.1'])
 
 if __name__ == '__main__':
     unittest.main()

@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import smoke_checks  # noqa: E402
 
 INSTALL_ROOT = '/opt/meshcentral'
-MANIFEST = INSTALL_ROOT + '/release-overrides/manifest.json'
+MANIFEST = INSTALL_ROOT + '/release/manifest.json'
 SMOKE_USER = 'release-smoke'
 
 
@@ -72,12 +72,31 @@ class ContainerFiles:
         return subprocess.run(['docker', 'exec', self.name, 'test', '-e', INSTALL_ROOT + '/' + relative],
                               check=False).returncode == 0
 
-    def sha256(self, relative):
-        output = run('docker', 'exec', self.name, 'sha256sum', INSTALL_ROOT + '/' + relative, capture=True)
-        return output.split()[0]
+    def digest(self, relative):
+        path = INSTALL_ROOT + '/' + relative
+        size = int(run('docker', 'exec', self.name, 'stat', '--format=%s', path, capture=True))
+        return size, run('docker', 'exec', self.name, 'sha384sum', path, capture=True).split()[0]
 
     def read(self, relative):
         return run('docker', 'exec', self.name, 'cat', INSTALL_ROOT + '/' + relative, capture=True)
+
+
+class LocalFiles:
+    """Answers smoke_checks file questions from a local install root (duplicate-server mode)."""
+
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def exists(self, relative):
+        return (self.root / relative).exists()
+
+    def read(self, relative):
+        return (self.root / relative).read_text(encoding='utf-8')
+
+    def digest(self, relative):
+        with (self.root / relative).open('rb') as stream:
+            data = stream.read()
+        return len(data), hashlib.sha384(data).hexdigest()
 
 
 def smoke_image(image):
@@ -121,8 +140,7 @@ def smoke_image(image):
             port = wait_ready(name, 45, 'Image restart did not become ready')
             files = ContainerFiles(name)
             expected = smoke_checks.run_checks(
-                manifest, smoke_checks.Server('http://127.0.0.1:' + port), (SMOKE_USER, password),
-                files.read(smoke_checks.PACKAGE_DIR + '/package.json'), files.exists, files.sha256)
+                manifest, smoke_checks.Server('http://127.0.0.1:' + port), (SMOKE_USER, password), files)
             print('Exact release digest passed boot and restart readiness and identity checks: MeshCentral ' +
                   expected['version'] + ', fork ' + expected['forkRevision'])
         finally:
@@ -139,19 +157,9 @@ def smoke_server(server_url, install_root, manifest_path):
     credentials = (os.environ.get('SMOKE_USERNAME', ''), os.environ.get('SMOKE_PASSWORD', ''))
     if not all(credentials):
         raise ValueError('SMOKE_USERNAME and SMOKE_PASSWORD must name an account on the duplicate server')
-    root = Path(install_root)
-
-    def exists(relative):
-        return (root / relative).exists()
-
-    def sha256(relative):
-        with (root / relative).open('rb') as stream:
-            return hashlib.file_digest(stream, 'sha256').hexdigest()
-
     manifest = json.loads(Path(manifest_path).read_text(encoding='utf-8'))
-    package_json = (root / smoke_checks.PACKAGE_DIR / 'package.json').read_text(encoding='utf-8')
     expected = smoke_checks.run_checks(manifest, smoke_checks.Server(server_url), credentials,
-                                       package_json, exists, sha256)
+                                       LocalFiles(install_root))
     print('Duplicate server passed identity checks: MeshCentral ' + expected['version'] + ', fork ' +
           expected['forkRevision'])
 

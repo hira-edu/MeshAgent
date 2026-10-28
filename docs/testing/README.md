@@ -14,12 +14,14 @@ systemd, SSH, or production endpoints. Linux is needed to exercise real POSIX
 permissions and directory fsync; Windows fixtures stub only POSIX-only APIs.
 `ci_release_fork_safety_test.py` covers the controller behaviour described in
 `docs/DEPLOYMENT.md`: the `reviewed_versions` policy and the
-`install_controller.py --upgrade` migration, manifest-only agent seeding across
-promotion and recovery, the shadow-copy check and the host recovery snapshot,
+`install_controller.py --upgrade` migration, tarball-only releases (no overlay
+mounts or seeded agent folders), the shadow-copy check (including the forbidden
+`agentbuilds` folder) and the host recovery snapshot,
 the retired image-size preload (no preload started or required, the schema-3
 configuration migration, and the legacy host preload moved aside only after a
-committed promotion), the smoke assertions against fixture pages, and the Docker
-build-context rules. Symlink cases are skipped on Windows hosts that cannot
+committed promotion), the smoke assertions against fixture pages and installed
+trees, the Dockerfile and its build-context rules, and `release_image.js`'s
+pack-against-lock check (run under `node`; skipped when `node` is absent). Symlink cases are skipped on Windows hosts that cannot
 create symlinks.
 
 Validate hook/coordinated-release.yml and the public repository dispatch workflows with

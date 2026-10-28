@@ -22,12 +22,14 @@ Production builds require real provisioning. Authenticode signing follows the
 existing branding policy; this installation currently permits unsigned agents.
 If signing credentials are configured, signing failures block the build.
 Windows x86, x64, and ARM64 payloads are verified against their matching service
-DLLs. An Ubuntu build assembles the complete MeshCentral package with `npm ci`
-from the sibling lockfile, applies the manual deployment map, and packages the
-payloads into a private GHCR image; this build does not yet handle the MeshCentral
-fork's layout (see [Image build context](#image-build-context)). The Node/OS base and GitHub actions are pinned
-by digest/commit. BuildKit publishes provenance and an SBOM. Deployments promote
-the image digest; they do not rebuild or pull mutable tags on the VPS.
+DLLs. The release image is built on Ubuntu from the MeshCentral fork tarball
+only: the build packs the fork with the pinned agent builds, refuses a tarball
+the deploy lockfile does not pin, installs it with `npm ci`, and writes the
+release manifest (see [Image build context](#image-build-context)). It applies
+no deployment map and carries no overlay files. The Node/OS base
+(`node:24.22.1-bookworm-slim`) and GitHub actions are pinned by digest/commit.
+BuildKit publishes provenance and an SBOM. Deployments promote the image digest;
+they do not rebuild or pull mutable tags on the VPS.
 
 The MeshCentral fork package is upstream 1.3.1 plus the reviewed fork changes; production
 runs MeshCentral 1.2.5 until the fork is deployed. The VPS controller accepts only MeshCentral versions listed in the
@@ -163,51 +165,78 @@ and cannot gain privileges. Host networking preserves the existing listeners
 and local MongoDB route.
 
 Certificates, configuration, database files, uploaded files, and unrelated
-plugins stay in the existing persistent directories. Mapped code overlays are
-mounted read-only from the selected release. The release's agent folders are
-mounted over `meshcentral-data/agents` (read-only) and
-`meshcentral-data/signedagents` (writable, for the server's signing cache); see
-[Release agent folders](#release-agent-folders). Do not run the old `deploy.py`
+plugins stay in the existing persistent directories. The container mounts only
+those: `meshcentral-data`, `meshcentral-files`, `meshcentral-recordings` and
+`meshcentral-backups` read-write, and `meshcentral-web` read-only. Code, cores
+and agents come from the image's package; nothing is mounted over them (see
+[Release agent folders](#release-agent-folders)). Do not run the old `deploy.py`
 publication commands concurrently with container releases; platform-specific
 updates must publish through the release process after migration.
 
-Every container start, including recovery and rollback, first checks the
-release (manifest digests, reviewed version, agent folders, shadow copies)
-and refuses to start on any failure. No `NODE_OPTIONS` preload is passed to the
-container.
+Every promotion runs the release's shadow-copy check against the host folders
+before it stops anything, and every container start, including recovery and
+rollback, checks the release again (manifest schema and fields, reviewed
+version, shadow copies) and refuses to start on any failure. No `NODE_OPTIONS`
+preload is passed to the container.
 
 ### Reviewed MeshCentral versions
 
 `reviewed_versions` is a non-empty list of exact MeshCentral versions, for
-example `["1.2.5"]`; each entry must look like `1.2.5` (optionally with a
-prerelease suffix) and appear once. Matching is exact, not by prefix. Release
+example `["1.2.5", "1.3.1"]`; each entry must look like `1.3.1` (optionally with
+a prerelease suffix) and appear once. Matching is exact, not by prefix. Release
 preparation and every container start compare the release manifest's
-`reviewedUpstreamVersion` against the list. A manifest without that field uses
-its `meshcentral_version`; a manifest whose two fields differ is refused, and an
-optional `forkRevision` must be a full 40-character lowercase git sha. A version
-outside the list is refused with "MeshCentral <version> is not a reviewed
-version"; preparation fails before the service is touched.
+`reviewedUpstreamVersion` against the list. The manifest's
+`meshcentral_version` must equal it, and its `forkRevision` must be a full
+40-character lowercase git sha. A version outside the list is refused with
+"MeshCentral <version> is not a reviewed version"; preparation fails before the
+service is touched.
 
 Add a version to the list by editing `/etc/meshcentral-deploy.json` in place only
 after its database migration has been reviewed separately. Removing a version
-also blocks `recover` and `rollback` to releases of that version.
+also blocks `recover` and `rollback` to releases of that version. The fork
+package is MeshCentral 1.3.1, so its first release needs `"1.3.1"` in the list.
+
+### Release manifest
+
+The image carries one file outside its package,
+`/opt/meshcentral/release/manifest.json` (schema 2), which the image build writes
+from the pack record and the installed package
+([Image build context](#image-build-context)):
+
+- `meshcentral_version` and `reviewedUpstreamVersion` (both the package version,
+  `1.3.1`), and `forkRevision` (the MeshCentral commit the image was built from);
+- `package`: the tarball name, its sha512 `integrity` (the deploy lockfile's
+  pin) and `packagedCommit` (the last commit that changed packaged content, which
+  dates `agents/module-versions.json`);
+- `agentBuild` and `agentBinaries`: the MeshAgent build and, per agent
+  architecture whose file is pinned, `{localname, unsigned, path, size, sha384}`,
+  with `path` always `node_modules/meshcentral/agents/<localname>`;
+- `agentCoreHashes`: the SHA-384 of each core the package builds with no data-folder
+  cores and no plugin core modules, computed by running the package's own
+  `updateMeshCore`;
+- `shadowAllowlist`: the fork files delivered beside the package, with the
+  sha256 of their tracked bytes: `meshcentral-web/public/scripts/custom.js`
+  (from MeshCentral `deploy/meshcentral-web/public/scripts/custom.js`) and every
+  file of `meshcentral-data/plugins/nativeruntime/` (from `plugins/nativeruntime/`).
+
+`prepare` copies `/opt/meshcentral/release` out of the image; it must hold only a
+regular `manifest.json`. The controller refuses a manifest with any other set of
+fields, and refuses overlay releases: a schema-1 manifest, or any manifest with
+`files` or `mounts`, fails with "Overlay release refused".
 
 ### Release agent folders
 
-Each promotion builds a fresh `runtime-<id>` folder inside the release directory
-from that release's manifest only: the `data/` and `signed/` members are copied
-from the release overrides and re-hashed against the manifest. `hashagents.json`
-and `MasterService.exe` are never seeded. Nothing is copied from the host's
-`meshcentral-data/agents` or `signedagents`, or from another release's runtime,
-so an agent binary that a release does not list (including Linux and macOS
-payloads) is not served by it. Before starting, the controller requires the
-runtime to hold exactly the manifest's files: an extra, changed, missing, linked,
-or nested file fails the start and is named.
-
-`recover` and `rollback` rebuild the previous release's runtime from its own
-manifest before starting it; anything the server wrote while running, or that
-was placed there since, is discarded. With a code-signing certificate configured,
-the server signs its agents into the writable `signed` folder again at start.
+Releases mount nothing over `meshcentral-data/agents` or
+`meshcentral-data/signedagents`, seed no agent folder, and write no
+`hashagents.json`. The server serves the pinned fork builds from its package
+(next section): `MeshService.exe`, `MeshService64.exe` and `MeshServiceARM64.exe`
+are marked unsigned (ids 3, 4, 43, 10003, 10004), so the fork ignores copies of
+them in `meshcentral-data/agents` and never signs them into `signedagents`. The
+host's `meshcentral-data/agents` is mounted as it is and stays governed by the
+[shadow-copy check](#shadow-copy-check): agent binaries left there by 1.2.5
+(including Linux and macOS payloads) and anything in `signedagents` must be
+removed before the first promotion. The per-environment `.msh` files in
+`meshcentral-data/agents` stay (D14); the server never reads them.
 
 ### Fork agent binaries in the MeshCentral package
 
@@ -241,34 +270,32 @@ needs new pins, a repack and a new lock commit.
 ### Shadow-copy check
 
 MeshCentral prefers copies in its data and web folders over its package files.
-Before every container start the controller refuses to run while an unlisted
-file would shadow the package. Governed paths, relative to `/opt/meshcentral`:
+Before every promotion and every container start the controller refuses to run
+while an unlisted file would shadow the package. Governed paths, relative to
+`/opt/meshcentral`:
 
 - `meshcentral-data/meshcore*.js` and `meshcentral-data/modules_meshcore*`;
 - everything under `meshcentral-data/agents`, `meshcentral-data/signedagents`,
-  and `meshcentral-data/plugins`;
+  and `meshcentral-data/plugins`, except `.msh` files directly in
+  `meshcentral-data/agents` (per-environment provisioning the server never reads);
 - everything under `meshcentral-web/views`, `meshcentral-web/public`, and
   `meshcentral-web/emails`.
 
 Every regular file there must be listed with its sha256 in the release
 manifest's `shadowAllowlist`
 (`[{"path": "meshcentral-web/public/scripts/custom.js", "sha256": "<hex>"}]`).
-The check sees the folders as the container will: paths under the release's own
-mounts are hidden and verified by the manifest, and the agent folders are the
-release runtime, whose files are allowed with their manifest digests. An
-unlisted, changed, symlinked, or special file fails, and so does an empty
+An unlisted, changed, symlinked, or special file fails, and so does an empty
 `modules_meshcore*` or `emails` folder, because its presence alone hides the
-package. All problems are named in one error. A malformed allowlist is refused
-when the release is prepared. A manifest without `shadowAllowlist` allows
-nothing outside its mounts and runtime, so an older release needs those folders
-clean before it can start. The check only reads; it never deletes or repairs.
-Empty placeholder files that an earlier release's mounts left in
-`meshcentral-data` also fail it and must be removed by an operator.
+package. `meshcentral-data/agentbuilds` must not exist at all: it is upstream
+1.3.1's agent download cache, which the fork never reads, and no allowlist can
+permit it. All problems are named in one error. A malformed allowlist, or one
+that names a path under `agentbuilds`, is refused when the release is prepared.
+The check only reads; it never deletes or repairs.
 
 To run the same check by hand:
 
 ```sh
-python3 tools/deployment/meshcentral_shadow_check.py --root /opt/meshcentral --manifest <release-overrides>/manifest.json
+python3 tools/deployment/meshcentral_shadow_check.py --root /opt/meshcentral --manifest <release folder>/manifest.json
 ```
 
 It exits 1 and names each file when it fails. `deploy.py` publications to the
@@ -276,9 +303,7 @@ host installation do not run this check.
 
 On the first promotion, before stopping the host service, the controller records
 every governed file of the host installation with its sha256 in the transaction
-journal. A host it cannot record (links, special files, empty
-`modules_meshcore*` or `emails` folders) refuses the promotion with nothing
-changed. If that promotion fails, recovery checks the host folders against the
+journal. If that promotion fails, recovery checks the host folders against the
 record before re-enabling `meshcentral.service`. Any added or changed file blocks
 the restart, is named, and keeps the transaction for an operator. A journal
 without that record is refused the same way.
@@ -315,8 +340,8 @@ fork build before promotion:
 RELEASE_IMAGE=<ghcr digest reference or local sha256 image ID> python3 tools/deployment/smoke_image.py
 ```
 
-It reads `release-overrides/manifest.json` out of the image and refuses an image
-whose manifest cannot be checked before booting it. It boots the image read-only
+It reads `release/manifest.json` out of the image and refuses an image whose
+manifest cannot be checked before booting it. It boots the image read-only
 on disposable data as production runs it (no `NODE_OPTIONS` preload), creates a disposable account, restarts the container, and then asserts
 (`tools/deployment/smoke_checks.py`):
 
@@ -324,19 +349,21 @@ on disposable data as production runs it (no `NODE_OPTIONS` preload), creates a 
   `node_modules/meshcentral/node_modules/image-size` do not exist);
 - `GET /release-smoke-version`, a `~showversion` redirect defined by the smoke
   configuration, returns `MeshCentral v<manifest meshcentral_version>`;
-- the installed `node_modules/meshcentral/package.json` carries the manifest's
-  `forkRevision`;
+- the installed package is the manifest's tarball: `node_modules/.package-lock.json`
+  records its version and sha512 `integrity`, `agents/module-versions.json` is
+  dated by `packagedCommit`, and `node_modules/meshcentral/daemon` (the D6
+  self-update marker) exists;
+- the package's `agents/agent-defaults.json` pins exactly the manifest's
+  `agentBuild` and `agentBinaries` (file names, sizes and SHA384);
 - after logging in, every core listed in the manifest's `agentCoreHashes` is
   served by `/meshagents?cores=1` with that SHA-384;
-- for every `agentBinaries` entry (`{localname, unsigned, path, sha256}` per
-  architecture ID), the file MeshCentral selects on disk (the package copy,
-  replaced by `meshcentral-data/signedagents` and then `meshcentral-data/agents`
-  copies unless `unsigned` is true) is the listed path with the listed sha256.
+- for every `agentBinaries` architecture, the file MeshCentral selects on disk
+  is the package file (a `meshcentral-data/agents` or `signedagents` copy that
+  would win is reported) with the pinned size and SHA384, and for unsigned
+  architectures `GET /meshagents?id=<id>` returns exactly the pinned bytes.
 
-The manifest must carry `forkRevision`, `agentCoreHashes`, and `agentBinaries`,
-and a `reviewedUpstreamVersion` equal to `meshcentral_version`; otherwise the
-image fails. `tools/prepare_release_image.py` currently writes only `schema`,
-`meshcentral_version`, `mounts`, and `files`, so images it builds fail this gate.
+A manifest that is not schema 2 or lacks any of these fields fails before the
+image is booted.
 
 Against a running local duplicate server, the same assertions run with:
 
@@ -350,32 +377,51 @@ domain.
 
 ### Image build context
 
-The image build's context root is the folder holding the `MeshCentral`,
-`MeshAgent`, and `artifacts` checkouts. `tools/deployment/Dockerfile.dockerignore`
-sends only what the Dockerfile copies. It drops MeshCentral's root
-`node_modules`, `meshcentral-data`, `meshcentral-files`, `meshcentral-backups`,
-`meshcentral-recordings`, `meshcentral-web`, and `server-backups`, every
-MeshAgent file except the three the build uses, and any other sibling folder.
-Only BuildKit (the default builder since Docker 23) reads a
-`<Dockerfile>.dockerignore` beside the Dockerfile. The legacy builder ignores
-it and would send the whole context, so build with BuildKit.
+`tools/deployment/Dockerfile` builds the release image on
+`node:24.22.1-bookworm-slim`, pinned by its index digest in both stages. The
+build context root holds:
 
-The Dockerfile and these rules still follow the wrapper layout MeshCentral had
-before the fork, and do not work with the current MeshCentral checkout:
+- `MeshCentral/`: a full clone of the fork at the release commit, with `.git`
+  and its complete history (`pack.js` packs only tracked files and dates the
+  agent modules from history; a shallow clone or a worktree whose `.git` points
+  outside the context fails);
+- `MeshAgent/tools/deployment/release_image.js`;
+- `agent-builds/`: the pinned fork agent builds, as
+  `tools/deployment/agent_build_release.py fetch --pins MeshCentral/agents/agent-defaults.json --directory agent-builds`
+  writes them from the release store.
 
-- The Dockerfile runs `npm ci` on `MeshCentral/package.json` and
-  `package-lock.json`. In the fork these are the MeshCentral package's own
-  manifest, not the deployment wrapper (now under `MeshCentral/deploy/`), so no
-  `node_modules/meshcentral` is installed.
-- `tools/prepare_release_image.py` copies every MeshCentral file `deploy.py`
-  declares, and 20 of them (`agents/meshcore.min.js` and the
-  `agents/modules_meshcore_min/` copies) no longer exist in the fork.
-- The rules do not exclude `MeshCentral/deploy/node_modules` or
-  `MeshCentral/deploy/meshcentral-data`. A local `config.json` or keys there
-  enter the build context.
+The build stage installs `git`, then:
 
-A build from the current MeshCentral checkout therefore fails in
-`prepare_release_image.py`.
+1. `node MeshCentral/deploy/scripts/pack.js --agents agent-builds --json` packs
+   the fork on Linux (D4), staging each pinned build only when its size and
+   SHA384 match the pin.
+2. `release_image.js verify-pack` requires a Linux pack record and refuses a
+   tarball whose sha512 is not the one `deploy/package-lock.json` pins
+   ("T21: the Linux pack of MeshCentral <commit> gives ..., but
+   deploy/package-lock.json pins ..."). A lock made from a Windows pack is
+   refused here if the Linux pack differs; re-lock from a Linux pack.
+3. `npm ci --omit=dev` in `/opt/meshcentral` with `deploy/package.json` and its
+   lockfile installs exactly the fork tarball and the production dependencies.
+   `image-size` is not among them.
+4. The `daemon` marker is written into `node_modules/meshcentral` (D6: self-update
+   stays off).
+5. `release_image.js manifest` checks the installed tree (the locked tarball and
+   version, the module-version commit, no `image-size`, the marker, every pinned
+   agent with the package's own `agentbuilds.js` verifier) and writes
+   `/opt/meshcentral/release/manifest.json`.
+
+The runtime stage copies `/opt/meshcentral` root-owned and runs
+`node_modules/meshcentral/meshcentral.js` as the `node` user. The image contains no
+`deploy.py`, no MeshAgent tool copy, no overlay, and no `hashagents.json`.
+
+`tools/deployment/Dockerfile.dockerignore` sends only those three inputs. From
+the MeshCentral clone it drops the root and `deploy/` `node_modules`,
+`deploy/dist`, `meshcentral-data`, `meshcentral-files`, `meshcentral-backups`,
+`meshcentral-recordings` and `server-backups` (so a local `config.json` or keys
+never enter the context); from MeshAgent everything except `release_image.js`;
+and any other sibling folder. Only BuildKit (the default builder since Docker
+23) reads a `<Dockerfile>.dockerignore` beside the Dockerfile. The legacy
+builder ignores it and would send the whole context, so build with BuildKit.
 
 The root-owned release controller runs as a systemd transient service and holds
 an exclusive VPS lock through staging, activation, checks, and rollback. It
@@ -401,19 +447,24 @@ sudo /usr/local/libexec/meshcentral-release rollback  # previous container diges
 
 `rollback` promotes the previous digest again and `recover` restarts the release
 recorded before the interrupted transaction. Both apply the same start checks
-(reviewed version, agent runtime rebuilt from its manifest, shadow copies),
-so a release that no longer passes them is not restarted. When an
+(manifest, reviewed version, shadow copies), so a release that no longer passes
+them is not restarted. When an
 interrupted first migration has no previous release, `recover` restarts the host
 service only after the shadow-copy comparison described above.
 
-Release directories, their agent runtimes, and active/previous digests are in
-`/var/lib/meshcentral-deploy`. Retain the active and previous images and directories;
+Release directories (each holding its `release/manifest.json`), the retired host
+preload, and active/previous digests are in `/var/lib/meshcentral-deploy`. Retain the active and previous images and directories;
 there is intentionally no blind automatic prune. Monitor disk usage and prune
 older releases only after the rollback window. The legacy host installation is
 retained. To return to it after a successful first migration, stop the production
-container, restore the pre-migration fleet configuration if needed, then enable
-and start `meshcentral.service`; verify health before allowing another release.
-Do not restore an old database snapshot as part of an application rollback.
+container, restore the pre-migration fleet configuration if needed, move the
+archived `harden-image-size.js` and `30-harden-image-size.conf` from
+`/var/lib/meshcentral-deploy/retired-host-preload/<stamp>/` back to
+`/opt/meshcentral/bin/` and `/etc/systemd/system/meshcentral.service.d/`, run
+`systemctl daemon-reload`, put back the 1.2.5 shadow copies the cutover moved
+aside, then enable and start `meshcentral.service`; verify health before
+allowing another release. Do not restore an old database snapshot as part of an
+application rollback.
 
 MeshCentral 1.3.1 changes no records, but on its first start on a 1.2.5 MongoDB
 database it adds indexes: `meshcentral` TypeDomainMeshNameCollation1,
@@ -427,6 +478,45 @@ drop exactly those indexes first. Take a `mongodump --archive --gzip` and save
 `getIndexes()` of the four collections immediately before moving to 1.3.1.
 1.3.1's autobackup needs Node 22 or later (`fs.promises.glob`); on Node 20 the
 backup zip step fails.
+
+### First fork release (cutover)
+
+Production runs MeshCentral 1.2.5 on the host service until the first fork
+release. In order, on the VPS, as root:
+
+1. Back up the database (`mongodump --archive --gzip`) and save `getIndexes()`
+   of the `meshcentral`, `events`, `power` and `plugins` collections (see the
+   1.3.1 index note above).
+2. Upgrade the controller from the reviewed checkout:
+   `python3 tools/deployment/install_controller.py --upgrade`. It migrates
+   `/etc/meshcentral-deploy.json` to schema 3, removes
+   `image_size_mitigation_sha256` (printed), and keeps the original as
+   `/etc/meshcentral-deploy.json.pre-upgrade-<stamp>`. The host's image-size
+   preload stays installed.
+3. After the 1.3.1 database review, add `"1.3.1"` to `reviewed_versions` in
+   `/etc/meshcentral-deploy.json`, keeping `"1.2.5"`.
+4. Set `settings.noagentupdate` to `true` in `meshcentral-data/config.json`
+   without restarting the host service. The controller writes the release's
+   fleet policy only for the candidate; if the first promotion fails, recovery
+   restores this file and restarts the 1.2.5 host, which must not offer the fleet
+   1.2.5's own agent binaries.
+5. Move the shadow copies out of the governed paths into an archive outside
+   `meshcentral-data` and `meshcentral-web` (do not delete them; the manual
+   return to the host needs them): `meshcentral-data/meshcore*.js`,
+   `modules_meshcore*`, every file in `meshcentral-data/agents` except the
+   `.msh` files, all of `meshcentral-data/signedagents` (with `hashagents.json`),
+   `meshcentral-data/agentbuilds` if present, `meshcentral-data/plugins` other
+   than `nativeruntime`, and every `meshcentral-web` file other than
+   `public/scripts/custom.js`. Install `plugins/nativeruntime/*` and
+   `custom.js` from the fork commit being released, so they match the release's
+   `shadowAllowlist`. Delete `bin/refresh-signed-hashagents.py` (PRD-3).
+6. Run the shadow check against the candidate's manifest
+   (`meshcentral_shadow_check.py --root /opt/meshcentral --manifest <manifest>`)
+   until it passes; the promotion runs the same check before stopping anything.
+7. Deploy the image digest. On success the controller moves the host's
+   `harden-image-size.js` and `30-harden-image-size.conf` to
+   `/var/lib/meshcentral-deploy/retired-host-preload/<stamp>/` and reloads
+   systemd; the deployment log names both files with their sha256.
 
 ### Source edits on the VPS and local synchronization
 

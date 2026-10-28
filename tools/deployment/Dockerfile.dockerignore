@@ -1,13 +1,13 @@
 # Build context filter for tools/deployment/Dockerfile (T20). BuildKit, the default builder since
 # Docker 23, reads <Dockerfile name>.dockerignore beside the Dockerfile in preference to a
-# .dockerignore at the context root. The context root is the folder holding the MeshCentral,
-# MeshAgent and artifacts checkouts.
+# .dockerignore at the context root. The context root holds the MeshCentral clone, the MeshAgent
+# checkout and the agent-builds folder.
 #
-# Send only what the Dockerfile COPYs. Local server state, backups and secrets (node_modules,
-# meshcentral-data with its config.json and keys, server-backups with the database dump,
-# branding_config.local.json, sibling checkouts) never enter the build context. The image is
-# unchanged: the build reads only the package files, agents/, public/, plugins/ and root .js
-# files of MeshCentral, the three listed MeshAgent files, and artifacts/.
+# Send only what the Dockerfile COPYs. The MeshCentral clone is sent with its .git (pack.js needs the
+# tracked tree and history), minus local server state, installs, packs and secrets: node_modules,
+# meshcentral-data with its config.json and keys, server-backups, deploy/dist, and the same folders
+# under deploy/. From MeshAgent only release_image.js is sent; branding_config.local.json and sibling
+# checkouts never enter the build context.
 *
 
 !MeshCentral
@@ -18,9 +18,14 @@ MeshCentral/meshcentral-backups
 MeshCentral/meshcentral-recordings
 MeshCentral/meshcentral-web
 MeshCentral/server-backups
+MeshCentral/deploy/node_modules
+MeshCentral/deploy/dist
+MeshCentral/deploy/meshcentral-data
+MeshCentral/deploy/meshcentral-files
+MeshCentral/deploy/meshcentral-backups
+MeshCentral/deploy/meshcentral-recordings
+MeshCentral/deploy/server-backups
 
-!MeshAgent/deploy.py
-!MeshAgent/tools/configure_agent_certificate_history.js
-!MeshAgent/tools/prepare_release_image.py
+!MeshAgent/tools/deployment/release_image.js
 
-!artifacts
+!agent-builds

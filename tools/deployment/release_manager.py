@@ -3,13 +3,17 @@
 
 The controller runs in a systemd unit so loss of SSH does not interrupt promotion.
 Persistent application data is never replaced or restored by an image rollback.
+
+A release image is the fork package installed from its tarball and nothing else (Stage 4, D11): it
+carries one release manifest (/opt/meshcentral/release/manifest.json) and no overlay files, mounts
+or agent folders. Agents are served from the package, verified against agents/agent-defaults.json.
 """
 import argparse
 import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import pwd
 import re
 import shutil
@@ -130,73 +134,64 @@ def load_config():
 
 
 def release_identity(manifest):
-    """Return (packaged version, reviewed upstream version, fork revision or None).
-
-    Manifests written before the fork carry neither identity field: their reviewed version is
-    the version they recorded, and they have no fork revision.
-    """
-    version = manifest['meshcentral_version']
-    reviewed = manifest.get('reviewedUpstreamVersion', version)
+    """Return (packaged version, reviewed upstream version, fork revision) of a release manifest."""
+    version = manifest.get('meshcentral_version')
+    reviewed = manifest.get('reviewedUpstreamVersion')
     revision = manifest.get('forkRevision')
     if not isinstance(version, str) or not re.fullmatch(VERSION_PATTERN, version):
         raise ValueError('Release manifest has an invalid meshcentral_version: ' + repr(version))
     if reviewed != version:
         raise ValueError('Release manifest was reviewed for MeshCentral ' + repr(reviewed) +
                          ' but packages MeshCentral ' + version)
-    if revision is not None and (not isinstance(revision, str) or not re.fullmatch(FORK_REVISION_PATTERN, revision)):
+    if not isinstance(revision, str) or not re.fullmatch(FORK_REVISION_PATTERN, revision):
         raise ValueError('Release manifest forkRevision must be a full lowercase git commit sha: ' + repr(revision))
     return version, reviewed, revision
 
 
-# Release mount role -> folder under BASE that its members are mounted into.
-MOUNT_ROOTS = {'data-core': 'meshcentral-data', 'data-plugin': 'meshcentral-data/plugins',
-               'web-public': 'meshcentral-web/public'}
+# The image path of the release manifest, and the folder prepare() copies it into.
+IMAGE_RELEASE = '/opt/meshcentral/release'
+RELEASE_FOLDER = 'release'
+MANIFEST_SCHEMA = 2
+MANIFEST_FIELDS = {'schema', 'meshcentral_version', 'reviewedUpstreamVersion', 'forkRevision', 'package',
+                   'agentBuild', 'agentBinaries', 'agentCoreHashes', 'shadowAllowlist'}
+# Fields of the retired overlay release (schema 1): mapped files, their mounts and seeded agent folders.
+OVERLAY_FIELDS = ('files', 'mounts')
 
 
 def validate_manifest(directory, reviewed_versions):
+    """Validate the release folder copied out of an image and return its manifest.
+
+    Only tarball releases (schema 2) are accepted. Overlay releases, which mounted mapped code over
+    the data and web folders and seeded agent folders (DEP-22, DEP-25), are refused.
+    """
+    directory = Path(directory)
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError('Release folder is missing or not a directory: ' + str(directory))
+    entries = sorted(path.name for path in directory.iterdir())
+    if entries != ['manifest.json'] or (directory / 'manifest.json').is_symlink() or \
+            not (directory / 'manifest.json').is_file():
+        raise ValueError('Release folder must hold only a regular manifest.json, found: ' + ', '.join(entries))
     manifest = json.loads((directory / 'manifest.json').read_text())
-    if manifest['schema'] != 1:
-        raise ValueError('Unsupported release manifest schema: ' + repr(manifest['schema']))
+    if not isinstance(manifest, dict):
+        raise ValueError('Release manifest is not a JSON object')
+    overlays = [field for field in OVERLAY_FIELDS if field in manifest]
+    if manifest.get('schema') == 1 or overlays:
+        raise ValueError('Overlay release refused: the manifest carries ' + (', '.join(overlays) or 'schema 1') +
+                         '. Releases are built from the fork tarball only and mount nothing over '
+                         'meshcentral-data or meshcentral-web.')
+    if manifest.get('schema') != MANIFEST_SCHEMA:
+        raise ValueError('Unsupported release manifest schema: ' + repr(manifest.get('schema')))
+    if set(manifest) != MANIFEST_FIELDS:
+        raise ValueError('Release manifest fields differ from schema 2: missing ' +
+                         repr(sorted(MANIFEST_FIELDS - set(manifest))) + ', unknown ' +
+                         repr(sorted(set(manifest) - MANIFEST_FIELDS)))
     _, reviewed, _ = release_identity(manifest)
     if reviewed not in validate_reviewed_versions(reviewed_versions):
         raise ValueError('MeshCentral ' + reviewed + ' is not a reviewed version (reviewed_versions: ' +
                          ', '.join(reviewed_versions) + '). Server version changes require a separately '
                          'reviewed database migration; add the version to reviewed_versions only after that review.')
-    for relative, expected in manifest['files'].items():
-        path = PurePosixPath(relative)
-        if path.is_absolute() or '..' in path.parts or ',' in relative:
-            raise ValueError('Unsafe release member')
-        source = directory / relative
-        release_parent = directory
-        release_parent_symlink = directory.is_symlink()
-        for part in path.parts[:-1]:
-            release_parent /= part
-            release_parent_symlink = release_parent_symlink or release_parent.is_symlink()
-        if source.is_symlink() or not source.is_file() or release_parent_symlink:
-            raise ValueError('Release members must be regular files')
-        with source.open('rb') as stream:
-            actual = hashlib.file_digest(stream, 'sha256').hexdigest()
-        if actual != expected:
-            raise ValueError('Release content digest mismatch')
     # Fail at preparation, not at start, when the release's shadow allowlist is malformed.
-    meshcentral_shadow_check.parse_allowlist(manifest.get('shadowAllowlist', []))
-    targets = set()
-    for mount in manifest['mounts']:
-        source, target = mount['source'], mount['target']
-        if source not in manifest['files'] or target in targets:
-            raise ValueError('Invalid or duplicate release mount')
-        role, relative = source.split('/', 1)
-        roots = {name: str(BASE / folder) for name, folder in MOUNT_ROOTS.items()}
-        if role not in roots or target != roots[role] + '/' + relative:
-            raise ValueError('Release mount outside approved roots')
-        if role == 'data-core' and not (relative in ('meshcore.js', 'meshcore.min.js', 'recoverycore.js') or
-                                        relative.startswith(('modules_meshcore/', 'modules_meshcore_min/'))):
-            raise ValueError('Release cannot replace persistent configuration or identities')
-        if role == 'data-plugin' and not relative.startswith('nativeruntime/'):
-            raise ValueError('Unapproved plugin mount')
-        if role == 'web-public' and not relative.startswith('scripts/'):
-            raise ValueError('Unapproved web mount')
-        targets.add(target)
+    meshcentral_shadow_check.parse_allowlist(manifest['shadowAllowlist'])
     return manifest
 
 
@@ -248,7 +243,7 @@ def prepare(config, digest):
             run('docker', '--config', directory, 'pull', image)
     directory = STATE / 'releases' / digest.split(':')[1]
     if directory.exists():
-        validate_manifest(directory / 'overrides', config['reviewed_versions'])
+        validate_manifest(directory / RELEASE_FOLDER, config['reviewed_versions'])
         return directory
     temporary = directory.with_name(directory.name + '.preparing')
     if temporary.exists():
@@ -257,18 +252,12 @@ def prepare(config, digest):
     extraction = 'meshcentral-extract-' + uuid.uuid4().hex
     try:
         run('docker', 'create', '--name', extraction, image)
-        run('docker', 'cp', extraction + ':/opt/meshcentral/release-overrides', str(temporary / 'overrides'))
-        validate_manifest(temporary / 'overrides', config['reviewed_versions'])
+        run('docker', 'cp', extraction + ':' + IMAGE_RELEASE, str(temporary / RELEASE_FOLDER))
+        validate_manifest(temporary / RELEASE_FOLDER, config['reviewed_versions'])
         os.replace(temporary, directory)
     finally:
         subprocess.run(['docker', 'rm', '-f', extraction], check=False, stdout=subprocess.DEVNULL)
     return directory
-
-
-# Runtime agent folders: manifest role -> folder it replaces inside meshcentral-data.
-AGENT_ROLES = (('data', 'agents'), ('signed', 'signedagents'))
-# Never seeded into a runtime, even when a release lists them (unchanged policy).
-AGENT_SEED_EXCLUDED = ('hashagents.json', 'MasterService.exe')
 
 
 def file_sha256(path):
@@ -276,124 +265,24 @@ def file_sha256(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def agent_seed(manifest):
-    """Return {role: {name: sha256}} for the runtime agent folders, from the manifest alone."""
-    seed = {role: {} for role, _ in AGENT_ROLES}
-    for relative, digest in manifest['files'].items():
-        role, _, name = relative.partition('/')
-        if role not in seed:
-            continue
-        if not name or '/' in name:
-            raise ValueError('Agent seed members must be direct children of their role folder: ' + relative)
-        if name not in AGENT_SEED_EXCLUDED:
-            seed[role][name] = digest
-    return seed
+def release_manifest(release):
+    return json.loads((Path(release['directory']) / RELEASE_FOLDER / 'manifest.json').read_text())
 
 
-def release_manifest(directory):
-    return json.loads((directory / 'overrides' / 'manifest.json').read_text())
-
-
-def seed_agents(directory, runtime=None):
-    """Build the writable agent folders for one release from that release's manifest only.
-
-    Nothing is copied from the incumbent installation or from another release's runtime,
-    so a binary removed from a release, or deleted from the host, never comes back.
-    With ``runtime`` set, that existing runtime of the same release is rebuilt in place
-    (recovery reuses the previous release's runtime path).
-    """
-    directory = Path(directory)
-    seed = agent_seed(release_manifest(directory))
-    if runtime is None:
-        runtime = directory / ('runtime-' + uuid.uuid4().hex)
-    runtime = Path(runtime)
-    if runtime.parent != directory or not runtime.name.startswith('runtime-'):
-        raise ValueError('Agent runtime must be a runtime-* folder of its own release: ' + str(runtime))
-    staging = runtime.with_name(runtime.name + '.seeding')
-    if staging.exists():
-        raise RuntimeError('Incomplete agent runtime seeding exists; inspect it before retrying: ' + str(staging))
-    staging.mkdir()
-    for role, files in seed.items():
-        target = staging / role
-        target.mkdir()
-        for name, digest in files.items():
-            source = directory / 'overrides' / role / name
-            if source.is_symlink() or not source.is_file():
-                raise ValueError('Release agent seed member is not a regular file: ' + role + '/' + name)
-            shutil.copyfile(source, target / name)
-            if file_sha256(target / name) != digest:
-                raise ValueError('Release agent seed member digest mismatch: ' + role + '/' + name)
-    user = pwd.getpwnam('meshcentral')
-    for path in [staging, *staging.rglob('*')]:
-        os.chown(path, user.pw_uid, user.pw_gid)
-    if runtime.is_symlink():
-        raise ValueError('Agent runtime is a symlink: ' + str(runtime))
-    if runtime.exists():
-        # The release's own manifest is the only source; server-written state is regenerated.
-        shutil.rmtree(runtime)
-    os.replace(staging, runtime)
-    return runtime
-
-
-def verify_agent_runtime(directory, runtime):
-    """Fail unless the runtime holds exactly the release's manifest agent files."""
-    seed = agent_seed(release_manifest(Path(directory)))
-    runtime = Path(runtime)
-    problems = []
-    if runtime.is_symlink() or not runtime.is_dir():
-        raise ValueError('Agent runtime is missing or not a directory: ' + str(runtime))
-    for role, files in seed.items():
-        folder = runtime / role
-        if folder.is_symlink() or not folder.is_dir():
-            problems.append(role + '/: missing or not a directory')
-            continue
-        present = set()
-        for path in sorted(folder.rglob('*')):
-            relative = path.relative_to(runtime).as_posix()
-            if path.is_symlink():
-                problems.append(relative + ': symbolic link')
-            elif path.is_dir():
-                problems.append(relative + ': unexpected directory')
-            elif path.parent != folder or path.name not in files:
-                problems.append(relative + ': not in the release manifest')
-            else:
-                present.add(path.name)
-                if file_sha256(path) != files[path.name]:
-                    problems.append(relative + ': sha256 differs from the release manifest')
-        for name in sorted(set(files) - present):
-            problems.append(role + '/' + name + ': listed in the release manifest but missing')
-    if problems:
-        raise ValueError('Agent runtime does not match its release manifest (' + str(runtime) + '):\n  ' +
-                         '\n  '.join(problems))
-
-
-def check_shadow_copies(manifest, runtime):
+def check_shadow_copies(manifest):
     """G4: fail unless every file that would shadow the package is allowlisted by this release.
 
-    Checks the folders as the container will see them: release mounts hide the host files they
-    cover (their content is verified by the manifest), and the agent folders are the release runtime.
+    The container mounts the host's meshcentral-data and meshcentral-web unchanged, so the host
+    folders are exactly what the server will see.
     """
-    allowlist = meshcentral_shadow_check.parse_allowlist(manifest.get('shadowAllowlist', []))
-    for role, files in agent_seed(manifest).items():
-        folder = 'meshcentral-data/' + dict(AGENT_ROLES)[role]
-        for name, digest in files.items():
-            if allowlist.setdefault(folder + '/' + name, digest) != digest:
-                raise ValueError('shadowAllowlist and the release agent files disagree on ' + folder + '/' + name)
-    hidden = []
-    for mount in manifest['mounts']:
-        role, relative = mount['source'].split('/', 1)
-        hidden.append(MOUNT_ROOTS[role] + '/' + relative)
-    overlays = {'meshcentral-data/' + folder: Path(runtime) / role for role, folder in AGENT_ROLES}
-    meshcentral_shadow_check.check(BASE, allowlist, hidden, overlays)
+    meshcentral_shadow_check.check(BASE, meshcentral_shadow_check.parse_allowlist(manifest['shadowAllowlist']))
 
 
 def start(config, release):
-    directory = Path(release['directory'])
-    manifest = validate_manifest(directory / 'overrides', config['reviewed_versions'])
-    verify_agent_runtime(directory, release['runtime'])
-    # Runs at every start, including recovery and rollback: an older release re-mounts only its own
-    # overrides, so stale data/web copies must be refused here rather than trusted.
-    check_shadow_copies(manifest, release['runtime'])
+    manifest = validate_manifest(Path(release['directory']) / RELEASE_FOLDER, config['reviewed_versions'])
+    # Runs at every start, including recovery and rollback, so data/web copies placed since the
+    # release was promoted are refused rather than trusted.
+    check_shadow_copies(manifest)
     user = pwd.getpwnam('meshcentral')
     args = ['docker', 'run', '--detach', '--name', CONTAINER, '--restart', 'unless-stopped',
             '--network', 'host', '--read-only', '--cap-drop', 'ALL',
@@ -402,13 +291,10 @@ def start(config, release):
             '--log-driver', 'local', '--log-opt', 'max-size=20m', '--log-opt', 'max-file=5']
     def mount(source, target, readonly=False):
         args.extend(['--mount', f'type=bind,src={source},dst={target}' + (',readonly' if readonly else '')])
+    # Only the persistent folders: the code, its agents and its cores come from the image's package.
     for name in ('meshcentral-data', 'meshcentral-files', 'meshcentral-web',
                  'meshcentral-recordings', 'meshcentral-backups'):
         mount(BASE / name, BASE / name, name == 'meshcentral-web')
-    for role, name in (('data', 'agents'), ('signed', 'signedagents')):
-        mount(Path(release['runtime']) / role, BASE / 'meshcentral-data' / name, role == 'data')
-    for item in manifest['mounts']:
-        mount(directory / 'overrides' / item['source'], item['target'], True)
     # No NODE_OPTIONS: the release image does not install image-size, so nothing is preloaded.
     args.append(config['image'] + '@' + release['digest'])
     run(*args)
@@ -496,9 +382,6 @@ def recover(config, transaction):
     sync_directory(path.parent)
     previous = transaction['previous']
     if previous:
-        # Rebuild the previous runtime from its own manifest; state written while it ran
-        # (or planted since) is discarded rather than carried into the recovered service.
-        seed_agents(Path(previous['directory']), Path(previous['runtime']))
         start(config, previous)
     else:
         # The retained host installation has no release manifest. Its explicit allowlist is the
@@ -538,9 +421,11 @@ def promote(config, digest):
     if not healthy(config, previous['digest'] if previous else None, attempts=1):
         raise RuntimeError('Current production service is unhealthy; refusing promotion')
     directory = prepare(config, digest)
+    release = {'digest': digest, 'directory': str(directory)}
     check_legacy_preload()
-    runtime = seed_agents(directory)
-    release = {'digest': digest, 'directory': str(directory), 'runtime': str(runtime)}
+    # The same shadow check start() runs, before anything is stopped: a host that the candidate would
+    # refuse is reported without an outage.
+    check_shadow_copies(release_manifest(release))
     # First migration: record the healthy host installation's shadow copies, the explicit allowlist
     # recover() checks before restarting the host service. Refuses before anything is stopped.
     host_allowlist = None if previous else meshcentral_shadow_check.snapshot(BASE)
