@@ -19,7 +19,8 @@ function readRequired(file, purpose) {
 
 const meshcentral = meshcentralRoot();
 const engine = readRequired(path.join(meshcentral, 'public/scripts/agent-desktop-trackpad-0.0.1.js'), 'trackpad engine whose licence header is checked');
-const notices = readRequired(path.join(meshcentral, 'THIRD_PARTY_NOTICES.txt'), 'repository notices that must carry the trackpad engine attribution');
+// Since Stage 1 the notices sit at their publish path inside the fork package, next to the engine.
+const notices = readRequired(path.join(meshcentral, 'public/scripts/THIRD_PARTY_NOTICES.txt'), 'repository notices that must carry the trackpad engine attribution');
 const header = engine.startsWith('/*!') ? engine.slice(0, engine.indexOf('*/') + 2).replace(/^\s*\* ?/gm, '') : '';
 const flat = text => text.replace(/\s+/g, ' ');
 
@@ -48,7 +49,7 @@ const checks = {
     noticesChromiumFileNotice: flat(notices).includes('Copyright 2013 The Chromium Authors. All rights reserved.'),
     noticesApacheLicence: notices.includes('Apache License') && notices.includes('Version 2.0, January 2004') && notices.includes('END OF TERMS AND CONDITIONS'),
     // The notices are published next to the engine they cover.
-    noticesPublished: (() => { const d = readRequired(path.join(__dirname, '..', 'deploy.py'), 'deploy mapping that must publish the notices next to the engine'); return d.includes('"local_path": "../MeshCentral/THIRD_PARTY_NOTICES.txt"') && d.includes('"remote_relative_path": "scripts/THIRD_PARTY_NOTICES.txt"') && d.includes('"remote_relative_path": "scripts/agent-desktop-trackpad-0.0.1.js"'); })()
+    noticesPublished: (() => { const d = readRequired(path.join(__dirname, '..', 'deploy.py'), 'deploy mapping that must publish the notices next to the engine'); return d.includes('"local_path": "../MeshCentral/public/scripts/THIRD_PARTY_NOTICES.txt"') && d.includes('"remote_relative_path": "scripts/THIRD_PARTY_NOTICES.txt"') && d.includes('"remote_relative_path": "scripts/agent-desktop-trackpad-0.0.1.js"'); })()
 };
 const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([name]) => name);
 for (const name of failed) console.log(`FAIL ${name}`);

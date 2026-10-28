@@ -4,9 +4,10 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const meshCentralRepo = path.resolve(__dirname, '..', '..', 'MeshCentral');
-const minimist = require(path.join(meshCentralRepo, 'node_modules', 'minimist'));
-const WebSocket = require(path.join(meshCentralRepo, 'node_modules', 'ws'));
+// The MeshCentral deployment wrapper (Stage 1): its npm ci installs these modules.
+const meshCentralWrapper = path.resolve(__dirname, '..', '..', 'MeshCentral', 'deploy');
+const minimist = require(path.join(meshCentralWrapper, 'node_modules', 'minimist'));
+const WebSocket = require(path.join(meshCentralWrapper, 'node_modules', 'ws'));
 const args = minimist(process.argv.slice(2));
 
 function fail(message) {

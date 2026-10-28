@@ -1,20 +1,32 @@
 'use strict';
-// G1: every MeshCentral file that replaces an upstream file must equal the upstream
-// git tag plus reviewed hunks. The manifest in fixtures/meshcentral-fork-hunks lists
-// each file with its tag and state:
-//   enforced        the CRLF-normalised diff against the tag must equal the reviewed
-//                   diff saved under upstream-base/<path>.diff; any other hunk fails.
-//   pending-rebase  the file still starts from an older upstream base. It is reported
-//                   as PENDING with its diff counts and the upstream lines it lacks,
-//                   until the named stage rebases it and flips it to enforced.
-// Every tracked file that also exists at the tag must be listed, either in files or
-// in excluded with a reason, so a new override cannot go unchecked.
+// G1: the MeshCentral fork package must equal stock upstream plus reviewed changes.
+// The reference is the npm meshcentral package pinned in test/lib/meshcentral_upstream_reference.json
+// (verified by integrity), because since Stage 1 the fork's base is the npm bytes.
+//
+// Scope: the files the package ships, i.e. tracked files the package.json "files" field packs
+// (plus package.json, readme and licence), minus the paths and names excluded in the fixture.
+// Every reference file must be covered by that scope or listed as removed, which checks the
+// scope definition itself.
+//
+// Rule, from fixtures/meshcentral-fork-hunks/upstream-base.json:
+//   a file byte-equal to the reference needs no entry, and an entry for one fails (stale);
+//   a file that differs must be listed as
+//     enforced        the CRLF-normalised diff against the reference must equal the reviewed
+//                     diff saved under upstream-base/<path>.diff; any other hunk fails;
+//     pending-rebase  the file still starts from an older upstream base (forkBase). It is reported
+//                     as PENDING with its diff counts and the upstream lines it lacks, until the
+//                     named stage rebases it and flips it to enforced;
+//     generated       a derived copy (minified or copied from a listed source). Its content is
+//                     governed by test/meshcentral_generated_assets_contract.js, which must list it;
+//   a file absent from the reference must be listed as fork-only;
+//   a reference file the fork does not ship must be listed under removed;
+//   anything unlisted fails.
 //
 // MeshCentral is located by test/lib/meshcentral_paths.js (MESHCENTRAL_ROOT, or the sibling
-// ../MeshCentral checkout).
+// ../MeshCentral checkout). Stage 1 layout only: the old wrapper layout had no package tree.
 // Options:
-//   --print-diff <path>  print the current normalised diff of one file (to review it and
-//                        save it as its fixture); nothing is written
+//   --print-diff <path>  print the current normalised diff of one file against the reference (to
+//                        review it and save it as its fixture); nothing is written
 //   --full               print every missing upstream line of pending files
 //   --evidence <dir>     write the full report as JSON into <dir>
 const assert = require('assert');
@@ -26,8 +38,10 @@ const meshcentralPaths = require('./lib/meshcentral_paths');
 
 const fixtureDir = path.join(__dirname, 'fixtures', 'meshcentral-fork-hunks');
 const manifestPath = path.join(fixtureDir, 'upstream-base.json');
+const generatedManifestPath = path.join(fixtureDir, 'generated-assets.json');
 const reviewedDiffDir = path.join(fixtureDir, 'upstream-base');
 const PENDING_SAMPLE_LINES = 12;
+const STATES = ['enforced', 'pending-rebase', 'generated', 'fork-only'];
 
 const normalise = (text) => text.replace(/\r\n?/g, '\n');
 const samePath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
@@ -116,24 +130,64 @@ function missingUpstreamChanges(root, tag, forkBase, file, removedFromTag) {
     return { upstreamAdded: upstreamAdded.length, missing };
 }
 
+// "dir/**" matches everything under dir; any other pattern is one exact path.
+function pathPatternMatches(pattern, file) {
+    return pattern.endsWith('/**') ? file.startsWith(pattern.slice(0, -2)) : file === pattern;
+}
+
 function loadManifest() {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     assert(typeof manifest.defaultUpstreamTag === 'string' && manifest.defaultUpstreamTag, 'upstream-base.json needs defaultUpstreamTag');
-    assert(manifest.files && typeof manifest.files === 'object', 'upstream-base.json needs files');
-    assert(manifest.excluded && typeof manifest.excluded === 'object', 'upstream-base.json needs excluded');
+    for (const key of ['files', 'excluded', 'excludedPaths', 'removed']) {
+        assert(manifest[key] && typeof manifest[key] === 'object', 'upstream-base.json needs ' + key);
+    }
     for (const [file, entry] of Object.entries(manifest.files)) {
-        assert(['enforced', 'pending-rebase'].includes(entry.state), file + ': state must be enforced or pending-rebase');
-        assert(typeof entry.reviewed === 'string' && entry.reviewed, file + ': reviewed needs a description of the fork hunks');
+        assert(STATES.includes(entry.state), file + ': state must be one of ' + STATES.join(', '));
+        assert(typeof entry.reviewed === 'string' && entry.reviewed, file + ': reviewed needs a description of the fork change');
         if (entry.state === 'pending-rebase') {
             assert(typeof entry.flipStage === 'string' && entry.flipStage, file + ': pending-rebase needs flipStage');
             assert(typeof entry.forkBase === 'string' && entry.forkBase, file + ': pending-rebase needs forkBase');
         }
+        if (entry.state === 'generated') {
+            assert(typeof entry.source === 'string' && entry.source, file + ': generated needs source');
+        }
     }
-    for (const [file, reason] of Object.entries(manifest.excluded)) {
-        assert(typeof reason === 'string' && reason, file + ': excluded needs a reason');
-        assert(!manifest.files[file], file + ' is both checked and excluded');
+    for (const section of ['excluded', 'excludedPaths', 'removed']) {
+        for (const [file, reason] of Object.entries(manifest[section])) {
+            assert(typeof reason === 'string' && reason, file + ': ' + section + ' needs a reason');
+            assert(!manifest.files[file], file + ' is both listed in files and in ' + section);
+        }
     }
     return manifest;
+}
+
+// The package.json "files" field as npm applies it here: "*.js" matches top-level .js files, any
+// other entry is a top-level file or folder. npm always adds package.json, readme* and licen[cs]e*.
+function packageMatcher(root) {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    assert(pkg.name === 'meshcentral', root + '/package.json is ' + JSON.stringify(pkg.name) + ', not the meshcentral package (Stage 1 layout needed)');
+    assert(Array.isArray(pkg.files) && pkg.files.length, root + '/package.json has no files list');
+    for (const entry of pkg.files) {
+        assert(entry === '*.js' || /^[^*?/[\]!]+$/.test(entry), 'package.json files entry ' + JSON.stringify(entry) + ' is not a form this contract understands');
+    }
+    return (file) => {
+        if (/^(package\.json|readme[^/]*|licen[cs]e[^/]*)$/i.test(file)) { return true; }
+        const top = file.split('/')[0];
+        return pkg.files.some((entry) => entry === '*.js' ? (!file.includes('/') && file.endsWith('.js')) : (file === entry || top === entry));
+    };
+}
+
+function listTree(dir) {
+    const files = [];
+    const stack = [dir];
+    while (stack.length) {
+        const current = stack.pop();
+        for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+            const full = path.join(current, entry.name);
+            if (entry.isDirectory()) { stack.push(full); } else { files.push(path.relative(dir, full).split(path.sep).join('/')); }
+        }
+    }
+    return files;
 }
 
 function hunkReport(expected, actual) {
@@ -150,45 +204,97 @@ function hunkReport(expected, actual) {
 function main() {
     const argv = process.argv.slice(2);
     const root = meshcentralRoot();
+    const reference = meshcentralPaths.upstreamPackageDir();
+    const pin = meshcentralPaths.loadReferencePin();
     const manifest = loadManifest();
+    const referenceText = (file) => normalise(fs.readFileSync(path.join(reference, file), 'utf8'));
     const printIndex = argv.indexOf('--print-diff');
     if (printIndex >= 0) {
         const file = argv[printIndex + 1];
         assert(file, '--print-diff needs a file path');
-        const tag = (manifest.files[file] && manifest.files[file].upstreamTag) || manifest.defaultUpstreamTag;
-        verifyTag(root, tag);
-        process.stdout.write(normalisedDiff(showAt(root, tag, file), readWorkingFile(root, file), file));
+        process.stdout.write(normalisedDiff(referenceText(file), readWorkingFile(root, file), file));
         return;
     }
 
     const failures = [];
-    const report = { meshcentral: root, defaultUpstreamTag: manifest.defaultUpstreamTag, tags: {}, files: {} };
+    const report = { meshcentral: root, reference: { dir: reference, pin: pin.name + '@' + pin.version, integrity: pin.integrity }, tags: {}, files: {}, counts: {} };
     const tagCommit = (tag) => report.tags[tag] || (report.tags[tag] = verifyTag(root, tag));
-    tagCommit(manifest.defaultUpstreamTag);
 
-    // Coverage: every tracked file that the tag also has must be listed.
+    // Scope: tracked files the package ships, minus the fixture's exclusions.
     const tracked = git(root, ['ls-files', '-z']).stdout.split('\0').filter(Boolean);
-    const upstream = new Set(git(root, ['ls-tree', '-r', '-z', '--name-only', manifest.defaultUpstreamTag]).stdout.split('\0').filter(Boolean));
-    const overlap = tracked.filter((file) => upstream.has(file)).sort();
-    assert(overlap.length > 0, 'No tracked MeshCentral file exists at ' + manifest.defaultUpstreamTag + '; the checkout layout changed');
-    for (const file of overlap) {
-        if (!manifest.files[file] && !manifest.excluded[file]) { failures.push('unlisted ' + file + ': replaces an upstream file but has no manifest entry'); }
-    }
     const trackedSet = new Set(tracked);
-    for (const file of Object.keys(manifest.files).concat(Object.keys(manifest.excluded))) {
-        if (!trackedSet.has(file)) { failures.push('stale ' + file + ': listed in the manifest but not tracked in MeshCentral'); }
+    for (const pattern of Object.keys(manifest.excludedPaths)) {
+        if (!tracked.some((file) => pathPatternMatches(pattern, file))) { failures.push('stale excludedPaths ' + pattern + ': matches no tracked file'); }
+    }
+    for (const file of Object.keys(manifest.excluded)) {
+        if (!trackedSet.has(file)) { failures.push('stale excluded ' + file + ': not tracked in MeshCentral'); }
+    }
+    const inPackage = packageMatcher(root);
+    const pathExcluded = (file) => Object.keys(manifest.excludedPaths).some((pattern) => pathPatternMatches(pattern, file));
+    const scope = tracked.filter((file) => !pathExcluded(file) && !manifest.excluded[file] && inPackage(file)).sort();
+    const scopeSet = new Set(scope);
+    const referenceFiles = listTree(reference).sort();
+    const referenceSet = new Set(referenceFiles);
+    assert(scope.length > 0, 'No tracked MeshCentral file is in the package tree; the checkout layout changed');
+    report.counts = { tracked: tracked.length, scope: scope.length, reference: referenceFiles.length,
+        outsidePackage: tracked.filter((file) => !pathExcluded(file) && !manifest.excluded[file] && !inPackage(file)).length };
+
+    // Every reference file is shipped by the fork, excluded by name, or listed as removed.
+    for (const file of referenceFiles) {
+        if (scopeSet.has(file) || manifest.excluded[file]) { continue; }
+        if (!manifest.removed[file]) { failures.push('unlisted removal ' + file + ': in the upstream package but not shipped by the fork; list it under removed'); }
+    }
+    for (const file of Object.keys(manifest.removed)) {
+        if (!referenceSet.has(file)) { failures.push('stale removed ' + file + ': not in the upstream package'); }
+        else if (scopeSet.has(file)) { failures.push('stale removed ' + file + ': the fork ships it again'); }
+    }
+    for (const file of Object.keys(manifest.files)) {
+        if (!scopeSet.has(file)) { failures.push('stale ' + file + ': listed but not a tracked file of the package tree'); }
     }
 
-    for (const file of Object.keys(manifest.files).sort()) {
-        if (!trackedSet.has(file)) { continue; }
+    let equal = 0;
+    const equalFiles = new Set();
+    for (const file of scope) {
         const entry = manifest.files[file];
-        const tag = entry.upstreamTag || manifest.defaultUpstreamTag;
-        tagCommit(tag);
-        const diff = normalisedDiff(showAt(root, tag, file), readWorkingFile(root, file), file);
+        if (!referenceSet.has(file)) {
+            if (!entry) { failures.push('unlisted ' + file + ': not in the upstream package; list it as fork-only'); }
+            else if (entry.state !== 'fork-only') { failures.push(file + ': not in the upstream package, so its state must be fork-only, not ' + entry.state); }
+            continue;
+        }
+        if (fs.readFileSync(path.join(root, file)).equals(fs.readFileSync(path.join(reference, file)))) {
+            equal++;
+            equalFiles.add(file);
+            if (entry) { failures.push('stale ' + file + ': byte-equal to the upstream package; remove its entry'); }
+            continue;
+        }
+        if (!entry) { failures.push('unlisted ' + file + ': differs from the upstream package but has no manifest entry'); continue; }
+        if (entry.state === 'fork-only') { failures.push(file + ': is in the upstream package, so it cannot be fork-only'); }
+    }
+    report.counts.equal = equal;
+
+    let generatedFiles = null;
+    for (const file of Object.keys(manifest.files).sort()) {
+        if (!scopeSet.has(file) || equalFiles.has(file)) { continue; }
+        const entry = manifest.files[file];
+        if (entry.state === 'fork-only') {
+            report.files[file] = { state: entry.state };
+            continue;
+        }
+        if (!referenceSet.has(file)) { continue; }
+        if (entry.state === 'generated') {
+            generatedFiles = generatedFiles || JSON.parse(fs.readFileSync(generatedManifestPath, 'utf8')).files;
+            report.files[file] = { state: entry.state, source: entry.source };
+            if (!generatedFiles[file]) { failures.push('generated ' + file + ': not listed in generated-assets.json, which governs its content'); }
+            else if (generatedFiles[file].source !== entry.source) { failures.push('generated ' + file + ': source ' + entry.source + ' differs from generated-assets.json (' + generatedFiles[file].source + ')'); }
+            if (!manifest.files[entry.source] && !scopeSet.has(entry.source)) { failures.push('generated ' + file + ': source ' + entry.source + ' is not a file of the package tree'); }
+            console.log('GENERATED ' + file + ' (from ' + entry.source + '; content checked by meshcentral_generated_assets_contract)');
+            continue;
+        }
+        const diff = normalisedDiff(referenceText(file), readWorkingFile(root, file), file);
         const parsed = parseDiff(diff);
-        const result = { state: entry.state, upstreamTag: tag, added: parsed.added.length, removed: parsed.removed.length, hunks: parsed.hunks.length };
+        const result = { state: entry.state, added: parsed.added.length, removed: parsed.removed.length, hunks: parsed.hunks.length };
         report.files[file] = result;
-        const counts = tag + ' +' + result.added + '/-' + result.removed + ', ' + result.hunks + ' hunks';
+        const counts = pin.version + ' +' + result.added + '/-' + result.removed + ', ' + result.hunks + ' hunks';
 
         if (entry.state === 'enforced') {
             const expectedPath = path.join(reviewedDiffDir, file + '.diff');
@@ -203,7 +309,7 @@ function main() {
             const hunks = hunkReport(expected, diff);
             result.unreviewed = hunks.unreviewed;
             result.reviewedHunksGone = hunks.gone;
-            failures.push('enforced ' + file + ': diff against ' + tag + ' differs from the reviewed hunks');
+            failures.push('enforced ' + file + ': diff against the upstream package differs from the reviewed hunks');
             console.log('FAIL enforced ' + file + ' (' + counts + '): ' + hunks.unreviewed.length + ' unreviewed hunk(s), ' + hunks.gone.length + ' reviewed hunk(s) no longer present');
             for (const hunk of hunks.unreviewed) { console.log('  unreviewed ' + hunk.header + '\n' + hunk.text.split('\n').map((line) => '    ' + line).join('\n')); }
             for (const hunk of hunks.gone) { console.log('  gone ' + hunk.header); }
@@ -211,6 +317,9 @@ function main() {
             continue;
         }
 
+        // pending-rebase: which upstream changes between forkBase and the tag are still missing.
+        const tag = entry.upstreamTag || manifest.defaultUpstreamTag;
+        tagCommit(tag);
         const missing = missingUpstreamChanges(root, tag, entry.forkBase, file, parsed.removed);
         result.flipStage = entry.flipStage;
         result.forkBase = entry.forkBase;
@@ -223,9 +332,9 @@ function main() {
         for (const line of shown) { console.log('  missing upstream: ' + line.trim().slice(0, 160)); }
         if (shown.length < missing.missing.length) { console.log('  ... ' + (missing.missing.length - shown.length) + ' more (--full or --evidence for all)'); }
     }
-    for (const file of Object.keys(manifest.excluded).sort()) {
-        console.log('EXCLUDED ' + file + ': ' + manifest.excluded[file]);
-    }
+    for (const file of Object.keys(manifest.excluded).sort()) { console.log('EXCLUDED ' + file + ': ' + manifest.excluded[file]); }
+    for (const pattern of Object.keys(manifest.excludedPaths).sort()) { console.log('EXCLUDED ' + pattern + ': ' + manifest.excludedPaths[pattern]); }
+    for (const file of Object.keys(manifest.removed).sort()) { console.log('REMOVED ' + file + ': ' + manifest.removed[file]); }
 
     const evidenceIndex = argv.indexOf('--evidence');
     if (evidenceIndex >= 0) {
@@ -234,11 +343,13 @@ function main() {
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(path.join(dir, 'meshcentral_upstream_base_contract.json'), JSON.stringify(Object.assign(report, { failures }), null, 2));
     }
-    const states = Object.values(report.files);
-    const summary = states.filter((entry) => entry.state === 'enforced').length + ' enforced, ' +
-        states.filter((entry) => entry.state === 'pending-rebase').length + ' pending-rebase, ' + Object.keys(manifest.excluded).length + ' excluded';
+    const states = Object.values(manifest.files).map((entry) => entry.state);
+    const count = (state) => states.filter((value) => value === state).length;
+    const summary = report.counts.scope + ' package files: ' + equal + ' equal, ' + count('enforced') + ' enforced, ' + count('pending-rebase') + ' pending-rebase, ' +
+        count('generated') + ' generated, ' + count('fork-only') + ' fork-only, ' + Object.keys(manifest.removed).length + ' removed, ' +
+        Object.keys(manifest.excluded).length + ' excluded by name, ' + Object.keys(manifest.excludedPaths).length + ' excluded paths; reference ' + pin.name + '@' + pin.version;
     for (const failure of failures) { console.log('FAIL ' + failure); }
-    console.log((failures.length ? 'FAIL' : 'PASS') + ' MeshCentral upstream base (' + summary + ', upstream ' + manifest.defaultUpstreamTag + ')');
+    console.log((failures.length ? 'FAIL' : 'PASS') + ' MeshCentral upstream base (' + summary + ')');
     if (failures.length) { process.exitCode = 1; }
 }
 

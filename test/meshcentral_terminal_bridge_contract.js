@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { forkFile, installedPackageDir, meshcentralRoot } = require('./lib/meshcentral_paths');
+const { forkFile, installedPackageDir, wrapperDir, wrapperFile } = require('./lib/meshcentral_paths');
 
 function assert(condition, message) {
     if (!condition) {
@@ -459,7 +459,8 @@ function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const absentOptionalInputs = {};
-    const meshcentralData = path.join(meshcentralRoot(), 'meshcentral-data');
+    // A local server's data folder sits in the deployment wrapper since Stage 1.
+    const meshcentralData = path.join(wrapperDir(), 'meshcentral-data');
     const terminalInputs = declaredInputs('terminalModules', 'win-terminal copies whose system-only executable and callback contract is checked', {
         required: [
             'modules/win-terminal.js',
@@ -489,12 +490,11 @@ function main() {
             forkFile('agents/modules_meshcore_min/win-virtual-terminal.min.js')
         ]
     }, absentOptionalInputs);
-    const dispatcherInputs = declaredInputs('dispatcherModules', 'win-dispatcher copies whose disabled-connect contract is checked', {
+    // MeshAgent's embedded copy only: D9 deleted the three fork copies under
+    // agents/modules_meshcore*/, so MeshCentral no longer carries win-dispatcher.
+    const dispatcherInputs = declaredInputs('dispatcherModules', 'win-dispatcher copy whose disabled-connect contract is checked', {
         required: [
-            'modules/win-dispatcher.js',
-            forkFile('agents/modules_meshcore/win-dispatcher.js'),
-            forkFile('agents/modules_meshcore_min/win-dispatcher.js'),
-            forkFile('agents/modules_meshcore_min/win-dispatcher.min.js')
+            'modules/win-dispatcher.js'
         ]
     }, absentOptionalInputs);
     const coreInputs = declaredInputs('meshCores', 'MeshCentral agent cores whose run-command and consent handling is checked', {
@@ -518,7 +518,8 @@ function main() {
     }, absentOptionalInputs);
     const customOverlayInputs = declaredInputs('customRunCommandOverlays', 'custom.js run-command overlay whose download command is checked', {
         required: [
-            forkFile('public/scripts/custom.js')
+            // The package copy is npm's empty stub since Stage 1; the served file is the wrapper's.
+            wrapperFile('meshcentral-web/public/scripts/custom.js')
         ]
     }, absentOptionalInputs);
     const terminalPaths = terminalInputs.paths;

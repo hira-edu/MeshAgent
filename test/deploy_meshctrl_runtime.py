@@ -26,12 +26,19 @@ def login_key_file(fixture):
 
 
 def install_local_cli(fixture, skip=()):
-    """Lay out meshctrl.js, its Node modules and the update helper, leaving out `skip`."""
+    """Lay out meshctrl.js, its Node modules and the update helper, leaving out `skip`.
+
+    Stage 1 layout: MeshCentral/deploy is the deployment wrapper; its npm ci installs the fork
+    package (which carries meshctrl.js) and the Node modules beside it.
+    """
+    wrapper_modules = fixture.meshcentral_repo / "deploy" / "node_modules"
     if "meshctrl" not in skip:
-        (fixture.meshcentral_repo / "meshctrl.js").write_text(FAKE_MESHCTRL, encoding="utf-8")
+        meshctrl = wrapper_modules / "meshcentral" / "meshctrl.js"
+        meshctrl.parent.mkdir(parents=True, exist_ok=True)
+        meshctrl.write_text(FAKE_MESHCTRL, encoding="utf-8")
     for module in ("minimist", "ws"):
         if module not in skip:
-            package = fixture.meshcentral_repo / "node_modules" / module / "package.json"
+            package = wrapper_modules / module / "package.json"
             package.parent.mkdir(parents=True, exist_ok=True)
             package.write_text(json.dumps({"name": module}), encoding="utf-8")
     if "helper" not in skip:
@@ -84,13 +91,29 @@ def test_meshctrl_and_update_helper_run_locally_with_the_local_key():
         ran = json.loads(result.stdout)
         assert ran["args"][0] == "serverinfo"
         assert ran["args"][ran["args"].index("--loginkeyfile") + 1] == key
-        assert pathlib.Path(ran["cwd"]).resolve() == fixture.meshcentral_repo.resolve()
+        assert pathlib.Path(ran["cwd"]).resolve() == (fixture.meshcentral_repo / "deploy").resolve()
         response = deploy.send_update_agents(["node//a", "node//b"], "admin", key)
         assert response == {"ok": True, "count": 2, "keyfile": key}, response
         assert fixture.remote.calls == [], "meshctrl must not run on, or upload anything to, the server"
 
 
+def test_pre_stage1_root_layout_is_not_accepted():
+    # The root meshctrl.js cannot resolve the wrapper's modules after Stage 1, and a stale root
+    # node_modules must not stand in for deploy/node_modules.
+    with DeployFixture() as fixture:
+        (fixture.meshcentral_repo / "meshctrl.js").write_text(FAKE_MESHCTRL, encoding="utf-8")
+        for module in ("minimist", "ws"):
+            package = fixture.meshcentral_repo / "node_modules" / module / "package.json"
+            package.parent.mkdir(parents=True, exist_ok=True)
+            package.write_text(json.dumps({"name": module}), encoding="utf-8")
+        install_local_cli(fixture, skip=("meshctrl", "minimist", "ws"))
+        message = expect_not_ready(deploy.run_meshctrl, ["serverinfo"], "admin", login_key_file(fixture))
+        assert "deploy" in message and "npm ci" in message, message
+        assert fixture.remote.calls == []
+
+
 TESTS = [
+    test_pre_stage1_root_layout_is_not_accepted,
     test_missing_prerequisites_fail_before_touching_the_server,
     test_update_online_stops_before_fetching_the_login_key,
     test_meshctrl_and_update_helper_run_locally_with_the_local_key,

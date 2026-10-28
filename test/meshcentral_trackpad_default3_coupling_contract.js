@@ -3,15 +3,16 @@
 // letting the adapter and the view both process the same touches.
 const fs = require('fs');
 const path = require('path');
-const { meshcentralRoot, installedPackageDir } = require('./lib/meshcentral_paths');
+const { meshcentralRoot, upstreamPackageDir } = require('./lib/meshcentral_paths');
 
 const PINNED_MESHCENTRAL = '1.2.5';
-const moduleRoot = installedPackageDir().dir;
+// Stock upstream, not the installed package: since Stage 1 the installed package is the fork.
+const moduleRoot = upstreamPackageDir();
 const scriptsDir = path.join(meshcentralRoot(), 'public', 'scripts');
 
 // Every input is required: a missing or empty file fails the contract and says what it was for.
 function read(file) {
-    const purpose = file.startsWith(moduleRoot + path.sep) ? `installed MeshCentral package file this contract pins to ${PINNED_MESHCENTRAL}`
+    const purpose = file.startsWith(moduleRoot + path.sep) ? `pinned upstream MeshCentral package file this contract pins to ${PINNED_MESHCENTRAL}`
         : file.startsWith(scriptsDir + path.sep) ? 'fork script checked against the pinned upstream page' : 'coupling contract input';
     let text;
     try {

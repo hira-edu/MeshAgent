@@ -148,8 +148,109 @@ const cases = {
     forkFileNeedsRoot() {
         const ws = workspace(false);
         throwsWith(() => paths.forkFile('meshagent.js', { env: {}, meshagentRoot: ws.meshagentRoot }), ['Set MESHCENTRAL_ROOT']);
+    },
+    wrapperFileIsUnderDeploy() {
+        const ws = workspace(true);
+        writeWrapper(ws.sibling, 'meshcentral-deploy');
+        const options = { env: {}, meshagentRoot: ws.meshagentRoot };
+        assert.strictEqual(paths.wrapperDir(options), path.join(ws.sibling, 'deploy'));
+        assert.strictEqual(paths.wrapperFile('meshcentral-web/public/scripts/custom.js', options),
+            path.join(ws.sibling, 'deploy', 'meshcentral-web', 'public', 'scripts', 'custom.js'));
+        throwsWith(() => paths.wrapperFile('../meshagent.js', options), ['leaves the deployment wrapper']);
+        throwsWith(() => paths.wrapperFile('', options), ['needs a relative path']);
+    },
+    wrapperMissingNamesStage1() {
+        const ws = workspace(true);
+        // The old layout: the wrapper package.json at the root is not accepted.
+        fs.writeFileSync(path.join(ws.sibling, 'package.json'), JSON.stringify({ name: 'meshcentral-deploy' }));
+        throwsWith(() => paths.wrapperDir({ env: {}, meshagentRoot: ws.meshagentRoot }), ['deployment wrapper not found', 'Stage 1']);
+    },
+    wrapperWithOtherNameThrows() {
+        const ws = workspace(true);
+        writeWrapper(ws.sibling, 'meshcentral');
+        throwsWith(() => paths.wrapperFile('x', { env: {}, meshagentRoot: ws.meshagentRoot }), ['is named "meshcentral"']);
+    },
+    treeDigestMatchesPythonFixture() {
+        // The same tree and digest are checked in meshcentral_paths_contract.py, so both helpers
+        // compute one value. "Z/" sorts before "a/" by UTF-8 bytes.
+        const tree = tinyTree(path.join(temp, 'digest' + (counter++)));
+        assert.deepStrictEqual(paths.treeDigest(tree), { digest: TINY_DIGEST, fileCount: 3 });
+    },
+    upstreamDefaultCacheIsUnderArtifacts() {
+        const ws = workspace(false);
+        assert.strictEqual(paths.upstreamCacheRoot({ env: {}, meshagentRoot: ws.meshagentRoot }),
+            path.join(ws.meshagentRoot, 'artifacts', 'meshcentral-upstream'));
+    },
+    upstreamVerifiedReferenceIsReturned() {
+        const fixture = upstreamFixture();
+        assert.strictEqual(paths.upstreamPackageDir(fixture.options), fixture.pkg);
+    },
+    upstreamMissingNamesTheCommand() {
+        const fixture = upstreamFixture({ populate: false });
+        throwsWith(() => paths.upstreamPackageDir(fixture.options), ['is missing', paths.FETCH_COMMAND, 'MESHCENTRAL_UPSTREAM_CACHE']);
+    },
+    upstreamChangedFileFailsIntegrity() {
+        const fixture = upstreamFixture();
+        fs.writeFileSync(path.join(fixture.pkg, 'a', 'b.txt'), 'hellO\n');
+        throwsWith(() => paths.upstreamPackageDir(fixture.options), ['fails its integrity check', paths.FETCH_COMMAND]);
+    },
+    upstreamExtraFileFailsIntegrity() {
+        const fixture = upstreamFixture();
+        fs.writeFileSync(path.join(fixture.pkg, 'extra.js'), '');
+        throwsWith(() => paths.upstreamPackageDir(fixture.options), ['fails its integrity check', 'with 4 files']);
+    },
+    upstreamOtherPinFails() {
+        const fixture = upstreamFixture({ marker: { treeDigest: 'sha256:00' } });
+        throwsWith(() => paths.upstreamPackageDir(fixture.options), ['made from another pin', paths.FETCH_COMMAND]);
+    },
+    upstreamMissingMarkerFails() {
+        const fixture = upstreamFixture();
+        fs.rmSync(path.join(fixture.refDir, 'reference.json'));
+        throwsWith(() => paths.upstreamPackageDir(fixture.options), ['no readable reference.json']);
+    },
+    upstreamPinIsComplete() {
+        const pin = paths.loadReferencePin();
+        assert.strictEqual(pin.name, 'meshcentral');
+        assert.strictEqual(pin.version, '1.2.5');
+        assert(/^sha512-[A-Za-z0-9+/]{86}==$/.test(pin.integrity), 'pinned integrity is a sha512: ' + pin.integrity);
+        assert(/^sha256:[0-9a-f]{64}$/.test(pin.treeDigest), 'pinned tree digest is a sha256: ' + pin.treeDigest);
+        assert(Number.isInteger(pin.fileCount) && pin.fileCount > 0);
     }
 };
+
+function writeWrapper(root, name) {
+    fs.mkdirSync(path.join(root, 'deploy'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'deploy', 'package.json'), JSON.stringify({ name }));
+}
+
+const TINY_DIGEST ='sha256:63dc7f5b4d9481f89b76e3cc2b6367567dd8b24b803cf747542ff6d80d19ce65';
+
+function tinyTree(dir) {
+    fs.mkdirSync(path.join(dir, 'a'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'Z'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'package.json'), '{"name":"meshcentral","version":"9.9.9"}');
+    fs.writeFileSync(path.join(dir, 'a', 'b.txt'), 'hello\n');
+    fs.writeFileSync(path.join(dir, 'Z', 'c.txt'), 'x');
+    return dir;
+}
+
+// A cache under MESHCENTRAL_UPSTREAM_CACHE holding the tiny tree, with a pin file describing it.
+function upstreamFixture(settings) {
+    const opts = Object.assign({ populate: true, marker: {} }, settings);
+    const base = path.join(temp, 'upstream' + (counter++));
+    const cache = path.join(base, 'cache');
+    const pin = { name: 'meshcentral', version: '9.9.9', tarball: 'https://example.invalid/m.tgz', integrity: 'sha512-AA==', treeDigest: TINY_DIGEST, fileCount: 3 };
+    fs.mkdirSync(base, { recursive: true });
+    const pinPath = path.join(base, 'pin.json');
+    fs.writeFileSync(pinPath, JSON.stringify(pin));
+    const refDir = path.join(cache, 'meshcentral-9.9.9');
+    const pkg = path.join(refDir, 'package');
+    if (opts.populate) {
+        tinyTree(pkg);
+        fs.writeFileSync(path.join(refDir, 'reference.json'), JSON.stringify(Object.assign({}, pin, opts.marker)));
+    }
+    return { options: { env: { MESHCENTRAL_UPSTREAM_CACHE: cache }, pinPath }, refDir, pkg };
+}
 
 const failures = [];
 try {

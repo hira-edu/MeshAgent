@@ -236,8 +236,10 @@ ARTIFACTS = {
 }
 
 CORE_ARTIFACTS = {
+    # The fork's committed loader already carries the module-version and proxy SNI changes
+    # (Stage 1), so it is published as is instead of being patched from the server's copy.
     "meshcentral.js": {
-        "local_path": "artifacts/deployment/meshcentral.js",
+        "local_path": "../MeshCentral/meshcentral.js",
         "remote_relative_path": "meshcentral.js",
         "publish_targets": ("module-root",),
     },
@@ -247,7 +249,7 @@ CORE_ARTIFACTS = {
         "publish_targets": ("module-root",),
     },
     "agentcertificatehistory.js": {
-        "local_path": "tools/configure_agent_certificate_history.js",
+        "local_path": "../MeshCentral/agentcertificatehistory.js",
         "remote_relative_path": "agentcertificatehistory.js",
         "publish_targets": ("module-root",),
     },
@@ -341,10 +343,12 @@ CORE_ARTIFACTS = {
         "remote_relative_path": "modules_meshcore_min/win-virtual-terminal.min.js",
         "publish_targets": ("data-core", "module-core"),
     },
+    # custom.js is served only from meshcentral-web (D11). The package's public/scripts/custom.js
+    # is npm's empty stub, which nothing serves while the web copy exists, so it is left alone.
     "public/scripts/custom.js": {
-        "local_path": "../MeshCentral/public/scripts/custom.js",
+        "local_path": "../MeshCentral/deploy/meshcentral-web/public/scripts/custom.js",
         "remote_relative_path": "scripts/custom.js",
-        "publish_targets": ("module-public", "web-public"),
+        "publish_targets": ("web-public",),
     },
     "public/scripts/agent-redir-ws-0.1.1.js": {
         "local_path": "../MeshCentral/public/scripts/agent-redir-ws-0.1.1.js",
@@ -412,7 +416,7 @@ CORE_ARTIFACTS = {
         "publish_targets": ("module-public", "web-public"),
     },
     "public/scripts/THIRD_PARTY_NOTICES.txt": {
-        "local_path": "../MeshCentral/THIRD_PARTY_NOTICES.txt",
+        "local_path": "../MeshCentral/public/scripts/THIRD_PARTY_NOTICES.txt",
         "remote_relative_path": "scripts/THIRD_PARTY_NOTICES.txt",
         "publish_targets": ("module-public", "web-public"),
     },
@@ -1352,8 +1356,8 @@ def build_stage_manifest_artifacts(entries):
             "size_bytes": entry["size_bytes"],
             "sha384": entry["sha384"],
         })
-        if "source_sha384" in entry:
-            artifacts[-1]["source_sha384"] = entry["source_sha384"]
+        if "package_version" in entry:
+            artifacts[-1]["package_version"] = entry["package_version"]
     return artifacts
 
 
@@ -1468,25 +1472,16 @@ def align_proxy_certificate_sni(source):
     return source.replace(original, aligned, 1)
 
 
-def prepare_versioned_core_loader():
-    """Patch the target's installed loader without replacing its package version."""
-    remote_path = get_core_publish_path("module-root", "meshcentral.js")
-    script = (
-        "import hashlib,json,pathlib; "
-        f"data=pathlib.Path({remote_path!r}).read_bytes(); "
-        "print(json.dumps({'source':data.decode('utf-8'),'sha384':hashlib.sha384(data).hexdigest().upper()}))"
-    )
-    response = ssh_cmd("python3 -c " + remote_quote(script))
-    if response is None:
-        raise RuntimeError("Cannot read the installed MeshCentral loader; staging aborted")
-    baseline = json.loads(response)
-    if hashlib.sha384(baseline["source"].encode("utf-8")).hexdigest().upper() != baseline["sha384"]:
-        raise ValueError("Installed MeshCentral loader digest mismatch; staging aborted")
-    patched = align_proxy_certificate_sni(version_meshcentral_module_loader(baseline["source"]))
-    generated = LOCAL_REPO / CORE_ARTIFACTS["meshcentral.js"]["local_path"]
-    generated.parent.mkdir(parents=True, exist_ok=True)
-    generated.write_bytes(patched.encode("utf-8"))
-    generated.with_suffix(".source.sha384").write_text(baseline["sha384"], encoding="ascii")
+def read_local_fork_package_version():
+    """Return the version in the MeshCentral fork's package.json, which meshcentral.js belongs to."""
+    manifest_path = LOCAL_MESHCENTRAL_REPO / "package.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"Cannot read the MeshCentral fork package version from {manifest_path}: {error}") from error
+    if manifest.get("name") != "meshcentral" or not manifest.get("version"):
+        raise RuntimeError(f"{manifest_path} is not the meshcentral package (name {manifest.get('name')!r}, version {manifest.get('version')!r})")
+    return manifest["version"]
 
 
 def build_local_core_artifact_entries():
@@ -1505,11 +1500,9 @@ def build_local_core_artifact_entries():
             "present": present,
             "publish_targets": tuple(config.get("publish_targets", ())),
         }
-        if name == "meshcentral.js":
-            baseline = local_path.with_suffix(".source.sha384")
-            entry["present"] = present = present and baseline.is_file()
-            if present:
-                entry["source_sha384"] = baseline.read_text(encoding="ascii").strip()
+        if name == "meshcentral.js" and present:
+            # The loader is the fork's own file; it may only replace the same package version.
+            entry["package_version"] = read_local_fork_package_version()
         if present:
             entry["size_bytes"] = local_path.stat().st_size
             entry["sha384"] = file_digest(local_path, "sha384")
@@ -2272,14 +2265,14 @@ def publish_staged_payloads(agent_artifacts, public_artifacts=None, core_artifac
     core_artifacts = core_artifacts or []
     for entry in core_artifacts:
         if entry["name"] == "meshcentral.js":
-            loader_path = get_core_publish_path("module-root", "meshcentral.js")
-            metadata = collect_remote_file_metadata([loader_path], "sha384")
-            if metadata is None:
-                print("[ERROR] Cannot verify the installed MeshCentral loader; no payloads published.")
+            installed = load_remote_json(get_core_publish_path("module-root", "package.json"))
+            if not isinstance(installed, dict):
+                print("[ERROR] Cannot read the installed MeshCentral package version; no payloads published.")
                 return False
-            current_hash = (metadata.get(loader_path) or {}).get("hash", "").upper()
-            if current_hash not in (entry.get("source_sha384"), entry["sha384"].upper()):
-                print("[ERROR] MeshCentral loader changed after staging; restage before publishing.")
+            expected = entry.get("package_version")
+            if installed.get("name") != "meshcentral" or not expected or installed.get("version") != expected:
+                print(f"[ERROR] The installed MeshCentral package is {installed.get('name')}@{installed.get('version')}, "
+                      f"but the staged meshcentral.js belongs to meshcentral@{expected}; no payloads published.")
                 return False
     for path in CORE_PUBLISH_ROLE_DIRS.values():
         commands.append(f"mkdir -p {remote_quote(path)}")
@@ -2548,11 +2541,11 @@ def require_local_meshcentral_cli():
     problems = []
     if shutil.which("node") is None:
         problems.append("node is not on PATH")
-    meshctrl = LOCAL_MESHCENTRAL_REPO / "meshctrl.js"
+    meshctrl = local_meshctrl_path()
     if not meshctrl.is_file():
         problems.append(f"missing {meshctrl}")
     for module in ("minimist", "ws"):
-        package = LOCAL_MESHCENTRAL_REPO / "node_modules" / module / "package.json"
+        package = local_meshcentral_wrapper() / "node_modules" / module / "package.json"
         if not package.is_file():
             problems.append(f"missing Node module {module} ({package.parent})")
     helper = LOCAL_REPO / "tools" / "meshcentral_update_agents.js"
@@ -2561,8 +2554,19 @@ def require_local_meshcentral_cli():
     if problems:
         raise RuntimeError(
             "The local MeshCentral CLI is not ready: " + "; ".join(problems) +
-            f". Install node and run `npm ci` in {LOCAL_MESHCENTRAL_REPO}."
+            f". Install node and run `npm ci` in {local_meshcentral_wrapper()}."
         )
+
+
+def local_meshcentral_wrapper():
+    """The MeshCentral deployment wrapper (Stage 1). Its npm ci installs the fork package and the
+    Node modules meshctrl.js needs, so the local CLI runs from there, not from the repo root."""
+    return LOCAL_MESHCENTRAL_REPO / "deploy"
+
+
+def local_meshctrl_path():
+    """The installed fork package's meshctrl.js, which resolves its modules from the wrapper."""
+    return local_meshcentral_wrapper() / "node_modules" / "meshcentral" / "meshctrl.js"
 
 
 def run_meshctrl(action_args, login_user, login_key_file, timeout=180):
@@ -2570,7 +2574,7 @@ def run_meshctrl(action_args, login_user, login_key_file, timeout=180):
     require_local_meshcentral_cli()
     cmd = [
         "node",
-        str(LOCAL_MESHCENTRAL_REPO / "meshctrl.js"),
+        str(local_meshctrl_path()),
         *action_args,
         "--url",
         MESHCENTRAL_CONTROL_URL,
@@ -2579,7 +2583,7 @@ def run_meshctrl(action_args, login_user, login_key_file, timeout=180):
         "--loginkeyfile",
         login_key_file,
     ]
-    return run_local_command(cmd, LOCAL_MESHCENTRAL_REPO, timeout=timeout)
+    return run_local_command(cmd, local_meshcentral_wrapper(), timeout=timeout)
 
 
 def run_meshctrl_json(action_args, login_user, login_key_file, timeout=180):
@@ -3195,14 +3199,12 @@ def cmd_stage(args):
     print("  Staging Artifacts")
     print("=" * 60)
 
-    if DEPLOY_PLATFORM == "windows":
-        try:
-            prepare_versioned_core_loader()
-        except (RuntimeError, ValueError, KeyError) as error:
-            print(f"[ERROR] {error}")
-            return False
     local_artifacts = get_present_local_artifacts()
-    core_artifacts = get_present_local_core_artifacts()
+    try:
+        core_artifacts = get_present_local_core_artifacts()
+    except RuntimeError as error:
+        print(f"[ERROR] {error}")
+        return False
     missing_required = validate_required_deploy_artifacts(local_artifacts)
     missing_core = validate_required_core_artifacts(core_artifacts)
     if missing_required:

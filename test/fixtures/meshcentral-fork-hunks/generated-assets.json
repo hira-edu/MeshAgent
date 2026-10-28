@@ -1,8 +1,8 @@
 {
-  "description": "Generated and minified files tracked in MeshCentral, checked by test/meshcentral_generated_assets_contract.js. builders run with --check; built files come wholly from a builder; no-builder-yet files are reported as PENDING until the named work package adds a builder; copy-of-source files must equal their source apart from a recorded knownDrift; vendored files are third-party build output.",
+  "description": "Generated and minified files tracked in MeshCentral, checked by test/meshcentral_generated_assets_contract.js. builders run with --check; built files come wholly from a builder; no-builder-yet files are reported as PENDING until the named work package adds a builder; copy-of-source files must equal their source apart from a recorded knownDrift; vendored files are third-party build output. upstreamPublished: npm build output the fork ships unchanged, checked byte-equal to the pinned meshcentral@1.2.5 package.",
   "builders": {
     "viewer-min": {
-      "script": "scripts/build-viewer-min.js",
+      "script": "deploy/scripts/build-viewer-min.js",
       "args": [
         "--check"
       ],
@@ -11,7 +11,7 @@
       ]
     },
     "desktop-audio-control": {
-      "script": "scripts/build-desktop-audio-control.js",
+      "script": "deploy/scripts/build-desktop-audio-control.js",
       "args": [
         "--check"
       ],
@@ -124,20 +124,6 @@
       "pending": "module-min-copies",
       "producedBy": "Byte copy of agents/modules_meshcore/user-sessions.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
     },
-    "agents/modules_meshcore_min/win-dispatcher.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/win-dispatcher.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/win-dispatcher.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/win-dispatcher.min.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/win-dispatcher.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/win-dispatcher.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
     "agents/modules_meshcore_min/win-registry.js": {
       "state": "no-builder-yet",
       "relation": "copy-of-source",
@@ -211,5 +197,75 @@
   },
   "vendored": {
     "public/scripts/opus-decoder-0.7.11.min.js": "Third-party opus-decoder 0.7.11 release build, shipped with opus-decoder-0.7.11.LICENSE.txt; no source in this repo."
+  },
+  "upstreamPublished": {
+    "agents/meshcmd.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcmd_min/amt-apfclient.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcmd_min/amt-ider.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcmd_min/amt-lme.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcmd_min/amt-mei.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcmd_min/amt-redir-duk.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcmd_min/amt-scanner.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcmd_min/amt-sol.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcmd_min/amt-wsman-duk.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcmd_min/amt-wsman.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcmd_min/amt-xml.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcmd_min/amt.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcmd_min/linux-dhcp.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcmd_min/smbios.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcmd_min/sysinfo.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcmd_min/win-securitycenter.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/amt-apfclient.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/amt-lme.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/amt-manage.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/amt-mei.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/coretranslations.json": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/linux-dhcp.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/monitor-border.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/smbios.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/sysinfo.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/util-agentlog.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/wifi-scanner-windows.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/wifi-scanner.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/win-console.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/win-deskutils.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/win-info.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/win-securitycenter.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "agents/modules_meshcore_min/win-volumes.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/agent-rdp-0.0.1-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/agent-redir-rtc-0.1.0-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/amt-0.2.0-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/amt-desktop-0.0.2-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/amt-ider-ws-0.0.1-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/amt-redir-ws-0.1.0-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/amt-script-0.2.0-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/amt-setupbin-0.1.0-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/amt-terminal-0.0.2-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/amt-wsman-0.2.0-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/amt-wsman-ws-0.2.0-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/bootstrap-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/chartjs-adapter-moment-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/charts-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/common-0.0.1-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/filesaver.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/fontawesome/all-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/fontawesome/all.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/jquery-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/marked-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/meshcentral-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/moment-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/ol-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/ol3-contextmenu-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/purify-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/qrcode.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/select2.full.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/u2f-api-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/xterm-addon-fit-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/xterm-addon-image-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/xterm-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/zlib-adler32-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/zlib-crc32-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/zlib-inflate-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
+    "public/scripts/zlib-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged"
   }
 }

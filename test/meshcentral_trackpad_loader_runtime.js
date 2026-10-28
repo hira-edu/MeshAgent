@@ -1,4 +1,4 @@
-// Run the trackpad loader block of MeshCentral public/scripts/custom.js in real browsers on
+// Run the trackpad loader block of MeshCentral custom.js (deploy/meshcentral-web) in real browsers on
 // fixtures built from the pinned desktop pages, served from a routed origin so script URLs,
 // localStorage and query strings behave as on the server. Checks that with the flag off nothing
 // is loaded or listened to, that ?trackpadengine= sets the per-browser, per-page flag, that the
@@ -9,7 +9,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { meshcentralRoot } = require('./lib/meshcentral_paths');
+const { meshcentralRoot, wrapperFile } = require('./lib/meshcentral_paths');
 const { fixtures } = require('./meshcentral_trackpad_adapter_runtime.js');
 
 const meshcentral = meshcentralRoot();
@@ -20,7 +20,7 @@ const KINDS = ['default3', 'defaultMobile', 'sharingMobile', 'sharing'];
 const DEFAULT_ON_LINE = /\n  var DEFAULT_ON = \{[^}\n]*\};\n/;
 
 function loaderSource() {
-    const custom = fs.readFileSync(path.join(scripts, 'custom.js'), 'utf8').replace(/\r\n/g, '\n');
+    const custom = fs.readFileSync(wrapperFile('meshcentral-web/public/scripts/custom.js'), 'utf8').replace(/\r\n/g, '\n');
     const start = custom.indexOf('/*\n * Trackpad ("mouse pointer") mode engine loader.');
     const end = custom.indexOf('/*\n * Desktop audio speaker control');
     assert(start >= 0 && end > start, 'trackpad loader block must precede the audio block in custom.js');

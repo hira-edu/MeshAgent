@@ -180,8 +180,11 @@ class FakeRemote:
         env["FAKE_STATE"] = self.state.as_posix()
         # Git bash puts /usr/bin first, so the shims are prepended inside the shell.
         prologue = f'PATH="{self._posix_path(self.shims)}:$PATH"; export PATH\n'
+        # The script goes in on stdin, as "sh -s" receives it over ssh: a long script passed as a
+        # -c argument is cut at the Windows command-line limit.
         completed = subprocess.run(
-            [self.shell, "-c", prologue + self.to_fake(script)],
+            [self.shell, "-s"],
+            input=prologue + self.to_fake(script),
             capture_output=True,
             text=True,
             encoding="utf-8",

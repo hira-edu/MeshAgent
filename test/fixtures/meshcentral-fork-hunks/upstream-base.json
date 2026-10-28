@@ -1,14 +1,53 @@
 {
-  "description": "MeshCentral files that replace an upstream file, checked by test/meshcentral_upstream_base_contract.js against the upstream git tag. enforced: the CRLF-normalised diff must equal upstream-base/<path>.diff exactly. pending-rebase: the file starts from forkBase, not the tag, and still lacks upstream changes; it is reported until flipStage rebases it. Seeded from the three-way comparison forkBase -> 1.2.5 -> fork.",
+  "description": "Files of the MeshCentral fork package that are not byte-equal to the pinned npm meshcentral@1.2.5 (test/lib/meshcentral_upstream_reference.json), checked by test/meshcentral_upstream_base_contract.js. enforced: the CRLF-normalised diff against the reference must equal upstream-base/<path>.diff exactly. pending-rebase: the file starts from forkBase, not 1.2.5, and still lacks upstream changes; it is reported until flipStage rebases it. generated: a derived copy whose content generated-assets.json governs. fork-only: not in the upstream package. removed: upstream package files the fork does not ship. A byte-equal file needs no entry.",
   "defaultUpstreamTag": "1.2.5",
   "files": {
-    "agents/hashagents.js": {
-      "state": "enforced",
-      "reviewed": "Identical to 1.2.5 (empty diff)."
+    "agentcertificatehistory.js": {
+      "state": "fork-only",
+      "reviewed": "Server module that keeps agent certificate history; copy of MeshAgent tools/configure_agent_certificate_history.js (checked equal by agent_certificate_history_configuration_runtime)."
     },
-    "agents/meshcore_diagnostic.js": {
-      "state": "enforced",
-      "reviewed": "Two additions only: a server command handler and console helpers (sendConsoleText, splitArgs, umhctl console command). Upstream did not change the file between 587973e8c and 1.2.5. D9 reverts these edits; the reviewed diff then becomes empty."
+    "agents/meshcore.js": {
+      "state": "pending-rebase",
+      "forkBase": "587973e8c",
+      "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
+      "reviewed": "Not reviewed hunk by hunk yet. Fork areas: native file actions, clipboard rewrite, service/process error reporting, Windows run commands via MeshConsoleBridgeW, win-terminal terminals, upload/download cleanup, desktop audio protocol 20, self-update hardening. Lacks upstream registry tunnel/consent and module split (#8072, #7690), Windows updates, software/printers (#7939), linux-info hang (#7904) and more."
+    },
+    "agents/meshcore.min.js": {
+      "state": "generated",
+      "source": "agents/meshcore.js",
+      "reviewed": "Fork copy of meshcore.js (no minifier yet), with the known C1 drift; replaces upstream's minified core."
+    },
+    "agents/modules_meshcore/clipboard.js": {
+      "state": "fork-only",
+      "reviewed": "Fork agent module served in the cores (deploy.py core map; production data-dir copy)."
+    },
+    "agents/modules_meshcore/desktop-audio.js": {
+      "state": "fork-only",
+      "reviewed": "Fork agent module served in the cores (deploy.py core map; production data-dir copy)."
+    },
+    "agents/modules_meshcore/process-manager.js": {
+      "state": "fork-only",
+      "reviewed": "Fork agent module served in the cores (deploy.py core map; production data-dir copy)."
+    },
+    "agents/modules_meshcore/service-manager.js": {
+      "state": "fork-only",
+      "reviewed": "Fork agent module served in the cores (deploy.py core map; production data-dir copy)."
+    },
+    "agents/modules_meshcore/umhctl.js": {
+      "state": "fork-only",
+      "reviewed": "Fork agent module served in the cores (deploy.py core map; production data-dir copy)."
+    },
+    "agents/modules_meshcore/user-sessions.js": {
+      "state": "fork-only",
+      "reviewed": "Fork agent module served in the cores (deploy.py core map; production data-dir copy)."
+    },
+    "agents/modules_meshcore/win-registry.js": {
+      "state": "fork-only",
+      "reviewed": "Fork agent module served in the cores (deploy.py core map; production data-dir copy)."
+    },
+    "agents/modules_meshcore/win-system-paths.js": {
+      "state": "fork-only",
+      "reviewed": "Fork agent module served in the cores (deploy.py core map; production data-dir copy)."
     },
     "agents/modules_meshcore/win-terminal.js": {
       "state": "enforced",
@@ -18,33 +57,101 @@
       "state": "enforced",
       "reviewed": "Fork replaces the upstream PseudoConsole implementation with module.exports = require('win-terminal') and a new copyright line. Upstream did not change the file between 587973e8c and 1.2.5."
     },
+    "agents/modules_meshcore_min/clipboard.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/clipboard.min.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/desktop-audio.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/desktop-audio.min.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/process-manager.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/process-manager.min.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/service-manager.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/service-manager.min.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/umhctl.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/user-sessions.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/user-sessions.min.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/win-registry.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/win-registry.min.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/win-system-paths.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/win-system-paths.min.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/win-terminal.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/win-terminal.min.js": {
+      "state": "generated",
+      "source": "agents/modules_meshcore/win-terminal.js",
+      "reviewed": "Byte copy of the fork win-terminal.js (no module minifier yet); replaces upstream's minified module."
+    },
+    "agents/modules_meshcore_min/win-virtual-terminal.js": {
+      "state": "fork-only",
+      "reviewed": "Byte copy of the fork module for minifycore (no module minifier yet; generated-assets.json module-min-copies)."
+    },
+    "agents/modules_meshcore_min/win-virtual-terminal.min.js": {
+      "state": "generated",
+      "source": "agents/modules_meshcore/win-virtual-terminal.js",
+      "reviewed": "Byte copy of the fork win-virtual-terminal.js (no module minifier yet); replaces upstream's minified module."
+    },
     "agents/recoverycore.js": {
       "state": "enforced",
       "reviewed": "Fork work only: native file actions (nativeFileAction), Windows JavaScript self-update disabled, SHA-384 required, agentupdatefailed reporting, staged-update error handling, transfer cleanup, recovery run commands. The only upstream change between 587973e8c and 1.2.5 (a comment typo, formated -> formatted) is already present."
     },
-    "agents/tinycore.js": {
-      "state": "enforced",
-      "reviewed": "Adds the umhctl console command and lists it in help. Upstream did not change the file between 587973e8c and 1.2.5. D9 reverts this edit; the reviewed diff then becomes empty."
-    },
     "macosinstaller.js": {
       "state": "enforced",
       "reviewed": "1.2.5 plus 18 added lines: the installer asks for the Screen Sharing VNC password and stores it in vncrelay.secret (root-only), and the uninstaller removes that file. No upstream line is removed."
-    },
-    "public/scripts/agent-redir-ws-0.1.1.js": {
-      "state": "enforced",
-      "reviewed": "Protocol-2 connect deferral (xxStateChange(3) skipped for desktop) and the generated desktop audio control block appended by scripts/build-desktop-audio-control.js. Upstream did not change the file between 587973e8c and 1.2.5."
-    },
-    "agents/meshcore.js": {
-      "state": "pending-rebase",
-      "forkBase": "587973e8c",
-      "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
-      "reviewed": "Not reviewed hunk by hunk yet. Fork areas: native file actions, clipboard rewrite, service/process error reporting, Windows run commands via MeshConsoleBridgeW, win-terminal terminals, upload/download cleanup, desktop audio protocol 20, self-update hardening. Lacks upstream registry tunnel/consent and module split (#8072, #7690), Windows updates, software/printers (#7939), linux-info hang (#7904) and more."
     },
     "meshagent.js": {
       "state": "pending-rebase",
       "forkBase": "587973e8c",
       "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
       "reviewed": "Not reviewed hunk by hunk yet. Lacks #8052, #8002, #8016, #8064, #8015, #7799, #7854, #7690, #7934, #7887, #7986 and #7735."
+    },
+    "meshcentral.js": {
+      "state": "enforced",
+      "reviewed": "Production's loader (sha256 68c45084), formerly patched at deploy time by deploy.py. Two changes only: core modules are added with their file mtime as the module version (version_meshcentral_module_loader), and only the preferred .js or .min.js copy of a module is sent; the proxy certificate is fetched with the certurl's own HTTPS hostname as SNI (align_proxy_certificate_sni)."
     },
     "meshctrl.js": {
       "state": "pending-rebase",
@@ -64,17 +171,86 @@
       "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
       "reviewed": "1.2.1 plus one line (2747ad90d). Lacks #8006 rcookie null guard, 1.2.2 isProtocolAllowedByRights and #7671."
     },
+    "public/scripts/THIRD_PARTY_NOTICES.txt": {
+      "state": "fork-only",
+      "reviewed": "Third-party notices for the trackpad engine, published next to it."
+    },
+    "public/scripts/agent-desktop-0.0.2-min.js": {
+      "state": "generated",
+      "source": "public/scripts/agent-desktop-0.0.2.js",
+      "reviewed": "uglify-js build of the fork viewer (deploy/scripts/build-viewer-min.js)."
+    },
     "public/scripts/agent-desktop-0.0.2.js": {
       "state": "pending-rebase",
       "forkBase": "1.2.1",
       "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
       "reviewed": "Not reviewed hunk by hunk yet. Lacks #8040 (_altGrDeferredDown; ControlLeftKc in pressedKeys on an array)."
+    },
+    "public/scripts/agent-desktop-audio-0.0.1.js": {
+      "state": "fork-only",
+      "reviewed": "Fork desktop audio player loaded by custom.js."
+    },
+    "public/scripts/agent-desktop-trackpad-0.0.1.js": {
+      "state": "fork-only",
+      "reviewed": "Fork trackpad engine, controller or page adapter (Apache-2.0/BSD-3 attribution in THIRD_PARTY_NOTICES.txt)."
+    },
+    "public/scripts/agent-desktop-trackpad-controller-0.0.1.js": {
+      "state": "fork-only",
+      "reviewed": "Fork trackpad engine, controller or page adapter (Apache-2.0/BSD-3 attribution in THIRD_PARTY_NOTICES.txt)."
+    },
+    "public/scripts/agent-desktop-trackpad-default3-0.0.1.js": {
+      "state": "fork-only",
+      "reviewed": "Fork trackpad engine, controller or page adapter (Apache-2.0/BSD-3 attribution in THIRD_PARTY_NOTICES.txt)."
+    },
+    "public/scripts/agent-desktop-trackpad-mobile-0.0.1.js": {
+      "state": "fork-only",
+      "reviewed": "Fork trackpad engine, controller or page adapter (Apache-2.0/BSD-3 attribution in THIRD_PARTY_NOTICES.txt)."
+    },
+    "public/scripts/agent-desktop-trackpad-sharing-0.0.1.js": {
+      "state": "fork-only",
+      "reviewed": "Fork trackpad engine, controller or page adapter (Apache-2.0/BSD-3 attribution in THIRD_PARTY_NOTICES.txt)."
+    },
+    "public/scripts/agent-desktop-trackpad-sharing-mobile-0.0.1.js": {
+      "state": "fork-only",
+      "reviewed": "Fork trackpad engine, controller or page adapter (Apache-2.0/BSD-3 attribution in THIRD_PARTY_NOTICES.txt)."
+    },
+    "public/scripts/agent-redir-ws-0.1.1-min.js": {
+      "state": "generated",
+      "source": "public/scripts/agent-redir-ws-0.1.1.js",
+      "reviewed": "Upstream min plus the fork's protocol-2 connect deferral edit and the generated desktop audio block."
+    },
+    "public/scripts/agent-redir-ws-0.1.1.js": {
+      "state": "enforced",
+      "reviewed": "Protocol-2 connect deferral (xxStateChange(3) skipped for desktop) and the generated desktop audio control block appended by deploy/scripts/build-desktop-audio-control.js. Upstream did not change the file between 587973e8c and 1.2.5."
+    },
+    "public/scripts/opus-decoder-0.7.11.LICENSE.txt": {
+      "state": "fork-only",
+      "reviewed": "Vendored opus-decoder 0.7.11 release build and its licence, used by the desktop audio player."
+    },
+    "public/scripts/opus-decoder-0.7.11.min.js": {
+      "state": "fork-only",
+      "reviewed": "Vendored opus-decoder 0.7.11 release build and its licence, used by the desktop audio player."
     }
   },
+  "removed": {
+    "agents/MeshCentralAssistant.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
+    "agents/MeshCentralRouter.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
+    "agents/MeshCentralRouterCmd.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
+    "agents/MeshCentralSatellite.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
+    "agents/MeshService.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
+    "agents/MeshService64.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
+    "agents/MeshServiceARM64.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
+    "agents/agents-feb2026/MeshService.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
+    "agents/agents-feb2026/MeshService64.pdb": "Windows debug symbols: the fork ships no .pdb (D3).",
+    "agents/agents-feb2026/MeshServiceARM64.pdb": "Windows debug symbols: the fork ships no .pdb (D3)."
+  },
   "excluded": {
-    "public/scripts/custom.js": "Out of scope by operator decision (SSOT rule 8): carried byte for byte, never audited or edited, so it is not opened by this contract.",
-    ".gitignore": "Wrapper repository metadata, not part of the served package. Stage 1 replaces it with the fork root's own file.",
-    "package.json": "Wrapper manifest (meshcentral-deploy) that installs meshcentral@1.2.5 as a dependency; it is not copied over the package. Moves under deploy/ at Stage 1 (D1).",
-    "package-lock.json": "Wrapper lockfile for package.json above. Moves under deploy/ at Stage 1 (D1)."
+    "public/scripts/custom.js": "Out of scope by operator decision (SSOT rule 8): never opened by this contract. The package copy is npm's empty stub; the served custom.js is deploy/meshcentral-web/public/scripts/custom.js."
+  },
+  "excludedPaths": {
+    "deploy/**": "The deployment wrapper (D1), not part of the package.",
+    "plugins/**": "plugins/nativeruntime is published to meshcentral-data/plugins by deploy.py, not shipped in the package (npm files has no plugins).",
+    ".github/**": "Repository workflows and templates, not part of the package.",
+    ".gitattributes": "Repository metadata (D4), not part of the package."
   }
 }

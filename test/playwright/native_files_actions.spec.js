@@ -1,6 +1,6 @@
 const path = require('path');
 const { test, expect } = require('playwright/test');
-const { forkFile } = require('../lib/meshcentral_paths');
+const { wrapperFile } = require('../lib/meshcentral_paths');
 
 test('Files buttons send literal native requests and display agent outcomes', async ({ page }) => {
     await page.setContent('<div id="p13rightOfButtons"></div><input type="checkbox" name="fd" value="0" file="3" checked>');
@@ -15,7 +15,8 @@ test('Files buttons send literal native requests and display agent outcomes', as
         window.meshserver = { send: () => { throw new Error('Files execution must not use runcommands'); } };
     });
     page.on('dialog', dialog => dialog.accept());
-    await page.addScriptTag({ path: forkFile('public/scripts/custom.js') });
+    // custom.js lives in the deployment wrapper since Stage 1 (the package copy is npm's empty stub).
+    await page.addScriptTag({ path: wrapperFile('meshcentral-web/public/scripts/custom.js') });
     await page.locator('#mc-files-run-user').click();
     await page.locator('#mc-files-run-privileged').click();
     const requests = await page.evaluate(() => window.requests);

@@ -7,10 +7,11 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
-const { meshcentralRoot, installedPackageDir } = require('./lib/meshcentral_paths');
+const { meshcentralRoot, upstreamPackageDir } = require('./lib/meshcentral_paths');
 
 const scriptsDir = path.join(meshcentralRoot(), 'public', 'scripts');
-const viewsDir = path.join(installedPackageDir().dir, 'views');
+// Stock upstream views, not the installed package: since Stage 1 the installed package is the fork.
+const viewsDir = path.join(upstreamPackageDir(), 'views');
 const PINNED_MESHCENTRAL = '1.2.5';
 
 function hex(packet) { return packet.map(b => b.toString(16).padStart(2, '0')).join(''); }
