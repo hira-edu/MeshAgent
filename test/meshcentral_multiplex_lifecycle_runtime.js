@@ -31,11 +31,11 @@ function runOnce() { const pending = timers.filter(t => !t.cleared && !t.interva
 
 function makeParent(opts) {
     opts = opts || {};
-    const writes = [], opens = [], closedFds = [], events = [];
+    const writes = [], opens = [], closedFds = [], events = [], debugLines = [];
     const parent = {
         trafficStats: { desktopMultiplex: { sessions: 0 } }, relaySessionCount: 0, relaySessionErrorCount: 0,
         parent: {
-            args: {}, debug() {}, DispatchEvent(targets, source, event) { events.push({ targets, event }); }, AddEventDispatch() {}, RemoveAllEventDispatch() {},
+            args: {}, debug(category, text) { debugLines.push(category + ': ' + text); }, DispatchEvent(targets, source, event) { events.push({ targets, event }); }, AddEventDispatch() {}, RemoveAllEventDispatch() {},
             decodeCookie() { return { ruserid: 'user/test/u', nodeid: 'node/test/device' }; },
             fs: {
                 mkdirSync() {}, open(f, m, cb) { opens.push({ f, cb }); if (opts.openSync) { cb(null, 9); } },
@@ -48,7 +48,7 @@ function makeParent(opts) {
         db: { Get(id, cb) { if (opts.dbGet) { opts.dbGet(id, cb); } else { cb(null, [{ meshid: 'mesh/test/group', name: 'test', icon: 1 }]); } }, SetUser() {} },
         users: {}, wsagents: {}, meshes: {}, desktoprelays: {}, userGroups: {}
     };
-    return { parent, writes, opens, closedFds, events };
+    return { parent, writes, opens, closedFds, events, debugLines };
 }
 
 function fakeWs() {
@@ -193,6 +193,18 @@ const tests = {
         assert.strictEqual(mux.recordingFile, null);
         assert.deepStrictEqual(closedFds, [9]);
         assert.strictEqual(events.filter(e => /write error/.test(e.event.msg || '')).length, 1);
+    },
+    'screen size packets are not debug-logged one by one'() {
+        const { parent, debugLines } = makeParent();
+        let mux = null;
+        sandbox.CreateDesktopMultiplexor(parent, { id: '' }, 'node/test/device', 'sess', m => { mux = m; });
+        const viewer = recordingViewer(mux);
+        mux.addPeer(viewer);
+        runOnce();
+        debugLines.length = 0;
+        for (let i = 0; i < 50; i++) { mux.processAgentData(Buffer.from([0, 7, 0, 8, 0, 16, 0, (i % 2) ? 32 : 16])); }
+        assert.deepStrictEqual(debugLines, [], 'screen packets, resized or not, add no debug lines');
+        assert.strictEqual(mux.height, 32, 'the last packet (32 high) is applied');
     },
     'desktop audio availability reaches current viewers and viewers that join later'() {
         const { parent } = makeParent();
