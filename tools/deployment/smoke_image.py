@@ -1,15 +1,14 @@
 """Boot the exact published image against disposable data before promotion, and prove its identity.
 
 Image mode (CI): RELEASE_IMAGE=<registry digest or local image ID> python smoke_image.py
-    Boots the image read-only with the production NODE_OPTIONS preload of the tracked
-    harden-image-size.js, restarts it against the persisted disposable data, then runs the
-    smoke_checks assertions against the release manifest inside the image.
+    Boots the image read-only as production runs it (no NODE_OPTIONS preload), restarts it against
+    the persisted disposable data, then runs the smoke_checks assertions against the release
+    manifest inside the image.
 
-Duplicate-server mode: python smoke_image.py --server-url URL --install-root DIR --manifest FILE
-    --server-log FILE, with SMOKE_USERNAME and SMOKE_PASSWORD set for an account on that server.
-    Runs the same assertions against an already running local duplicate server. Its config must
-    define the redirect {"release-smoke-version": "~showversion"} in the default domain, and it must
-    be started with the same NODE_OPTIONS preload, writing its output to --server-log.
+Duplicate-server mode: python smoke_image.py --server-url URL --install-root DIR --manifest FILE,
+    with SMOKE_USERNAME and SMOKE_PASSWORD set for an account on that server. Runs the same
+    assertions against an already running local duplicate server. Its config must define the
+    redirect {"release-smoke-version": "~showversion"} in the default domain.
 """
 import argparse
 import hashlib
@@ -29,9 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import smoke_checks  # noqa: E402
 
 INSTALL_ROOT = '/opt/meshcentral'
-MITIGATION_SOURCE = Path(__file__).resolve().parent / 'harden-image-size.js'
-MITIGATION_TARGET = INSTALL_ROOT + '/bin/harden-image-size.js'
-MANIFEST = INSTALL_ROOT + '/release-overrides/manifest.json'
+MANIFEST = INSTALL_ROOT + '/release/manifest.json'
 SMOKE_USER = 'release-smoke'
 
 
@@ -75,12 +72,31 @@ class ContainerFiles:
         return subprocess.run(['docker', 'exec', self.name, 'test', '-e', INSTALL_ROOT + '/' + relative],
                               check=False).returncode == 0
 
-    def sha256(self, relative):
-        output = run('docker', 'exec', self.name, 'sha256sum', INSTALL_ROOT + '/' + relative, capture=True)
-        return output.split()[0]
+    def digest(self, relative):
+        path = INSTALL_ROOT + '/' + relative
+        size = int(run('docker', 'exec', self.name, 'stat', '--format=%s', path, capture=True))
+        return size, run('docker', 'exec', self.name, 'sha384sum', path, capture=True).split()[0]
 
     def read(self, relative):
         return run('docker', 'exec', self.name, 'cat', INSTALL_ROOT + '/' + relative, capture=True)
+
+
+class LocalFiles:
+    """Answers smoke_checks file questions from a local install root (duplicate-server mode)."""
+
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def exists(self, relative):
+        return (self.root / relative).exists()
+
+    def read(self, relative):
+        return (self.root / relative).read_text(encoding='utf-8')
+
+    def digest(self, relative):
+        with (self.root / relative).open('rb') as stream:
+            data = stream.read()
+        return len(data), hashlib.sha384(data).hexdigest()
 
 
 def smoke_image(image):
@@ -93,8 +109,6 @@ def smoke_image(image):
         run('docker', 'pull', image)
     else:
         raise ValueError('Smoke testing requires an immutable registry digest or local image ID')
-    if not MITIGATION_SOURCE.is_file():
-        raise ValueError('Tracked image-size mitigation is missing: ' + str(MITIGATION_SOURCE))
     with tempfile.TemporaryDirectory(prefix='meshcentral-smoke-') as temporary:
         root = Path(temporary)
         manifest = image_manifest(image, root)
@@ -111,10 +125,7 @@ def smoke_image(image):
         mounts = ['--mount', 'type=bind,src=' + str(root / 'data') + ',dst=' + INSTALL_ROOT + '/meshcentral-data',
                   '--mount', 'type=bind,src=' + str(root / 'files') + ',dst=' + INSTALL_ROOT + '/meshcentral-files',
                   '--mount', 'type=bind,src=' + str(root / 'backups') + ',dst=' + INSTALL_ROOT + '/meshcentral-backups',
-                  '--mount', 'type=bind,src=' + str(root / 'recordings') + ',dst=' + INSTALL_ROOT + '/meshcentral-recordings',
-                  # The production preload (release_manager.start), from the tracked file.
-                  '--mount', 'type=bind,src=' + str(MITIGATION_SOURCE) + ',dst=' + MITIGATION_TARGET + ',readonly',
-                  '--env', 'NODE_OPTIONS=--require=' + MITIGATION_TARGET]
+                  '--mount', 'type=bind,src=' + str(root / 'recordings') + ',dst=' + INSTALL_ROOT + '/meshcentral-recordings']
         hardening = ['--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges:true',
                      '--tmpfs', '/tmp:rw,nosuid,nodev,size=128m']
         try:
@@ -128,11 +139,8 @@ def smoke_image(image):
             # Docker may reassign an ephemeral published port after restart.
             port = wait_ready(name, 45, 'Image restart did not become ready')
             files = ContainerFiles(name)
-            logs = subprocess.run(['docker', 'logs', name], check=True, capture_output=True, text=True)
             expected = smoke_checks.run_checks(
-                manifest, smoke_checks.Server('http://127.0.0.1:' + port), (SMOKE_USER, password),
-                logs.stdout + logs.stderr, files.read(smoke_checks.PACKAGE_DIR + '/package.json'),
-                files.exists, files.sha256)
+                manifest, smoke_checks.Server('http://127.0.0.1:' + port), (SMOKE_USER, password), files)
             print('Exact release digest passed boot and restart readiness and identity checks: MeshCentral ' +
                   expected['version'] + ', fork ' + expected['forkRevision'])
         finally:
@@ -144,25 +152,14 @@ def smoke_image(image):
                             '-c', 'find /fixture -mindepth 1 -delete'], check=False)
 
 
-def smoke_server(server_url, install_root, manifest_path, server_log):
+def smoke_server(server_url, install_root, manifest_path):
     """Run the release assertions against an already running duplicate server."""
     credentials = (os.environ.get('SMOKE_USERNAME', ''), os.environ.get('SMOKE_PASSWORD', ''))
     if not all(credentials):
         raise ValueError('SMOKE_USERNAME and SMOKE_PASSWORD must name an account on the duplicate server')
-    root = Path(install_root)
-
-    def exists(relative):
-        return (root / relative).exists()
-
-    def sha256(relative):
-        with (root / relative).open('rb') as stream:
-            return hashlib.file_digest(stream, 'sha256').hexdigest()
-
     manifest = json.loads(Path(manifest_path).read_text(encoding='utf-8'))
-    package_json = (root / smoke_checks.PACKAGE_DIR / 'package.json').read_text(encoding='utf-8')
-    log_text = Path(server_log).read_text(encoding='utf-8', errors='replace')
-    expected = smoke_checks.run_checks(manifest, smoke_checks.Server(server_url), credentials, log_text,
-                                       package_json, exists, sha256)
+    expected = smoke_checks.run_checks(manifest, smoke_checks.Server(server_url), credentials,
+                                       LocalFiles(install_root))
     print('Duplicate server passed identity checks: MeshCentral ' + expected['version'] + ', fork ' +
           expected['forkRevision'])
 
@@ -172,12 +169,11 @@ def main(argv=None):
     parser.add_argument('--server-url', help='duplicate-server mode: base URL of the running server')
     parser.add_argument('--install-root', type=Path, help='duplicate-server mode: folder holding node_modules and meshcentral-data')
     parser.add_argument('--manifest', type=Path, help='duplicate-server mode: the release manifest.json to assert')
-    parser.add_argument('--server-log', type=Path, help='duplicate-server mode: the server output since its start')
     args = parser.parse_args(argv)
-    server_mode = (args.server_url, args.install_root, args.manifest, args.server_log)
+    server_mode = (args.server_url, args.install_root, args.manifest)
     if any(server_mode):
         if not all(server_mode):
-            parser.error('duplicate-server mode needs --server-url, --install-root, --manifest and --server-log')
+            parser.error('duplicate-server mode needs --server-url, --install-root and --manifest')
         smoke_server(*server_mode)
     else:
         smoke_image(os.environ['RELEASE_IMAGE'])

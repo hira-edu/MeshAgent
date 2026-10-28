@@ -14,13 +14,15 @@ systemd, SSH, or production endpoints. Linux is needed to exercise real POSIX
 permissions and directory fsync; Windows fixtures stub only POSIX-only APIs.
 `ci_release_fork_safety_test.py` covers the controller behaviour described in
 `docs/DEPLOYMENT.md`: the `reviewed_versions` policy and the
-`install_controller.py --upgrade` migration, manifest-only agent seeding across
-promotion and recovery, the shadow-copy check and the host recovery snapshot,
-installation and start-time checks of the image-size mitigation, the smoke
-assertions against fixture pages, and the Docker build-context rules. Its
-`MitigationShimTests` run `harden-image-size.js` under `node` against stand-in
-`image-size` packages and are skipped when `node` is absent. Two symlink cases
-are skipped on Windows hosts that cannot create symlinks.
+`install_controller.py --upgrade` migration, tarball-only releases (no overlay
+mounts or seeded agent folders), the shadow-copy check (including the forbidden
+`agentbuilds` folder) and the host recovery snapshot,
+the retired image-size preload (no preload started or required, the schema-3
+configuration migration, and the legacy host preload moved aside only after a
+committed promotion), the smoke assertions against fixture pages and installed
+trees, the Dockerfile and its build-context rules, and `release_image.js`'s
+pack-against-lock check (run under `node`; skipped when `node` is absent). Symlink cases are skipped on Windows hosts that cannot
+create symlinks.
 `ci_release_agent_builds_test.py` covers `tools/deployment/agent_build_release.py`
 against an in-memory release store and a stub HTTP opener: the release name
 derived from the pins, fetch refusing a missing token, an unreadable store, a

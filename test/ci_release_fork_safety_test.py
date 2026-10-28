@@ -1,8 +1,9 @@
 """Fork-safety tests for the image release tooling; never invoke Docker, SSH, systemd, or a live endpoint.
 
-Covers agent seeding (T11), the reviewed-version allowlist (D5/T23), the start-time shadow-copy
-check (G4), the smoke assertions (T22), the tracked image-size mitigation (T24) and the
-image build context (T20).
+Covers tarball-only releases (Stage 4: no overlay mounts, no seeded agent folders; DEP-22, DEP-25,
+PRD-3), the reviewed-version allowlist (D5/T23), the start-time shadow-copy check (G4, N6), the smoke
+assertions (T22), the retired image-size preload (T24, DEP-21), the image build (release_image.js,
+T21) and the image build context (T20).
 """
 import hashlib
 import importlib.util
@@ -42,37 +43,55 @@ DIGEST = 'sha256:' + 'a' * 64
 PREVIOUS = 'sha256:' + 'b' * 64
 SERVICE_ACCOUNT = types.SimpleNamespace(pw_uid=0, pw_gid=0, pw_dir='/nonexistent')
 FORK_REVISION = 'c' * 40
-TRACKED_MITIGATION = DEPLOYMENT / 'harden-image-size.js'
-TRACKED_DROPIN = DEPLOYMENT / '30-harden-image-size.conf'
-# Installed copies use LF whatever the checkout's line endings are.
-MITIGATION_SHA = hashlib.sha256(TRACKED_MITIGATION.read_text(encoding='utf-8').encode('utf-8')).hexdigest()
-FIXTURE_MITIGATION = b'// fixture mitigation\n'
 SCHEMA1_CONFIG = {'image': 'ghcr.io/fixture/release', 'health_url': 'https://fixture.invalid/health.ashx',
                   'meshcentral_version': '1.2.5', 'enable_fleet_update': False}
+# A schema-2 configuration as install_controller wrote it while the image-size preload was policy.
+SCHEMA2_CONFIG = {'schema': 2, 'image': 'ghcr.io/fixture/release', 'health_url': 'https://fixture.invalid/health.ashx',
+                  'reviewed_versions': ['1.2.5'], 'enable_fleet_update': False,
+                  'image_size_mitigation_sha256': 'e' * 64}
+CURRENT_CONFIG = {'schema': 3, 'image': 'ghcr.io/fixture/release', 'health_url': 'https://fixture.invalid/health.ashx',
+                  'reviewed_versions': ['1.2.5'], 'enable_fleet_update': False}
+LEGACY_SCRIPT = b'// production harden-image-size.js\n'
+LEGACY_DROPIN = b'[Service]\nEnvironment="NODE_OPTIONS=--require /opt/meshcentral/bin/harden-image-size.js"\n'
 
 
 def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def make_release(directory, files, version='1.2.5', **extra):
-    """Create a release directory with overrides/<member> files and a matching manifest."""
-    overrides = Path(directory) / 'overrides'
-    overrides.mkdir(parents=True)
-    manifest = {'schema': 1, 'meshcentral_version': version, 'mounts': [], 'files': {}}
-    for relative, data in files.items():
-        path = overrides / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        manifest['files'][relative] = sha256(data)
-    manifest.update(extra)
-    (overrides / 'manifest.json').write_text(json.dumps(manifest))
+def sha384(data):
+    return hashlib.sha384(data).hexdigest()
+
+
+AGENT = b'fork agent build'
+CORE_HASH = 'd' * 96
+INTEGRITY = 'sha512-' + 'A' * 86 + '=='
+PACKAGED_COMMIT = 'f' * 40
+AGENT_BUILD = {'repository': 'hira-edu/MeshAgent', 'commit': '3' * 40}
+
+
+def fork_manifest(version='1.3.1', **changes):
+    """A schema-2 release manifest as release_image.js writes it."""
+    manifest = {'schema': 2, 'meshcentral_version': version, 'reviewedUpstreamVersion': version,
+                'forkRevision': FORK_REVISION,
+                'package': {'tarball': 'meshcentral-' + version + '.tgz', 'integrity': INTEGRITY,
+                            'packagedCommit': PACKAGED_COMMIT},
+                'agentBuild': dict(AGENT_BUILD),
+                'agentBinaries': {'4': {'localname': 'MeshService64.exe', 'unsigned': True,
+                                        'path': 'node_modules/meshcentral/agents/MeshService64.exe',
+                                        'size': len(AGENT), 'sha384': sha384(AGENT)}},
+                'agentCoreHashes': {'windows-amt': CORE_HASH},
+                'shadowAllowlist': []}
+    manifest.update(changes)
+    return manifest
+
+
+def make_release(directory, version='1.3.1', **changes):
+    """Create a prepared release directory: <directory>/release/manifest.json, as prepare() copies it."""
+    folder = Path(directory) / 'release'
+    folder.mkdir(parents=True)
+    (folder / 'manifest.json').write_text(json.dumps(fork_manifest(version, **changes)))
     return Path(directory)
-
-
-def runtime_files(runtime):
-    runtime = Path(runtime)
-    return sorted(path.relative_to(runtime).as_posix() for path in runtime.rglob('*') if path.is_file())
 
 
 class FixtureCase(unittest.TestCase):
@@ -89,13 +108,13 @@ class FixtureCase(unittest.TestCase):
         (self.base / 'meshcentral-web').mkdir()
         self.config_path = self.base / 'meshcentral-data/config.json'
         self.config_path.write_text(json.dumps({'settings': {'noagentupdate': True}}))
-        self.config = {'schema': 2, 'image': 'ghcr.io/fixture/release', 'reviewed_versions': ['1.2.5'],
-                       'health_url': 'https://fixture.invalid/health.ashx', 'enable_fleet_update': True,
-                       'image_size_mitigation_sha256': sha256(FIXTURE_MITIGATION)}
-        mitigation = self.base / 'bin/harden-image-size.js'
-        mitigation.parent.mkdir()
-        mitigation.write_bytes(FIXTURE_MITIGATION)
+        self.config = {'schema': 3, 'image': 'ghcr.io/fixture/release', 'reviewed_versions': ['1.3.1'],
+                       'health_url': 'https://fixture.invalid/health.ashx', 'enable_fleet_update': True}
+        # The legacy host preload paths, absent unless a test installs them.
+        self.legacy = (self.base / 'bin/harden-image-size.js',
+                       self.root / 'etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf')
         for target, name, value in ((MANAGER, 'BASE', self.base), (MANAGER, 'STATE', self.state),
+                                    (MANAGER, 'LEGACY_PRELOAD', self.legacy),
                                     (MANAGER, 'pwd', types.SimpleNamespace(getpwnam=lambda name: SERVICE_ACCOUNT))):
             patch = mock.patch.object(target, name, value)
             patch.start()
@@ -107,130 +126,141 @@ class FixtureCase(unittest.TestCase):
     def release_dir(self, digest):
         return self.state / 'releases' / digest.split(':')[1]
 
+    def release(self, digest=DIGEST, version='1.3.1', **changes):
+        return {'digest': digest, 'directory': str(make_release(self.release_dir(digest), version, **changes))}
 
-class AgentSeedingTests(FixtureCase):
-    """T11: runtime agent folders derive only from the release's own manifest."""
 
-    def test_first_promotion_ignores_incumbent_agent_folders(self):
-        for folder, name in (('agents', 'meshagent_osx-arm-64'), ('signedagents', 'svchost_payload.dll'),
-                             ('signedagents', 'MeshService64.exe')):
-            path = self.base / 'meshcentral-data' / folder / name
-            path.parent.mkdir(exist_ok=True)
-            path.write_bytes(b'incumbent ' + name.encode())
-        release = make_release(self.release_dir(DIGEST), {'data/MeshService64.exe': b'exe',
-                                                          'data/MeshService64.msh': b'msh',
-                                                          'signed/MeshService64.exe': b'exe'})
-        runtime = MANAGER.seed_agents(release)
-        self.assertEqual(runtime_files(runtime), ['data/MeshService64.exe', 'data/MeshService64.msh',
-                                                  'signed/MeshService64.exe'])
-        self.assertEqual((runtime / 'signed/MeshService64.exe').read_bytes(), b'exe')
-        MANAGER.verify_agent_runtime(release, runtime)
+def write(path, data=b'x'):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
 
-    def test_promotion_does_not_carry_the_previous_runtime_forward(self):
-        old = make_release(self.release_dir(PREVIOUS), {'data/MeshService64.exe': b'old',
-                                                        'signed/svchost_payload.dll': b'shadow'})
-        old_runtime = MANAGER.seed_agents(old)
-        (old_runtime / 'signed/MeshCmd64.exe').write_bytes(b'server-signed while running')
-        new = make_release(self.release_dir(DIGEST), {'data/MeshService64.exe': b'new'})
-        runtime = MANAGER.seed_agents(new)
-        self.assertEqual(runtime_files(runtime), ['data/MeshService64.exe'])
-        self.assertEqual((runtime / 'data/MeshService64.exe').read_bytes(), b'new')
 
-    def test_excluded_names_are_never_seeded(self):
-        release = make_release(self.release_dir(DIGEST), {'signed/hashagents.json': b'{}',
-                                                          'signed/MasterService.exe': b'm',
-                                                          'signed/MeshService64.exe': b'exe'})
-        self.assertEqual(runtime_files(MANAGER.seed_agents(release)), ['signed/MeshService64.exe'])
+class TarballReleaseTests(FixtureCase):
+    """DEP-22/DEP-25/PRD-3: a release is the image's package; nothing is mounted over it or seeded."""
 
-    def test_tampered_or_nested_seed_member_is_refused(self):
-        release = make_release(self.release_dir(DIGEST), {'data/MeshService64.exe': b'exe'})
-        (release / 'overrides/data/MeshService64.exe').write_bytes(b'tampered')
-        with self.assertRaisesRegex(ValueError, 'digest mismatch: data/MeshService64.exe'):
-            MANAGER.seed_agents(release)
-        nested = make_release(self.release_dir(PREVIOUS), {'signed/sub/MeshService64.exe': b'exe'})
-        with self.assertRaisesRegex(ValueError, 'direct children.*signed/sub/MeshService64.exe'):
-            MANAGER.seed_agents(nested)
+    def setUp(self):
+        super().setUp()
+        self.run_calls = []
+        for name, value in {'run': mock.Mock(side_effect=lambda *args, **kw: self.run_calls.append(args)),
+                            'remove_container': mock.Mock(), 'healthy': mock.Mock(return_value=True)}.items():
+            patch = mock.patch.object(MANAGER, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
 
-    def test_runtime_outside_its_release_is_refused(self):
-        release = make_release(self.release_dir(DIGEST), {'data/MeshService64.exe': b'exe'})
-        with self.assertRaisesRegex(ValueError, 'runtime-\\* folder of its own release'):
-            MANAGER.seed_agents(release, self.root / 'runtime-elsewhere')
+    def docker_run(self):
+        runs = [call for call in self.run_calls if call[:2] == ('docker', 'run')]
+        self.assertEqual(len(runs), 1)
+        return runs[0]
 
-    def test_verify_names_every_runtime_difference(self):
-        release = make_release(self.release_dir(DIGEST), {'data/MeshService64.exe': b'exe',
-                                                          'signed/MeshService64.exe': b'exe'})
-        runtime = MANAGER.seed_agents(release)
-        (runtime / 'signed/svchost_payload.dll').write_bytes(b'planted')
-        (runtime / 'data/MeshService64.exe').write_bytes(b'changed')
-        (runtime / 'signed/MeshService64.exe').unlink()
-        with self.assertRaises(ValueError) as raised:
-            MANAGER.verify_agent_runtime(release, runtime)
-        message = str(raised.exception)
-        self.assertIn('signed/svchost_payload.dll: not in the release manifest', message)
-        self.assertIn('data/MeshService64.exe: sha256 differs', message)
-        self.assertIn('signed/MeshService64.exe: listed in the release manifest but missing', message)
+    def test_the_container_mounts_only_the_persistent_folders(self):
+        MANAGER.start(self.config, self.release())
+        args = self.docker_run()
+        mounts = [args[index + 1] for index, arg in enumerate(args) if arg == '--mount']
+        self.assertEqual(mounts, ['type=bind,src={0},dst={0}'.format(self.base / name) + suffix for name, suffix in (
+            ('meshcentral-data', ''), ('meshcentral-files', ''), ('meshcentral-web', ',readonly'),
+            ('meshcentral-recordings', ''), ('meshcentral-backups', ''))])
+        self.assertTrue(args[-1].endswith('@' + DIGEST))
 
-    def test_deleted_file_stays_deleted_across_promotion_and_recover(self):
-        # Release A shipped a shadow binary; release B removed it. B fails, so recovery restarts A.
-        old = make_release(self.release_dir(PREVIOUS), {'data/MeshService64.exe': b'old'})
-        old_runtime = MANAGER.seed_agents(old)
-        previous = {'digest': PREVIOUS, 'directory': str(old), 'runtime': str(old_runtime)}
-        (self.state / 'active.json').write_text(json.dumps(previous))
-        # A file deleted from the host and from A's runtime while A ran must not return,
-        # and a file the server wrote into A's runtime must not survive recovery.
-        (old_runtime / 'signed/svchost_payload.dll').write_bytes(b'planted while running')
-        host_shadow = self.base / 'meshcentral-data/signedagents/svchost_payload.dll'
-        host_shadow.parent.mkdir()
-        host_shadow.write_bytes(b'shadow')
-        host_shadow.unlink()
-        new = make_release(self.release_dir(DIGEST), {'data/MeshService64.exe': b'new'})
-        calls = []
+    def test_promotion_seeds_no_agent_folders_and_keeps_none_of_the_host_copies_out_of_the_check(self):
+        # The host's signed/data agent folders are no longer replaced by a release runtime: the fork
+        # serves its agents from the package, and any copy left there must pass the shadow check.
+        write(self.base / 'meshcentral-data/signedagents/MeshService64.exe', b'retired signed copy')
+        with mock.patch.object(MANAGER, 'prepare', return_value=make_release(self.release_dir(DIGEST))), \
+                self.assertRaisesRegex(MANAGER.meshcentral_shadow_check.ShadowCopyError,
+                                       'meshcentral-data/signedagents/MeshService64.exe: not in the release'):
+            MANAGER.promote(self.config, DIGEST)
+        self.assertEqual(self.run_calls, [])  # refused before the host service was stopped
+        self.assertFalse((self.state / 'transaction.json').exists())
 
+    def test_a_promoted_release_records_no_agent_runtime(self):
+        with mock.patch.object(MANAGER, 'prepare', return_value=make_release(self.release_dir(DIGEST))):
+            MANAGER.promote(self.config, DIGEST)
+        active = json.loads((self.state / 'active.json').read_text())
+        self.assertEqual(active, {'digest': DIGEST, 'directory': str(self.release_dir(DIGEST))})
+        self.assertEqual(sorted(path.name for path in self.release_dir(DIGEST).iterdir()), ['release'])
+
+    def test_overlay_releases_are_refused(self):
+        folder = self.root / 'overlay'
+        folder.mkdir()
+        legacy = {'schema': 1, 'meshcentral_version': '1.2.5', 'files': {'data-core/meshcore.js': 'a' * 64},
+                  'mounts': [{'source': 'data-core/meshcore.js', 'target': '/opt/meshcentral/meshcentral-data/meshcore.js'}]}
+        for manifest in (legacy, fork_manifest(mounts=[]), fork_manifest(files={})):
+            (folder / 'manifest.json').write_text(json.dumps(manifest))
+            with self.subTest(manifest=sorted(manifest)), self.assertRaisesRegex(ValueError, 'Overlay release refused'):
+                MANAGER.validate_manifest(folder, ['1.2.5', '1.3.1'])
+
+    def test_the_release_folder_holds_only_its_manifest(self):
+        directory = make_release(self.release_dir(DIGEST))
+        MANAGER.validate_manifest(directory / 'release', ['1.3.1'])
+        write(directory / 'release/data/MeshService64.exe', b'seed')
+        with self.assertRaisesRegex(ValueError, 'only a regular manifest.json, found: data, manifest.json'):
+            MANAGER.validate_manifest(directory / 'release', ['1.3.1'])
+
+    def test_unknown_or_missing_manifest_fields_are_refused(self):
+        folder = self.root / 'fields'
+        folder.mkdir()
+        incomplete = fork_manifest()
+        del incomplete['agentBinaries']
+        for manifest, text in ((incomplete, "missing \\['agentBinaries'\\]"),
+                               (fork_manifest(signedAgents={}), "unknown \\['signedAgents'\\]"),
+                               (fork_manifest(schema=3), 'Unsupported release manifest schema: 3')):
+            (folder / 'manifest.json').write_text(json.dumps(manifest))
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, text):
+                MANAGER.validate_manifest(folder, ['1.3.1'])
+
+    def test_a_linked_release_manifest_is_refused(self):
+        directory = make_release(self.release_dir(DIGEST))
+        manifest = directory / 'release/manifest.json'
+        target = write(self.root / 'elsewhere.json', manifest.read_bytes())
+        manifest.unlink()
+        try:
+            manifest.symlink_to(target)
+        except OSError as error:
+            self.skipTest('Symlinks are unavailable: ' + str(error))
+        with self.assertRaisesRegex(ValueError, 'only a regular manifest.json'):
+            MANAGER.validate_manifest(directory / 'release', ['1.3.1'])
+
+    def test_prepare_extracts_the_image_release_folder(self):
         def run(*args, capture=False):
-            calls.append(args)
-            if args[:2] == ('docker', 'run') and args[-1].endswith(DIGEST):
-                raise RuntimeError('candidate start')
+            self.run_calls.append(args)
+            if args[:2] == ('docker', 'cp'):
+                make_release(Path(args[3]).parent)
             return ''
 
-        with mock.patch.object(MANAGER, 'run', side_effect=run), \
-                mock.patch.object(MANAGER, 'prepare', return_value=new), \
-                mock.patch.object(MANAGER, 'remove_container'), \
-                mock.patch.object(MANAGER, 'healthy', return_value=True):
-            with self.assertRaisesRegex(RuntimeError, 'candidate start'):
-                MANAGER.promote(self.config, DIGEST)
-        self.assertEqual(json.loads((self.state / 'active.json').read_text()), previous)
-        self.assertTrue(calls[-1][-1].endswith(PREVIOUS))
-        self.assertEqual(runtime_files(old_runtime), ['data/MeshService64.exe'])
-        self.assertFalse(host_shadow.exists())
-        candidate_runtimes = [path for path in new.iterdir() if path.name.startswith('runtime-')]
-        self.assertEqual([runtime_files(path) for path in candidate_runtimes], [['data/MeshService64.exe']])
-
-
-def write_manifest_fixture(root, version='1.2.5', **extra):
-    """A minimal release overrides folder for validate_manifest."""
-    root = Path(root)
-    (root / 'data-core').mkdir(parents=True, exist_ok=True)
-    (root / 'data-core/meshcore.js').write_bytes(b'code')
-    manifest = {'schema': 1, 'meshcentral_version': version,
-                'files': {'data-core/meshcore.js': sha256(b'code')},
-                'mounts': [{'source': 'data-core/meshcore.js',
-                            'target': str(MANAGER.BASE / 'meshcentral-data') + '/meshcore.js'}]}
-    manifest.update(extra)
-    (root / 'manifest.json').write_text(json.dumps(manifest))
-    return root
+        MANAGER.run.side_effect = run
+        with mock.patch.object(MANAGER.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)):
+            directory = MANAGER.prepare(self.config, DIGEST)
+        copy = [call for call in self.run_calls if call[:2] == ('docker', 'cp')][0]
+        self.assertTrue(copy[2].endswith(':/opt/meshcentral/release'))
+        self.assertEqual(directory, self.release_dir(DIGEST))
+        self.assertTrue((directory / 'release/manifest.json').is_file())
 
 
 class ConfigPolicyTests(unittest.TestCase):
     """D5/T23: the controller keeps an allowlist of reviewed versions."""
 
     def test_schema1_config_migrates_to_an_allowlist_of_its_single_version(self):
-        migrated = MANAGER.migrate_config(SCHEMA1_CONFIG, MITIGATION_SHA)
-        self.assertEqual(migrated, {'schema': 2, 'image': SCHEMA1_CONFIG['image'],
-                                    'health_url': SCHEMA1_CONFIG['health_url'],
-                                    'reviewed_versions': ['1.2.5'], 'enable_fleet_update': False,
-                                    'image_size_mitigation_sha256': MITIGATION_SHA})
-        self.assertEqual(MANAGER.migrate_config(migrated, MITIGATION_SHA), migrated)
+        migrated = MANAGER.migrate_config(SCHEMA1_CONFIG)
+        self.assertEqual(migrated, CURRENT_CONFIG)
+        self.assertEqual(MANAGER.migrate_config(migrated), migrated)
         self.assertIn('meshcentral_version', SCHEMA1_CONFIG)  # input is not modified
+
+    def test_schema2_config_loses_the_retired_mitigation_digest(self):
+        self.assertEqual(MANAGER.migrate_config(SCHEMA2_CONFIG), CURRENT_CONFIG)
+        self.assertIn('image_size_mitigation_sha256', SCHEMA2_CONFIG)  # input is not modified
+        with self.assertRaisesRegex(ValueError, 'Unsupported release controller configuration schema'):
+            MANAGER.migrate_config(dict(CURRENT_CONFIG, schema=4))
+
+    def test_a_config_that_still_names_the_preload_is_refused_until_migrated(self):
+        # Fail closed: the controller never silently drops the preload policy the operator configured.
+        for config in (SCHEMA2_CONFIG, dict(CURRENT_CONFIG, image_size_mitigation_sha256='e' * 64)):
+            with self.subTest(schema=config['schema']), \
+                    self.assertRaisesRegex(ValueError, 'image_size_mitigation_sha256.*retired image-size preload.*--upgrade'):
+                MANAGER.validate_config(config)
+        without_key = {key: value for key, value in SCHEMA2_CONFIG.items() if key != 'image_size_mitigation_sha256'}
+        with self.assertRaisesRegex(ValueError, 'schema'):
+            MANAGER.validate_config(without_key)
 
     def test_unmigrated_or_mixed_config_is_refused_with_the_migration_command(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -240,58 +270,63 @@ class ConfigPolicyTests(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, 'retired single meshcentral_version.*--upgrade'):
                 MANAGER.load_config()
         with self.assertRaisesRegex(ValueError, 'mixes meshcentral_version'):
-            MANAGER.migrate_config(dict(SCHEMA1_CONFIG, reviewed_versions=['1.2.6']), MITIGATION_SHA)
+            MANAGER.migrate_config(dict(SCHEMA1_CONFIG, reviewed_versions=['1.2.6']))
 
     def test_reviewed_versions_must_be_an_explicit_list_of_exact_versions(self):
-        config = MANAGER.migrate_config(SCHEMA1_CONFIG, MITIGATION_SHA)
+        config = MANAGER.migrate_config(SCHEMA1_CONFIG)
         for versions in ([], '1.2.5', ['1.2'], ['1.2.5', '1.2.5'], ['v1.2.5'], ['1.2.*'], None):
             with self.subTest(versions=versions), self.assertRaisesRegex(ValueError, 'reviewed_versions'):
                 MANAGER.validate_config(dict(config, reviewed_versions=versions))
         MANAGER.validate_config(dict(config, reviewed_versions=['1.2.5', '1.2.6', '1.3.0-fork.1']))
-        with self.assertRaisesRegex(ValueError, 'schema'):
-            MANAGER.validate_config(dict(config, schema=3))
-        config.pop('image_size_mitigation_sha256')
-        with self.assertRaisesRegex(ValueError, 'image_size_mitigation_sha256 is missing.*--upgrade'):
-            MANAGER.validate_config(config)
+        for schema in (2, 4):
+            with self.subTest(schema=schema), self.assertRaisesRegex(ValueError, 'schema'):
+                MANAGER.validate_config(dict(config, schema=schema))
+
+
+def write_manifest_fixture(root, version='1.3.1', **changes):
+    """A release folder for validate_manifest."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / 'manifest.json').write_text(json.dumps(fork_manifest(version, **changes)))
+    return root
 
 
 class ManifestVersionTests(unittest.TestCase):
     """D5/T23: each manifest records the version it was reviewed for and its fork revision."""
 
-    def test_old_manifest_is_valid_through_its_recorded_version(self):
+    def test_fork_release_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = write_manifest_fixture(temporary)
-            MANAGER.validate_manifest(root, ['1.2.5', '1.2.6'])
+            MANAGER.validate_manifest(root, ['1.2.5', '1.3.1'])
             self.assertEqual(MANAGER.release_identity(json.loads((root / 'manifest.json').read_text())),
-                             ('1.2.5', '1.2.5', None))
+                             ('1.3.1', '1.3.1', FORK_REVISION))
 
     def test_unreviewed_version_is_refused_with_a_clear_error(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = write_manifest_fixture(temporary, '1.2.7', reviewedUpstreamVersion='1.2.7')
-            with self.assertRaisesRegex(ValueError, r'MeshCentral 1\.2\.7 is not a reviewed version '
-                                                    r'\(reviewed_versions: 1\.2\.5, 1\.2\.6\)'):
-                MANAGER.validate_manifest(root, ['1.2.5', '1.2.6'])
+            root = write_manifest_fixture(temporary, '1.3.2')
+            with self.assertRaisesRegex(ValueError, r'MeshCentral 1\.3\.2 is not a reviewed version '
+                                                    r'\(reviewed_versions: 1\.2\.5, 1\.3\.1\)'):
+                MANAGER.validate_manifest(root, ['1.2.5', '1.3.1'])
 
     def test_reviewed_version_must_match_the_packaged_version(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = write_manifest_fixture(temporary, '1.2.6', reviewedUpstreamVersion='1.2.5')
-            with self.assertRaisesRegex(ValueError, "reviewed for MeshCentral '1.2.5' but packages MeshCentral 1.2.6"):
-                MANAGER.validate_manifest(root, ['1.2.5', '1.2.6'])
+            root = write_manifest_fixture(temporary, '1.3.1', reviewedUpstreamVersion='1.2.5')
+            with self.assertRaisesRegex(ValueError, "reviewed for MeshCentral '1.2.5' but packages MeshCentral 1.3.1"):
+                MANAGER.validate_manifest(root, ['1.2.5', '1.3.1'])
 
     def test_fork_revision_must_be_a_full_commit_sha(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = write_manifest_fixture(temporary, forkRevision=FORK_REVISION, reviewedUpstreamVersion='1.2.5')
-            MANAGER.validate_manifest(root, ['1.2.5'])
-            for revision in ('c' * 39, 'C' * 40, 'main', 40):
+            root = write_manifest_fixture(temporary)
+            for revision in ('c' * 39, 'C' * 40, 'main', 40, None):
                 write_manifest_fixture(temporary, forkRevision=revision)
                 with self.subTest(revision=revision), self.assertRaisesRegex(ValueError, 'forkRevision'):
-                    MANAGER.validate_manifest(root, ['1.2.5'])
+                    MANAGER.validate_manifest(root, ['1.3.1'])
 
     def test_allowlist_must_be_a_list_not_a_substring_match(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = write_manifest_fixture(temporary, '1.2.5')
+            root = write_manifest_fixture(temporary)
             with self.assertRaisesRegex(ValueError, 'reviewed_versions'):
-                MANAGER.validate_manifest(root, '1.2.5-fork.1')
+                MANAGER.validate_manifest(root, '1.3.1-fork.1')
 
 
 class VersionLifecycleTests(FixtureCase):
@@ -299,7 +334,7 @@ class VersionLifecycleTests(FixtureCase):
 
     def setUp(self):
         super().setUp()
-        self.config['reviewed_versions'] = ['1.2.5', '1.2.6']
+        self.config['reviewed_versions'] = ['1.3.1', '1.3.2']
         self.run_calls = []
         self.fail_candidate = False
 
@@ -320,15 +355,13 @@ class VersionLifecycleTests(FixtureCase):
         self.addCleanup(patch.stop)
 
     def promote_previous(self, version):
-        old = make_release(self.release_dir(PREVIOUS), {'data/MeshService64.exe': b'old'}, version)
-        previous = {'digest': PREVIOUS, 'directory': str(old), 'runtime': str(MANAGER.seed_agents(old))}
+        previous = self.release(PREVIOUS, version)
         (self.state / 'active.json').write_text(json.dumps(previous))
         return previous
 
     def test_rollback_to_an_older_reviewed_release_after_a_newer_version_is_allowlisted(self):
-        previous = self.promote_previous('1.2.5')  # written before the identity fields existed
-        make_release(self.release_dir(DIGEST), {'data/MeshService64.exe': b'new'}, '1.2.6',
-                     reviewedUpstreamVersion='1.2.6', forkRevision=FORK_REVISION)
+        previous = self.promote_previous('1.3.1')
+        make_release(self.release_dir(DIGEST), '1.3.2')
         self.fail_candidate = True
         with self.assertRaisesRegex(RuntimeError, 'candidate start'):
             MANAGER.promote(self.config, DIGEST)
@@ -336,22 +369,22 @@ class VersionLifecycleTests(FixtureCase):
         self.assertTrue(self.run_calls[-1][-1].endswith(PREVIOUS))
 
     def test_prepare_refuses_an_unreviewed_release_before_touching_the_service(self):
-        self.promote_previous('1.2.5')
-        make_release(self.release_dir(DIGEST), {'data/MeshService64.exe': b'new'}, '1.2.7')
-        with self.assertRaisesRegex(ValueError, r'1\.2\.7 is not a reviewed version'):
+        self.promote_previous('1.3.1')
+        make_release(self.release_dir(DIGEST), '1.3.3')
+        with self.assertRaisesRegex(ValueError, r'1\.3\.3 is not a reviewed version'):
             MANAGER.promote(self.config, DIGEST)
         self.assertEqual(self.run_calls, [])
         MANAGER.remove_container.assert_not_called()
         self.assertFalse((self.state / 'transaction.json').exists())
 
     def test_recover_refuses_a_previous_release_whose_version_was_withdrawn(self):
-        previous = self.promote_previous('1.2.5')
-        self.config['reviewed_versions'] = ['1.2.6']
+        previous = self.promote_previous('1.3.1')
+        self.config['reviewed_versions'] = ['1.3.2']
         transaction = {'previous': previous, 'candidate': None,
                        'config_backup': str(self.state / 'config-backup.json'),
                        'config_metadata': {'uid': 0, 'gid': 0, 'mode': 0o600}}
         (self.state / 'config-backup.json').write_text(self.config_path.read_text())
-        with self.assertRaisesRegex(ValueError, r'1\.2\.5 is not a reviewed version'):
+        with self.assertRaisesRegex(ValueError, r'1\.3\.1 is not a reviewed version'):
             MANAGER.recover(self.config, transaction)
         self.assertEqual(self.run_calls, [])
 
@@ -377,16 +410,14 @@ class ControllerUpgradeTests(unittest.TestCase):
                      INSTALLER.SHADOW_CHECK: self.shadow_check}
         code = tuple((name, installed[destination], mode) for name, destination, mode in INSTALLER.CODE)
         lock = types.SimpleNamespace(flock=mock.Mock(), LOCK_EX=2, LOCK_NB=4)
-        # An installed mitigation identical to the tracked files (production must be reconciled first).
-        self.mitigation = self.root / 'opt/meshcentral/bin/harden-image-size.js'
-        self.dropin = self.root / 'etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf'
-        for source, destination in ((TRACKED_MITIGATION, self.mitigation), (TRACKED_DROPIN, self.dropin)):
-            destination.parent.mkdir(parents=True)
-            destination.write_bytes(source.read_text(encoding='utf-8').encode('utf-8'))
-        files = ((TRACKED_MITIGATION.name, self.mitigation, False), (TRACKED_DROPIN.name, self.dropin, True))
+        # The 1.2.5 host service's preload, which an upgrade must leave in place for that service.
+        self.legacy = (self.root / 'opt/meshcentral/bin/harden-image-size.js',
+                       self.root / 'etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf')
+        for path, data in zip(self.legacy, (LEGACY_SCRIPT, LEGACY_DROPIN)):
+            path.parent.mkdir(parents=True)
+            path.write_bytes(data)
         patches = [mock.patch.object(INSTALLER, name, value) for name, value in paths.items()]
-        patches += [mock.patch.object(INSTALLER, 'MITIGATION', self.mitigation),
-                    mock.patch.object(INSTALLER, 'MITIGATION_FILES', files),
+        patches += [mock.patch.object(INSTALLER.release_manager, 'LEGACY_PRELOAD', self.legacy),
                     mock.patch.object(INSTALLER.subprocess, 'run'),
                     mock.patch.object(INSTALLER, 'CODE', code), mock.patch.object(INSTALLER, 'fcntl', lock),
                     mock.patch.object(INSTALLER.release_manager, 'STATE', self.state),
@@ -400,8 +431,8 @@ class ControllerUpgradeTests(unittest.TestCase):
     def test_upgrade_migrates_config_keeps_a_backup_and_installs_code(self):
         original = self.config.read_bytes()
         INSTALLER.upgrade()
-        self.assertEqual(json.loads(self.config.read_text()), MANAGER.migrate_config(SCHEMA1_CONFIG, MITIGATION_SHA))
-        INSTALLER.subprocess.run.assert_not_called()  # identical mitigation: nothing installed or reloaded
+        self.assertEqual(json.loads(self.config.read_text()), CURRENT_CONFIG)
+        INSTALLER.subprocess.run.assert_not_called()  # nothing installed into or reloaded for the host service
         backups = list(self.config.parent.glob('meshcentral-deploy.json.pre-upgrade-*'))
         self.assertEqual([path.read_bytes() for path in backups], [original])
         expected = (DEPLOYMENT / 'release_manager.py').read_text(encoding='utf-8')
@@ -429,24 +460,22 @@ class ControllerUpgradeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'No controller configuration'):
             INSTALLER.upgrade()
 
-    def test_upgrade_refuses_a_differing_installed_mitigation_before_changing_anything(self):
-        self.mitigation.write_bytes(b'// edited on the server\n')
-        with self.assertRaisesRegex(ValueError, 'differs from the tracked'):
+    def test_upgrade_removes_the_mitigation_digest_and_leaves_the_host_preload(self):
+        self.config.write_text(json.dumps(SCHEMA2_CONFIG))
+        with mock.patch('sys.stdout', new_callable=lambda: __import__('io').StringIO()) as stdout:
             INSTALLER.upgrade()
-        self.assertEqual(self.paths['CONTROLLER'].read_text(), 'installed before upgrade\n')
-        self.assertEqual(json.loads(self.config.read_text()), SCHEMA1_CONFIG)
+        self.assertEqual(json.loads(self.config.read_text()), CURRENT_CONFIG)
+        self.assertIn('Removed image_size_mitigation_sha256', stdout.getvalue())
+        self.assertEqual([path.read_bytes() for path in self.legacy], [LEGACY_SCRIPT, LEGACY_DROPIN])
+        INSTALLER.subprocess.run.assert_not_called()
+        backups = list(self.config.parent.glob('meshcentral-deploy.json.pre-upgrade-*'))
+        self.assertEqual([json.loads(path.read_text()) for path in backups], [SCHEMA2_CONFIG])
 
     def test_upgrade_refuses_while_another_operation_holds_the_lock(self):
         INSTALLER.fcntl.flock.side_effect = BlockingIOError()
         with self.assertRaisesRegex(RuntimeError, 'operation is running'):
             INSTALLER.upgrade()
         self.assertEqual(json.loads(self.config.read_text()), SCHEMA1_CONFIG)
-
-
-def write(path, data=b'x'):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
-    return path
 
 
 class ShadowCheckTests(unittest.TestCase):
@@ -511,16 +540,34 @@ class ShadowCheckTests(unittest.TestCase):
         self.assertEqual(self.problems({'meshcentral-data/meshcore.js': sha256(b'x')}),
                          ['meshcentral-data/meshcore.js: symbolic link'])
 
-    def test_mounted_paths_are_hidden_and_overlays_replace_host_folders(self):
-        write(self.root / 'meshcentral-data/meshcore.js', b'')  # Docker's mount-point placeholder
-        write(self.root / 'meshcentral-data/signedagents/stale.exe')  # hidden by the runtime mount
-        runtime = self.root / 'runtime/signed'
-        write(runtime / 'MeshService64.exe', b'exe')
-        overlays = {'meshcentral-data/signedagents': runtime}
-        self.assertEqual(self.problems(hidden=['meshcentral-data/meshcore.js'], overlays=overlays),
-                         ['meshcentral-data/signedagents/MeshService64.exe: not in the release shadow allowlist'])
-        self.assertEqual(self.problems({'meshcentral-data/signedagents/MeshService64.exe': sha256(b'exe')},
-                                       hidden=['meshcentral-data/meshcore.js'], overlays=overlays), [])
+    def test_the_upstream_agent_download_cache_must_not_exist(self):
+        # N6: 1.3.1 downloads agents into meshcentral-data/agentbuilds; the fork never reads it.
+        cache = self.root / 'meshcentral-data/agentbuilds'
+        cache.mkdir()
+        expected = ["meshcentral-data/agentbuilds: must not exist: upstream 1.3.1's agent download cache, "
+                    'which the fork never reads; remove it']
+        self.assertEqual(self.problems(), expected)
+        write(cache / 'meshagent_osx-arm-64', b'downloaded')
+        self.assertEqual(self.problems({'meshcentral-data/agentbuilds/meshagent_osx-arm-64': sha256(b'downloaded')}),
+                         expected)
+        with self.assertRaisesRegex(ValueError, 'cannot allow meshcentral-data/agentbuilds/meshagent_osx-arm-64'):
+            SHADOW.parse_allowlist([{'path': 'meshcentral-data/agentbuilds/meshagent_osx-arm-64',
+                                     'sha256': sha256(b'downloaded')}])
+        with self.assertRaisesRegex(SHADOW.ShadowCopyError, '(?s)Cannot record.*agentbuilds: must not exist'):
+            SHADOW.snapshot(self.root)
+
+    def test_provisioning_files_beside_the_agents_shadow_nothing(self):
+        # D14: per-environment .msh files stay in meshcentral-data/agents; the server never reads them.
+        for name in ('MeshService.msh', 'MeshService64.msh', 'MeshServiceARM64.msh', 'WinDiagnosticHost.msh'):
+            write(self.root / 'meshcentral-data/agents' / name, b'MeshName=fixture')
+        self.assertEqual(self.problems(), [])
+        write(self.root / 'meshcentral-data/agents/MeshService64.exe', b'stale 1.2.5 copy')
+        write(self.root / 'meshcentral-data/agents/sub/MeshService64.msh', b'nested')
+        write(self.root / 'meshcentral-data/signedagents/MeshService64.msh', b'signed folder')
+        self.assertEqual(self.problems(), [
+            'meshcentral-data/agents/MeshService64.exe: not in the release shadow allowlist',
+            'meshcentral-data/agents/sub/MeshService64.msh: not in the release shadow allowlist',
+            'meshcentral-data/signedagents/MeshService64.msh: not in the release shadow allowlist'])
 
     def test_missing_install_folder_fails_loudly(self):
         (self.root / 'meshcentral-web').rmdir()
@@ -551,7 +598,7 @@ class ShadowCheckTests(unittest.TestCase):
 
 
 class StartShadowCheckTests(FixtureCase):
-    """G4 runs in start and recover, against the folders as the container sees them."""
+    """G4 runs before promotion and in start and recover, against the host folders the container mounts."""
 
     def setUp(self):
         super().setUp()
@@ -561,28 +608,23 @@ class StartShadowCheckTests(FixtureCase):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def release(self, digest=DIGEST, **extra):
-        directory = make_release(self.release_dir(digest), {'data/MeshService64.exe': b'exe'}, **extra)
-        return {'digest': digest, 'directory': str(directory), 'runtime': str(MANAGER.seed_agents(directory))}
-
     def test_start_refuses_unlisted_shadow_copies_before_running_the_container(self):
         write(self.base / 'meshcentral-data/meshcore.js', b'')
         write(self.base / 'meshcentral-web/views/default3.handlebars')
+        write(self.base / 'meshcentral-data/agentbuilds/MeshService64.exe')
         with self.assertRaises(MANAGER.meshcentral_shadow_check.ShadowCopyError) as raised:
             MANAGER.start(self.config, self.release())
-        self.assertIn('meshcentral-data/meshcore.js: not in the release shadow allowlist', str(raised.exception))
-        self.assertIn('meshcentral-web/views/default3.handlebars:', str(raised.exception))
+        for text in ('meshcentral-data/meshcore.js: not in the release shadow allowlist',
+                     'meshcentral-web/views/default3.handlebars:', 'meshcentral-data/agentbuilds: must not exist'):
+            self.assertIn(text, str(raised.exception))
         self.assertEqual(self.docker_runs, [])
 
-    def test_start_accepts_allowlisted_files_and_paths_covered_by_its_mounts(self):
+    def test_start_accepts_allowlisted_files(self):
         write(self.base / 'meshcentral-web/public/scripts/custom.js', b'custom')
-        write(self.base / 'meshcentral-data/meshcore.js', b'')  # covered by this release's mount
-        directory = make_release(
-            self.release_dir(DIGEST), {'data/MeshService64.exe': b'exe', 'data-core/meshcore.js': b'core'},
-            mounts=[{'source': 'data-core/meshcore.js', 'target': str(self.base / 'meshcentral-data') + '/meshcore.js'}],
-            shadowAllowlist=[{'path': 'meshcentral-web/public/scripts/custom.js', 'sha256': sha256(b'custom')}])
-        release = {'digest': DIGEST, 'directory': str(directory), 'runtime': str(MANAGER.seed_agents(directory))}
-        MANAGER.start(self.config, release)
+        write(self.base / 'meshcentral-data/plugins/nativeruntime/nativeruntime.js', b'plugin')
+        MANAGER.start(self.config, self.release(shadowAllowlist=[
+            {'path': 'meshcentral-web/public/scripts/custom.js', 'sha256': sha256(b'custom')},
+            {'path': 'meshcentral-data/plugins/nativeruntime/nativeruntime.js', 'sha256': sha256(b'plugin')}]))
         self.assertEqual(len(self.docker_runs), 1)
 
     def test_recover_runs_the_check_for_the_previous_release(self):
@@ -596,128 +638,121 @@ class StartShadowCheckTests(FixtureCase):
             MANAGER.recover(self.config, transaction)
         self.assertEqual(self.docker_runs, [])
 
-    def test_allowlist_cannot_contradict_the_release_agent_files(self):
-        release = self.release(shadowAllowlist=[{'path': 'meshcentral-data/agents/MeshService64.exe',
-                                                 'sha256': sha256(b'other')}])
-        with self.assertRaisesRegex(ValueError, 'disagree on meshcentral-data/agents/MeshService64.exe'):
-            MANAGER.start(self.config, release)
-
     def test_malformed_allowlist_is_refused_at_preparation(self):
-        directory = make_release(self.release_dir(DIGEST), {'data/MeshService64.exe': b'exe'},
+        directory = make_release(self.release_dir(DIGEST),
                                  shadowAllowlist=[{'path': 'meshcentral-data/config.json', 'sha256': sha256(b'x')}])
         with self.assertRaisesRegex(ValueError, 'governed folder'):
-            MANAGER.validate_manifest(directory / 'overrides', self.config['reviewed_versions'])
+            MANAGER.validate_manifest(directory / 'release', self.config['reviewed_versions'])
 
 
-class TrackedMitigationTests(unittest.TestCase):
-    """T24: the production image-size mitigation is tracked and installed from the repository."""
-
-    def test_tracked_files_agree_on_the_preload_path(self):
-        dropin = TRACKED_DROPIN.read_text(encoding='utf-8')
-        self.assertIn('Environment="NODE_OPTIONS=--require /opt/meshcentral/bin/harden-image-size.js"', dropin)
-        self.assertEqual(INSTALLER.MITIGATION.as_posix(), '/opt/meshcentral/bin/harden-image-size.js')
-        self.assertEqual((MANAGER.BASE / 'bin/harden-image-size.js').as_posix(), INSTALLER.MITIGATION.as_posix())
-        destinations = {name: destination.as_posix() for name, destination, _ in INSTALLER.MITIGATION_FILES}
-        self.assertEqual(destinations, {
-            'harden-image-size.js': '/opt/meshcentral/bin/harden-image-size.js',
-            '30-harden-image-size.conf': '/etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf'})
-
-    def test_shim_disables_the_unpatched_parsers_and_logs_the_smoke_marker(self):
-        shim = TRACKED_MITIGATION.read_text(encoding='utf-8')
-        self.assertIn("var DISABLE = ['icns', 'jxl', 'jxl-stream', 'heif'];", shim)
-        self.assertIn("'harden-image-size: disabled unpatched parsers: '", shim)
-        self.assertEqual(SMOKE.HARDEN_MARKER, 'harden-image-size: disabled unpatched parsers: icns, jxl, jxl-stream, heif')
-
-
-class MitigationInstallerTests(unittest.TestCase):
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
-        self.mitigation = self.root / 'opt/meshcentral/bin/harden-image-size.js'
-        self.dropin = self.root / 'etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf'
-        files = ((TRACKED_MITIGATION.name, self.mitigation, False), (TRACKED_DROPIN.name, self.dropin, True))
-        for patch in (mock.patch.object(INSTALLER, 'MITIGATION', self.mitigation),
-                      mock.patch.object(INSTALLER, 'MITIGATION_FILES', files),
-                      mock.patch.object(INSTALLER.subprocess, 'run'),
-                      mock.patch.object(INSTALLER.os, 'chown', create=True)):
-            patch.start()
-            self.addCleanup(patch.stop)
-
-    def test_missing_files_are_installed_with_lf_endings_and_systemd_reloads(self):
-        self.assertEqual(INSTALLER.install_mitigation(), MITIGATION_SHA)
-        self.assertEqual(self.mitigation.read_bytes(), TRACKED_MITIGATION.read_text(encoding='utf-8').encode('utf-8'))
-        self.assertNotIn(b'\r\n', self.dropin.read_bytes())
-        INSTALLER.subprocess.run.assert_called_once_with(['systemctl', 'daemon-reload'], check=True)
-
-    def test_identical_installed_files_are_kept_without_a_reload(self):
-        INSTALLER.install_mitigation()
-        INSTALLER.subprocess.run.reset_mock()
-        before = self.mitigation.stat().st_mtime_ns
-        self.assertEqual(INSTALLER.install_mitigation(), MITIGATION_SHA)
-        self.assertEqual(self.mitigation.stat().st_mtime_ns, before)
-        INSTALLER.subprocess.run.assert_not_called()
-
-    def test_a_differing_installed_file_is_refused_and_left_alone(self):
-        self.mitigation.parent.mkdir(parents=True)
-        self.mitigation.write_bytes(b'// locally edited\n')
-        with self.assertRaisesRegex(ValueError, 'harden-image-size.js differs from the tracked'):
-            INSTALLER.install_mitigation()
-        self.assertEqual(self.mitigation.read_bytes(), b'// locally edited\n')
-        self.assertFalse(self.dropin.exists())
-        INSTALLER.subprocess.run.assert_not_called()
-
-    def test_a_missing_tracked_source_is_refused(self):
-        with mock.patch.object(INSTALLER, 'SOURCE', self.root):
-            with self.assertRaisesRegex(ValueError, 'Missing tracked mitigation source'):
-                INSTALLER.install_mitigation()
-
-
-class StartMitigationTests(FixtureCase):
-    """start() preloads exactly the installed mitigation and refuses a missing or changed copy."""
+class RetiredPreloadTests(FixtureCase):
+    """D4/DEP-21: no image-size preload is tracked, installed, mounted or required by a release start."""
 
     def setUp(self):
         super().setUp()
         self.docker_runs = []
-        patch = mock.patch.object(MANAGER, 'run', side_effect=lambda *args, **kw: self.docker_runs.append(args))
+        self.run_calls = []
+
+        def run(*args, capture=False):
+            self.run_calls.append(args)
+            if args[:2] == ('docker', 'run'):
+                self.docker_runs.append(args)
+            return ''
+
+        for name, value in {'run': mock.Mock(side_effect=run), 'remove_container': mock.Mock(),
+                            'healthy': mock.Mock(return_value=True)}.items():
+            patch = mock.patch.object(MANAGER, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.candidate = make_release(self.release_dir(DIGEST))
+        patch = mock.patch.object(MANAGER, 'prepare', return_value=self.candidate)
         patch.start()
         self.addCleanup(patch.stop)
-        directory = make_release(self.release_dir(DIGEST), {'data/MeshService64.exe': b'exe'})
-        self.release = {'digest': DIGEST, 'directory': str(directory), 'runtime': str(MANAGER.seed_agents(directory))}
-        self.mitigation = self.base / 'bin/harden-image-size.js'
 
-    def test_container_preloads_the_mitigation_read_only(self):
-        MANAGER.start(self.config, self.release)
+    def install_legacy_preload(self):
+        for path, data in zip(self.legacy, (LEGACY_SCRIPT, LEGACY_DROPIN)):
+            write(path, data)
+
+    def retired(self):
+        return sorted(path.relative_to(self.state / 'retired-host-preload').as_posix()
+                      for path in (self.state / 'retired-host-preload').rglob('*') if path.is_file())
+
+    def test_no_preload_is_tracked_or_installed(self):
+        for name in ('harden-image-size.js', '30-harden-image-size.conf'):
+            self.assertFalse((DEPLOYMENT / name).exists(), name)
+        self.assertFalse(hasattr(INSTALLER, 'MITIGATION_FILES'))
+        self.assertNotIn('NODE_OPTIONS', (DEPLOYMENT / 'smoke_image.py').read_text(encoding='utf-8').split('"""', 2)[2])
+
+    def test_container_starts_without_node_options_or_a_preload_mount(self):
+        MANAGER.start(self.config, self.release(PREVIOUS))
         args = self.docker_runs[0]
-        self.assertIn('NODE_OPTIONS=--require=' + str(self.mitigation), args)
-        self.assertIn('type=bind,src={0},dst={0},readonly'.format(self.mitigation), args)
+        self.assertFalse([arg for arg in args if 'NODE_OPTIONS' in arg or 'harden-image-size' in arg], args)
 
-    def test_missing_or_changed_mitigation_is_refused(self):
-        self.mitigation.write_bytes(b'// changed\n')
-        with self.assertRaisesRegex(ValueError, 'differs from the copy install_controller.py installed'):
-            MANAGER.start(self.config, self.release)
-        self.mitigation.unlink()
-        with self.assertRaisesRegex(ValueError, 'mitigation .* is missing.*--upgrade'):
-            MANAGER.start(self.config, self.release)
-        self.assertEqual(self.docker_runs, [])
+    def test_first_release_retires_the_host_preload_after_promotion(self):
+        self.install_legacy_preload()
+        with mock.patch('sys.stdout', new_callable=lambda: __import__('io').StringIO()) as stdout:
+            MANAGER.promote(self.config, DIGEST)
+        self.assertEqual(json.loads((self.state / 'active.json').read_text())['digest'], DIGEST)
+        self.assertFalse(any(path.exists() for path in self.legacy))
+        retired = self.retired()
+        self.assertEqual([name.split('/', 1)[1] for name in retired], ['30-harden-image-size.conf', 'harden-image-size.js'])
+        stamp = retired[0].split('/')[0]
+        archive = self.state / 'retired-host-preload' / stamp
+        self.assertEqual((archive / 'harden-image-size.js').read_bytes(), LEGACY_SCRIPT)
+        self.assertEqual((archive / '30-harden-image-size.conf').read_bytes(), LEGACY_DROPIN)
+        for path, data in zip(self.legacy, (LEGACY_SCRIPT, LEGACY_DROPIN)):
+            self.assertIn('Retired the legacy image-size preload: moved ' + str(path) + ' (sha256 ' + sha256(data) + ')',
+                          stdout.getvalue())
+        self.assertEqual(self.run_calls[-1], ('systemctl', 'daemon-reload'))
+        self.assertLess(self.run_calls.index(('systemctl', 'disable', '--now', 'meshcentral')),
+                        self.run_calls.index(('systemctl', 'daemon-reload')))
 
+    def test_a_failed_first_release_restarts_the_host_with_its_preload(self):
+        self.install_legacy_preload()
 
-CORE_HASH = 'd' * 96
+        def fail_candidate(*args, capture=False):
+            self.run_calls.append(args)
+            if args[:2] == ('docker', 'run'):
+                raise RuntimeError('candidate start')
+            return ''
 
+        MANAGER.run.side_effect = fail_candidate
+        with self.assertRaisesRegex(RuntimeError, 'candidate start'):
+            MANAGER.promote(self.config, DIGEST)
+        self.assertEqual([path.read_bytes() for path in self.legacy], [LEGACY_SCRIPT, LEGACY_DROPIN])
+        self.assertIn(('systemctl', 'enable', '--now', 'meshcentral'), self.run_calls)
+        self.assertNotIn(('systemctl', 'daemon-reload'), self.run_calls)
 
-def smoke_manifest(**changes):
-    manifest = {'schema': 1, 'meshcentral_version': '1.2.5', 'reviewedUpstreamVersion': '1.2.5',
-                'forkRevision': FORK_REVISION, 'agentCoreHashes': {'windows-amd64': CORE_HASH},
-                'agentBinaries': {'4': {'localname': 'MeshService64.exe', 'unsigned': True,
-                                        'path': 'node_modules/meshcentral/agents/MeshService64.exe',
-                                        'sha256': sha256(b'agent')}},
-                'files': {}, 'mounts': []}
-    manifest.update(changes)
-    return manifest
+    def test_a_host_without_the_preload_is_left_alone(self):
+        MANAGER.promote(self.config, DIGEST)
+        self.assertNotIn(('systemctl', 'daemon-reload'), self.run_calls)
+        self.assertFalse((self.state / 'retired-host-preload').exists())
+
+    def test_a_linked_preload_is_refused_before_anything_stops(self):
+        target = write(self.root / 'elsewhere.conf', LEGACY_DROPIN)
+        self.legacy[1].parent.mkdir(parents=True)
+        try:
+            self.legacy[1].symlink_to(target)
+        except OSError as error:
+            self.skipTest('Symlinks are unavailable: ' + str(error))
+        with self.assertRaisesRegex(ValueError, 'legacy image-size preload .* is not a regular file'):
+            MANAGER.promote(self.config, DIGEST)
+        self.assertEqual(self.run_calls, [])
+        self.assertFalse((self.state / 'transaction.json').exists())
+
+    def test_a_retirement_failure_keeps_the_promoted_release_and_says_so(self):
+        self.install_legacy_preload()
+        with mock.patch.object(MANAGER.shutil, 'move', side_effect=OSError('read-only file system')):
+            with self.assertRaisesRegex(RuntimeError, 'Promoted ' + DIGEST + ', but retiring the legacy image-size '
+                                                      'preload failed: read-only file system'):
+                MANAGER.promote(self.config, DIGEST)
+        self.assertEqual(json.loads((self.state / 'active.json').read_text())['digest'], DIGEST)
+        self.assertFalse((self.state / 'transaction.json').exists())
+        self.assertNotIn(('systemctl', 'enable', '--now', 'meshcentral'), self.run_calls)
 
 
 def cores_page(rows):
-    """The /meshagents?cores=1 page as webserver.js 1.2.5:6550-6555 renders it."""
+    """The /meshagents?cores=1 page as webserver.js renders it."""
     page = ('<html><head><title>Mesh Agents Cores</title><style>table,th,td { border:1px solid black;'
             'border-collapse:collapse;padding:3px; }</style></head><body style=overflow:auto><table>'
             '<tr style="background-color:lightgray"><th>Name</th><th>Size</th><th>Comp</th>'
@@ -730,8 +765,9 @@ def cores_page(rows):
 
 
 class FakeServer:
-    def __init__(self, version='MeshCentral v1.2.5', cores=None):
-        self.version, self.cores, self.logins = version, cores or {'windows-amd64': CORE_HASH}, []
+    def __init__(self, version='MeshCentral v1.3.1', cores=None, agents=None):
+        self.version, self.cores, self.logins = version, cores or {'windows-amt': CORE_HASH}, []
+        self.agents = {'4': AGENT} if agents is None else agents
 
     def get(self, path):
         assert path == SMOKE.VERSION_PATH, path
@@ -743,50 +779,84 @@ class FakeServer:
     def core_hashes(self):
         return self.cores
 
+    def agent(self, archid):
+        if archid not in self.agents:
+            raise SMOKE.SmokeFailure('/meshagents?id=' + archid + ' returned HTTP 404')
+        return self.agents[archid]
+
+
+def installed_tree(**changes):
+    """An install root's files as the fork image has them, relative to /opt/meshcentral."""
+    files = {
+        'node_modules/.package-lock.json': json.dumps({'packages': {'node_modules/meshcentral': {
+            'version': '1.3.1', 'resolved': 'file:dist/meshcentral-1.3.1.tgz', 'integrity': INTEGRITY}}}).encode(),
+        'node_modules/meshcentral/agents/module-versions.json': json.dumps({'commit': PACKAGED_COMMIT, 'modules': {}}).encode(),
+        'node_modules/meshcentral/agents/agent-defaults.json': json.dumps({
+            'schema': 'meshcentral-fork-agents/1', 'build': AGENT_BUILD,
+            'files': [{'filename': 'MeshService64.exe', 'size': len(AGENT), 'sha384': sha384(AGENT)}]}).encode(),
+        'node_modules/meshcentral/agents/MeshService64.exe': AGENT,
+        'node_modules/meshcentral/daemon': b''}
+    files.update(changes)
+    return {path: data for path, data in files.items() if data is not None}
+
+
+class FakeFiles:
+    def __init__(self, files):
+        self.files = files
+
+    def exists(self, relative):
+        return relative in self.files or any(path.startswith(relative + '/') for path in self.files)
+
+    def read(self, relative):
+        return self.files[relative].decode('utf-8')
+
+    def digest(self, relative):
+        return len(self.files[relative]), sha384(self.files[relative])
+
 
 class SmokeExpectationTests(unittest.TestCase):
-    """T22: the smoke test needs the fork identity in the manifest and refuses images without it."""
+    """T22: the smoke test needs the fork tarball identity in the manifest and refuses images without it."""
 
     def test_fork_manifest_yields_the_identity_to_prove(self):
-        expected = SMOKE.expectations(smoke_manifest())
-        self.assertEqual((expected['version'], expected['forkRevision']), ('1.2.5', FORK_REVISION))
+        expected = SMOKE.expectations(fork_manifest())
+        self.assertEqual((expected['version'], expected['forkRevision']), ('1.3.1', FORK_REVISION))
+        self.assertEqual(expected['pins'], {'MeshService64.exe': (len(AGENT), sha384(AGENT))})
 
-    def test_pre_fork_or_incomplete_manifests_are_refused_naming_each_field(self):
-        manifest = smoke_manifest()
-        for field in ('forkRevision', 'agentCoreHashes', 'agentBinaries'):
+    def test_overlay_or_incomplete_manifests_are_refused_naming_each_field(self):
+        manifest = fork_manifest(schema=1)
+        for field in ('forkRevision', 'package', 'agentBuild', 'agentCoreHashes', 'agentBinaries'):
             del manifest[field]
         with self.assertRaises(SMOKE.SmokeFailure) as raised:
             SMOKE.expectations(manifest)
-        for text in ('forkRevision is missing', 'images built before the fork', 'agentCoreHashes', 'agentBinaries'):
+        for text in ('schema 1 is not 2', 'forkRevision is missing', 'package must give', 'agentBuild',
+                     'agentCoreHashes', 'agentBinaries'):
             self.assertIn(text, str(raised.exception))
 
-    def test_malformed_agent_entries_are_refused(self):
-        good = smoke_manifest()['agentBinaries']['4']
-        for entry in (dict(good, path='/opt/meshcentral/node_modules/meshcentral/agents/MeshService64.exe'),
+    def test_agent_entries_must_name_the_package_file_and_its_pin(self):
+        good = fork_manifest()['agentBinaries']['4']
+        for entry in (dict(good, path='meshcentral-data/agents/MeshService64.exe'),
                       dict(good, path='node_modules/meshcentral/agents/MeshService.exe'),
-                      dict(good, path='node_modules/../agents/MeshService64.exe'),
-                      dict(good, unsigned='yes'), dict(good, sha256='A' * 64),
+                      dict(good, path='/opt/meshcentral/node_modules/meshcentral/agents/MeshService64.exe'),
+                      dict(good, unsigned='yes'), dict(good, sha384='A' * 96), dict(good, size=0),
+                      dict(good, size=True), dict(good, sha256='a' * 64),
                       {key: value for key, value in good.items() if key != 'localname'}):
             with self.subTest(entry=entry), self.assertRaisesRegex(SMOKE.SmokeFailure, r"agentBinaries\['4'\]"):
-                SMOKE.expectations(smoke_manifest(agentBinaries={'4': entry}))
+                SMOKE.expectations(fork_manifest(agentBinaries={'4': entry}))
+        with self.assertRaisesRegex(SMOKE.SmokeFailure, 'two different pins'):
+            SMOKE.expectations(fork_manifest(agentBinaries={'4': good, '10004': dict(good, size=good['size'] + 1)}))
         with self.assertRaisesRegex(SMOKE.SmokeFailure, 'reviewedUpstreamVersion'):
-            SMOKE.expectations(smoke_manifest(reviewedUpstreamVersion='1.2.4'))
+            SMOKE.expectations(fork_manifest(reviewedUpstreamVersion='1.2.5'))
+        with self.assertRaisesRegex(SMOKE.SmokeFailure, 'package must give'):
+            SMOKE.expectations(fork_manifest(package=dict(fork_manifest()['package'], tarball='meshcentral-1.2.5.tgz')))
 
 
 class SmokeAssertionTests(unittest.TestCase):
-    """T22: version, fork revision, served core hash, selected on-disk agent file, preload."""
+    """T22/N6: version, installed tarball, package pins, served cores and agents from the package only."""
 
     def setUp(self):
-        self.expected = SMOKE.expectations(smoke_manifest())
-        self.files = {'node_modules/meshcentral/agents/MeshService64.exe': b'agent'}
+        self.expected = SMOKE.expectations(fork_manifest())
 
-    def exists(self, relative):
-        return relative in self.files
-
-    def digest(self, relative):
-        return sha256(self.files[relative])
-
-    def test_agent_selection_mirrors_meshcentral_precedence(self):
+    def test_agent_selection_mirrors_the_fork_server(self):
         entry = {'localname': 'MeshService64.exe', 'unsigned': False}
         package = 'node_modules/meshcentral/agents/MeshService64.exe'
         signed = 'meshcentral-data/signedagents/MeshService64.exe'
@@ -798,63 +868,93 @@ class SmokeAssertionTests(unittest.TestCase):
         unsigned = dict(entry, unsigned=True)
         self.assertEqual(SMOKE.selected_agent_path(unsigned, {package, signed, data}.__contains__), package)
 
-    def test_on_disk_agent_file_must_be_the_manifest_file(self):
-        self.assertEqual(SMOKE.check_agent_binaries(self.expected, self.exists, self.digest), [])
-        self.files['node_modules/meshcentral/agents/MeshService64.exe'] = b'other build'
-        self.assertEqual(SMOKE.check_agent_binaries(self.expected, self.exists, self.digest), [
-            'agent 4: node_modules/meshcentral/agents/MeshService64.exe has sha256 ' + sha256(b'other build') +
-            ', manifest expects ' + sha256(b'agent')])
-        self.files.clear()
-        self.assertIn('does not exist', SMOKE.check_agent_binaries(self.expected, self.exists, self.digest)[0])
+    def test_the_package_file_must_have_the_pinned_size_and_sha384(self):
+        self.assertEqual(SMOKE.check_agent_binaries(self.expected, FakeFiles(installed_tree())), [])
+        changed = FakeFiles(installed_tree(**{'node_modules/meshcentral/agents/MeshService64.exe': b'other build'}))
+        self.assertEqual(SMOKE.check_agent_binaries(self.expected, changed), [
+            'agent 4: node_modules/meshcentral/agents/MeshService64.exe has 11 bytes, SHA384 ' + sha384(b'other build') +
+            '; pinned ' + str(len(AGENT)) + ' bytes, SHA384 ' + sha384(AGENT)])
+        missing = FakeFiles(installed_tree(**{'node_modules/meshcentral/agents/MeshService64.exe': None}))
+        self.assertIn('does not exist', SMOKE.check_agent_binaries(self.expected, missing)[0])
 
-    def test_a_data_folder_copy_that_wins_selection_is_reported(self):
-        expected = SMOKE.expectations(smoke_manifest(agentBinaries={'4': dict(
-            smoke_manifest()['agentBinaries']['4'], unsigned=False)}))
-        self.files['meshcentral-data/agents/MeshService64.exe'] = b'stale'
-        self.assertEqual(SMOKE.check_agent_binaries(expected, self.exists, self.digest), [
-            'agent 4: MeshCentral selects meshcentral-data/agents/MeshService64.exe, manifest expects '
+    def test_a_data_folder_copy_that_would_win_is_reported(self):
+        entry = dict(fork_manifest()['agentBinaries']['4'], unsigned=False)
+        expected = SMOKE.expectations(fork_manifest(agentBinaries={'4': entry}))
+        files = FakeFiles(installed_tree(**{'meshcentral-data/agents/MeshService64.exe': b'stale'}))
+        self.assertEqual(SMOKE.check_agent_binaries(expected, files), [
+            'agent 4: MeshCentral selects meshcentral-data/agents/MeshService64.exe, not the package file '
             'node_modules/meshcentral/agents/MeshService64.exe'])
 
+    def test_unsigned_agents_are_served_byte_for_byte(self):
+        self.assertEqual(SMOKE.check_served_agents(FakeServer(), self.expected), [])
+        problems = SMOKE.check_served_agents(FakeServer(agents={'4': AGENT + b'msh'}), self.expected)
+        self.assertEqual(problems, ['agent 4: /meshagents?id=4 served ' + str(len(AGENT) + 3) + ' bytes, SHA384 ' +
+                                    sha384(AGENT + b'msh') + '; pinned ' + str(len(AGENT)) + ' bytes, SHA384 ' +
+                                    sha384(AGENT)])
+        self.assertEqual(SMOKE.check_served_agents(FakeServer(agents={}), self.expected),
+                         ['agent 4: /meshagents?id=4 returned HTTP 404'])
+        signed = SMOKE.expectations(fork_manifest(agentBinaries={'4': dict(fork_manifest()['agentBinaries']['4'],
+                                                                           unsigned=False)}))
+        self.assertEqual(SMOKE.check_served_agents(FakeServer(agents={}), signed), [])
+
+    def test_the_installed_package_is_the_manifest_tarball_with_the_daemon_marker(self):
+        self.assertEqual(SMOKE.check_installed_package(FakeFiles(installed_tree()), self.expected), [])
+        other = installed_tree(**{
+            'node_modules/.package-lock.json': json.dumps({'packages': {'node_modules/meshcentral': {
+                'version': '1.2.5', 'integrity': 'sha512-' + 'B' * 86 + '=='}}}).encode(),
+            'node_modules/meshcentral/agents/module-versions.json': json.dumps({'commit': 'e' * 40}).encode(),
+            'node_modules/meshcentral/daemon': None})
+        problems = SMOKE.check_installed_package(FakeFiles(other), self.expected)
+        for text in ("installed meshcentral version '1.2.5' is not 1.3.1", 'is not the manifest tarball ' + INTEGRITY,
+                     'module-versions.json dates the package by', 'daemon is missing'):
+            self.assertTrue(any(text in problem for problem in problems), (text, problems))
+
+    def test_the_package_pins_are_the_manifest_agents(self):
+        self.assertEqual(SMOKE.check_agent_pins(FakeFiles(installed_tree()), self.expected), [])
+        pins = {'schema': 'meshcentral-fork-agents/1', 'build': dict(AGENT_BUILD, commit='4' * 40),
+                'files': [{'filename': 'MeshService64.exe', 'size': 1, 'sha384': sha384(AGENT)},
+                          {'filename': 'MeshService.exe', 'size': 2, 'sha384': 'a' * 96}]}
+        problems = SMOKE.check_agent_pins(FakeFiles(installed_tree(**{
+            'node_modules/meshcentral/agents/agent-defaults.json': json.dumps(pins).encode()})), self.expected)
+        self.assertEqual(len(problems), 3)
+        self.assertIn('pins build', problems[0])
+        self.assertIn('agent pin MeshService.exe: package pins', problems[1])
+        self.assertIn('agent pin MeshService64.exe: package pins (1,', problems[2])
+
     def test_core_table_is_parsed_and_compared(self):
-        served = SMOKE.parse_core_hashes(cores_page([('windows-amd64', CORE_HASH), ('linux noamt', 'e' * 96)]))
-        self.assertEqual(served, {'windows-amd64': CORE_HASH, 'linux noamt': 'e' * 96})
+        served = SMOKE.parse_core_hashes(cores_page([('windows-amt', CORE_HASH), ('linux noamt', 'e' * 96)]))
+        self.assertEqual(served, {'windows-amt': CORE_HASH, 'linux noamt': 'e' * 96})
         self.assertEqual(SMOKE.check_core_hashes(served, self.expected), [])
-        self.assertEqual(SMOKE.check_core_hashes({'windows-amd64': 'f' * 96}, self.expected), [
-            "agent core 'windows-amd64' is served with SHA-384 " + 'f' * 96 + ', manifest expects ' + CORE_HASH])
-        self.assertEqual(SMOKE.check_core_hashes({}, self.expected), ["agent core 'windows-amd64' is not served"])
+        self.assertEqual(SMOKE.check_core_hashes({'windows-amt': 'f' * 96}, self.expected), [
+            "agent core 'windows-amt' is served with SHA-384 " + 'f' * 96 + ', manifest expects ' + CORE_HASH])
+        self.assertEqual(SMOKE.check_core_hashes({}, self.expected), ["agent core 'windows-amt' is not served"])
         with self.assertRaisesRegex(SMOKE.SmokeFailure, 'listed no agent cores'):
             SMOKE.parse_core_hashes(cores_page([]))
         with self.assertRaisesRegex(SMOKE.SmokeFailure, 'Unexpected agent core table row'):
-            SMOKE.parse_core_hashes(cores_page([('windows-amd64', 'not-a-hash')]))
+            SMOKE.parse_core_hashes(cores_page([('windows-amt', 'not-a-hash')]))
 
-    def test_version_revision_and_preload_checks(self):
-        self.assertEqual(SMOKE.check_served_version('MeshCentral v1.2.5', self.expected), [])
-        self.assertEqual(SMOKE.check_served_version('MeshCentral v1.2.6', self.expected),
-                         ["served version 'MeshCentral v1.2.6' is not MeshCentral v1.2.5"])
-        self.assertEqual(SMOKE.check_fork_revision(json.dumps({'version': '1.2.5', 'forkRevision': FORK_REVISION}),
-                                                   self.expected), [])
-        self.assertIn('forkRevision None', SMOKE.check_fork_revision('{"version": "1.2.5"}', self.expected)[0])
-        shim = TRACKED_MITIGATION.read_text(encoding='utf-8')
-        logged = 'harden-image-size: disabled unpatched parsers: ' + ', '.join(
-            re.search(r"var DISABLE = \[([^]]*)\]", shim).group(1).replace("'", '').split(', '))
-        self.assertEqual(SMOKE.check_preload('MeshCentral HTTP server running\n' + logged + '\n'), [])
-        self.assertIn('preload did not run', SMOKE.check_preload(
-            'harden-image-size: WARNING - could not harden image-size: Cannot find module')[0])
+    def test_version_and_image_size_checks(self):
+        self.assertEqual(SMOKE.check_served_version('MeshCentral v1.3.1', self.expected), [])
+        self.assertEqual(SMOKE.check_served_version('MeshCentral v1.2.5', self.expected),
+                         ["served version 'MeshCentral v1.2.5' is not MeshCentral v1.3.1"])
+        self.assertEqual(SMOKE.check_no_image_size(FakeFiles(installed_tree())), [])
+        files = FakeFiles(installed_tree(**{'node_modules/image-size/package.json': b'{}'}))
+        self.assertEqual(SMOKE.check_no_image_size(files), [
+            'node_modules/image-size is installed; the fork package tree must not contain image-size'])
 
     def test_run_checks_reports_every_failure_together(self):
-        server = FakeServer(version='MeshCentral v1.2.6', cores={'windows-amd64': 'f' * 96})
-        self.files.clear()
+        server = FakeServer(version='MeshCentral v1.2.5', cores={'windows-amt': 'f' * 96}, agents={})
+        files = FakeFiles(installed_tree(**{'node_modules/image-size/index.js': b'', 'node_modules/meshcentral/daemon': None,
+                                            'node_modules/meshcentral/agents/MeshService64.exe': None}))
         with self.assertRaises(SMOKE.SmokeFailure) as raised:
-            SMOKE.run_checks(smoke_manifest(), server, ('smoke', 'secret'), 'no marker', '{}', self.exists, self.digest)
+            SMOKE.run_checks(fork_manifest(), server, ('smoke', 'secret'), files)
         message = str(raised.exception)
-        for text in ('preload did not run', 'served version', 'forkRevision', "agent core 'windows-amd64'",
-                     'agent 4:'):
+        for text in ('node_modules/image-size is installed', 'served version', 'daemon is missing',
+                     "agent core 'windows-amt'", 'agent 4: node_modules/meshcentral/agents/MeshService64.exe does not exist',
+                     'agent 4: /meshagents?id=4 returned HTTP 404'):
             self.assertIn(text, message)
         self.assertEqual(server.logins, [('smoke', 'secret')])
-        passing = FakeServer()
-        self.files['node_modules/meshcentral/agents/MeshService64.exe'] = b'agent'
-        SMOKE.run_checks(smoke_manifest(), passing, ('smoke', 'secret'), SMOKE.HARDEN_MARKER,
-                         json.dumps({'forkRevision': FORK_REVISION}), self.exists, self.digest)
+        SMOKE.run_checks(fork_manifest(), FakeServer(), ('smoke', 'secret'), FakeFiles(installed_tree()))
 
 
 class SmokeCommandTests(unittest.TestCase):
@@ -863,30 +963,28 @@ class SmokeCommandTests(unittest.TestCase):
     def test_duplicate_server_mode_reads_the_local_install(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            write(root / 'node_modules/meshcentral/agents/MeshService64.exe', b'agent')
-            write(root / 'node_modules/meshcentral/package.json',
-                  json.dumps({'version': '1.2.5', 'forkRevision': FORK_REVISION}).encode())
-            manifest = write(root / 'manifest.json', json.dumps(smoke_manifest()).encode())
-            log = write(root / 'server.log', (SMOKE.HARDEN_MARKER + '\n').encode())
+            for relative, data in installed_tree().items():
+                write(root / relative, data)
+            manifest = write(root / 'manifest.json', json.dumps(fork_manifest()).encode())
             server = FakeServer()
             with mock.patch.dict(os.environ, {'SMOKE_USERNAME': 'smoke', 'SMOKE_PASSWORD': 'secret'}), \
                     mock.patch.object(SMOKE_IMAGE.smoke_checks, 'Server', return_value=server):
                 SMOKE_IMAGE.main(['--server-url', 'http://127.0.0.1:4430', '--install-root', str(root),
-                                  '--manifest', str(manifest), '--server-log', str(log)])
+                                  '--manifest', str(manifest)])
             self.assertEqual(server.logins, [('smoke', 'secret')])
             write(root / 'node_modules/meshcentral/agents/MeshService64.exe', b'changed')
             with mock.patch.dict(os.environ, {'SMOKE_USERNAME': 'smoke', 'SMOKE_PASSWORD': 'secret'}), \
                     mock.patch.object(SMOKE_IMAGE.smoke_checks, 'Server', return_value=FakeServer()), \
-                    self.assertRaisesRegex(SMOKE_IMAGE.smoke_checks.SmokeFailure, 'agent 4: .* has sha256'):
+                    self.assertRaisesRegex(SMOKE_IMAGE.smoke_checks.SmokeFailure, 'agent 4: .* has 7 bytes'):
                 SMOKE_IMAGE.main(['--server-url', 'http://127.0.0.1:4430', '--install-root', str(root),
-                                  '--manifest', str(manifest), '--server-log', str(log)])
+                                  '--manifest', str(manifest)])
 
     def test_partial_duplicate_server_options_and_missing_credentials_are_refused(self):
         with mock.patch('sys.stderr'), self.assertRaises(SystemExit):
             SMOKE_IMAGE.main(['--server-url', 'http://127.0.0.1:4430'])
         with mock.patch.dict(os.environ, {'SMOKE_USERNAME': '', 'SMOKE_PASSWORD': ''}), \
                 self.assertRaisesRegex(ValueError, 'SMOKE_USERNAME and SMOKE_PASSWORD'):
-            SMOKE_IMAGE.smoke_server('http://127.0.0.1:4430', '.', 'manifest.json', 'server.log')
+            SMOKE_IMAGE.smoke_server('http://127.0.0.1:4430', '.', 'manifest.json')
 
     def test_image_mode_refuses_mutable_references_before_docker(self):
         with mock.patch.object(SMOKE_IMAGE, 'run') as run, \
@@ -894,9 +992,8 @@ class SmokeCommandTests(unittest.TestCase):
             SMOKE_IMAGE.smoke_image('ghcr.io/fixture/release:latest')
         run.assert_not_called()
 
-    def test_image_mode_preloads_the_tracked_mitigation(self):
-        self.assertEqual(SMOKE_IMAGE.MITIGATION_SOURCE, TRACKED_MITIGATION)
-        self.assertEqual(SMOKE_IMAGE.MITIGATION_TARGET, INSTALLER.MITIGATION.as_posix())
+    def test_image_mode_reads_the_release_folder_the_controller_reads(self):
+        self.assertEqual(SMOKE_IMAGE.MANIFEST, MANAGER.IMAGE_RELEASE + '/manifest.json')
 
 
 def docker_ignore_rules(path):
@@ -923,6 +1020,9 @@ def docker_excludes(rules, path):
     return excluded
 
 
+DOCKERFILE = (DEPLOYMENT / 'Dockerfile').read_text(encoding='utf-8')
+
+
 class DockerContextTests(unittest.TestCase):
     """T20: local state never enters the image build context; every COPY source still does."""
 
@@ -931,22 +1031,22 @@ class DockerContextTests(unittest.TestCase):
 
     def test_every_dockerfile_copy_source_is_sent(self):
         sources = []
-        for line in (DEPLOYMENT / 'Dockerfile').read_text(encoding='utf-8').splitlines():
+        for line in DOCKERFILE.splitlines():
             words = line.split()
             if words[:1] == ['COPY'] and not any(word.startswith('--from') for word in words):
-                sources += words[1:-1]
-        self.assertIn('MeshCentral', sources)
-        self.assertIn('artifacts', sources)
+                sources += [word for word in words[1:-1] if not word.startswith('--')]
+        self.assertEqual(sources, ['MeshCentral', 'agent-builds', 'MeshAgent/tools/deployment/release_image.js'])
         for source in sources:
             with self.subTest(source=source):
                 self.assertFalse(docker_excludes(self.rules, source))
 
     def test_files_the_build_reads_are_sent(self):
-        for path in ('MeshCentral/package-lock.json', 'MeshCentral/agents/meshcore.js',
-                     'MeshCentral/agents/hashagents.js', 'MeshCentral/public/scripts/agent-desktop-0.0.2.js',
+        for path in ('MeshCentral/.git/HEAD', 'MeshCentral/.git/objects/pack/pack-1.pack', 'MeshCentral/package.json',
+                     'MeshCentral/agents/agent-defaults.json', 'MeshCentral/agents/meshcore.js',
+                     'MeshCentral/deploy/scripts/pack.js', 'MeshCentral/deploy/package-lock.json',
+                     'MeshCentral/deploy/meshcentral-web/public/scripts/custom.js',
                      'MeshCentral/plugins/nativeruntime/nativeruntime.js', 'MeshCentral/meshagent.js',
-                     'MeshCentral/THIRD_PARTY_NOTICES.txt',
-                     'artifacts/MeshServiceRuntime-MeshService64.exe/MeshService64.exe'):
+                     'agent-builds/MeshService64.exe', 'MeshAgent/tools/deployment/release_image.js'):
             with self.subTest(path=path):
                 self.assertFalse(docker_excludes(self.rules, path))
 
@@ -954,9 +1054,13 @@ class DockerContextTests(unittest.TestCase):
         for path in ('MeshCentral/node_modules/meshcentral/meshcentral.js', 'MeshCentral/meshcentral-data/config.json',
                      'MeshCentral/meshcentral-data/agentserver-cert-private.key', 'MeshCentral/server-backups/dump.zip',
                      'MeshCentral/meshcentral-web/public/scripts/custom.js', 'MeshCentral/meshcentral-files/x',
-                     'MeshCentral/meshcentral-backups/x', 'MeshCentral/meshcentral-recordings/x',
+                     'MeshCentral/deploy/node_modules/meshcentral/meshcentral.js', 'MeshCentral/deploy/dist/meshcentral-1.3.1.tgz',
+                     'MeshCentral/deploy/meshcentral-data/config.json',
+                     'MeshCentral/deploy/meshcentral-data/agentserver-cert-private.key',
+                     'MeshCentral/deploy/server-backups/dump.zip', 'MeshCentral/deploy/meshcentral-backups/x',
                      'MeshAgent/branding_config.local.json', 'MeshAgent/artifacts/validation/report.json',
-                     'MeshAgent/tools/deployment/Dockerfile', 'meshcentral-fork-ssot/SSOT.md', 'UserModeHook/build/x'):
+                     'MeshAgent/deploy.py', 'MeshAgent/tools/deployment/Dockerfile', 'artifacts/MeshServiceRuntime-x/x.exe',
+                     'meshcentral-fork-ssot/SSOT.md', 'UserModeHook/build/x'):
             with self.subTest(path=path):
                 self.assertTrue(docker_excludes(self.rules, path))
 
@@ -966,95 +1070,85 @@ class DockerContextTests(unittest.TestCase):
         self.assertTrue(docker_excludes(rules, 'a/c'))
 
 
-# A stand-in for image-size 2.0.2's public surface (types, disableTypes, imageSize and its
-# "disabled file type" refusal), with variants for a changed or broken package.
-FAKE_IMAGE_SIZE = r"""
-var mode = require('./mode.json').mode;
-var types = ['bmp', 'heif', 'icns', 'jpg', 'jxl', 'jxl-stream', 'png'];
-if (mode === 'renamed') { types = types.map(function (t) { return t === 'jxl-stream' ? 'jxl-codestream' : t; }); }
-var disabled = [];
-function detect(b) {
-    if (b.slice(0, 4).toString() === 'icns') { return 'icns'; }
-    if (b[0] === 0xff && b[1] === 0x0a) { return 'jxl-stream'; }
-    var box = b.slice(4, 8).toString();
-    if (box === 'JXL ') { return 'jxl'; }
-    if (box === 'ftyp') { return 'heif'; }
-}
-exports.types = types;
-exports.imageSize = function (b) {
-    var t = detect(b);
-    if (disabled.indexOf(t) >= 0) { throw new TypeError('disabled file type: ' + t); }
-    return { width: 1, height: 1, type: t };
-};
-if (mode !== 'no-disable') { exports.disableTypes = function (list) { if (mode !== 'noop') { disabled = list; } }; }
-"""
+class DockerfileTests(unittest.TestCase):
+    """The release image is the fork tarball on Node 24.22.1, packed on Linux and checked against the lock."""
+
+    def test_both_stages_use_node_24_22_1_pinned_by_digest(self):
+        bases = re.findall(r'^FROM (\S+)', DOCKERFILE, re.M)
+        self.assertEqual(bases, ['node:24.22.1-bookworm-slim@sha256:'
+                                 'be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c'] * 2)
+
+    def test_the_build_packs_with_the_pinned_agents_verifies_the_lock_and_installs_only_the_lock(self):
+        steps = [
+            'node /build/MeshCentral/deploy/scripts/pack.js --agents /build/agent-builds --json > /build/pack-record.txt',
+            'node /build/release_image.js verify-pack --meshcentral /build/MeshCentral --pack-record /build/pack-record.txt',
+            'npm ci --omit=dev --no-audit --no-fund',
+            'touch node_modules/meshcentral/daemon',
+            'node /build/release_image.js manifest --meshcentral /build/MeshCentral --pack-record /build/pack-record.txt']
+        positions = [DOCKERFILE.find(step) for step in steps]
+        self.assertNotIn(-1, positions, positions)
+        self.assertEqual(positions, sorted(positions))
+        for retired in ('prepare_release_image', 'deploy.py', 'configure_agent_certificate_history', 'release-overrides',
+                        'hashagents', 'NODE_OPTIONS', 'harden-image-size', 'python'):
+            self.assertNotIn(retired, DOCKERFILE)
+
+    def test_the_runtime_stage_runs_the_installed_package_as_the_node_user(self):
+        runtime = DOCKERFILE.split('\nFROM ', 2)[2]
+        self.assertIn('COPY --from=build --chown=root:root /opt/meshcentral /opt/meshcentral', runtime)
+        self.assertIn('USER node', runtime)
+        self.assertIn('ENTRYPOINT ["node", "/opt/meshcentral/node_modules/meshcentral/meshcentral.js"]', runtime)
 
 
-@unittest.skipUnless(shutil.which('node'), 'Node.js is required to run the preload shim')
-class MitigationShimTests(unittest.TestCase):
-    """T24 follow-up: the shim resolves image-size like MeshCentral does and fails closed."""
+@unittest.skipUnless(shutil.which('node'), 'Node.js is required to run release_image.js')
+class ReleaseImageTests(unittest.TestCase):
+    """release_image.js: the Linux pack must be the locked tarball (T21) and the manifest is computed from the
+    installed package."""
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        # A non-/opt install layout: <root>/srv/node_modules/{meshcentral,image-size}.
-        self.main = write(self.root / 'srv/node_modules/meshcentral/meshcentral.js',
-                          b"console.log('meshcentral main ran');\n")
-        self.elsewhere = self.root / 'elsewhere'
-        self.elsewhere.mkdir()
+        self.tarball = b'fork tarball bytes'
+        self.integrity = 'sha512-' + __import__('base64').b64encode(hashlib.sha512(self.tarball).digest()).decode()
+        self.meshcentral = self.root / 'MeshCentral'
+        write(self.meshcentral / 'deploy/dist/meshcentral-1.3.1.tgz', self.tarball)
+        write(self.meshcentral / 'deploy/package.json', json.dumps(
+            {'dependencies': {'meshcentral': 'file:dist/meshcentral-1.3.1.tgz'}}).encode())
+        self.lock(self.integrity)
+        self.record = {'tarball': 'deploy/dist/meshcentral-1.3.1.tgz', 'version': '1.3.1', 'commit': FORK_REVISION,
+                       'integrity': self.integrity, 'packagedCommit': PACKAGED_COMMIT, 'agentBuild': AGENT_BUILD,
+                       'agents': [{'filename': 'MeshService64.exe', 'size': len(AGENT), 'sha384': sha384(AGENT)}],
+                       'platform': 'linux'}
 
-    def install_image_size(self, folder, mode='ok'):
-        package = folder / 'node_modules/image-size'
-        write(package / 'package.json', json.dumps({'name': 'image-size', 'version': '2.0.2',
-                                                    'main': 'index.js'}).encode())
-        write(package / 'index.js', FAKE_IMAGE_SIZE.encode())
-        write(package / 'mode.json', json.dumps({'mode': mode}).encode())
+    def lock(self, integrity):
+        write(self.meshcentral / 'deploy/package-lock.json', json.dumps({'packages': {'node_modules/meshcentral': {
+            'version': '1.3.1', 'resolved': 'file:dist/meshcentral-1.3.1.tgz', 'integrity': integrity}}}).encode())
 
-    def start(self, main=None, cwd=None):
-        environment = {key: value for key, value in os.environ.items() if key != 'NODE_OPTIONS'}
-        return subprocess.run(['node', '--require', str(TRACKED_MITIGATION), str(main or self.main)],
-                              cwd=str(cwd or self.elsewhere), env=environment, capture_output=True,
-                              text=True, timeout=60)
+    def verify(self):
+        record = write(self.root / 'pack-record.txt', ('deploy/dist/meshcentral-1.3.1.tgz: 1 files\nintegrity x\n' +
+                                                       json.dumps(self.record, indent=2) + '\n').encode())
+        return subprocess.run(['node', str(DEPLOYMENT / 'release_image.js'), 'verify-pack', '--meshcentral',
+                               str(self.meshcentral), '--pack-record', str(record)],
+                              capture_output=True, text=True, timeout=60)
 
-    def assert_refused(self, result, reason):
+    def test_the_locked_linux_pack_passes(self):
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('matches the locked tarball ' + self.integrity, result.stdout)
+
+    def test_a_pack_the_lock_does_not_pin_is_refused(self):
+        self.lock('sha512-' + 'A' * 86 + '==')
+        result = self.verify()
         self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn('meshcentral main ran', result.stdout)
-        self.assertIn('refusing to start MeshCentral with the unpatched image-size parsers enabled', result.stderr)
-        self.assertIn(reason, result.stderr)
-        self.assertNotEqual(SMOKE.check_preload(result.stdout + result.stderr), [])
+        self.assertIn('T21: the Linux pack of MeshCentral ' + FORK_REVISION + ' gives ' + self.integrity, result.stderr)
+        self.assertIn('re-lock from a Linux pack of this commit (D4)', result.stderr)
 
-    def test_no_install_path_is_hardcoded(self):
-        self.assertNotIn('/opt/', TRACKED_MITIGATION.read_text(encoding='utf-8'))
-
-    def test_resolves_from_the_started_script_in_a_non_opt_layout(self):
-        self.install_image_size(self.root / 'srv')
-        result = self.start()  # working directory has no node_modules
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), [SMOKE.HARDEN_MARKER, 'meshcentral main ran'])
-        self.assertEqual(SMOKE.check_preload(result.stdout), [])
-
-    def test_falls_back_to_the_working_directory(self):
-        self.install_image_size(self.elsewhere)
-        main = write(self.root / 'bare/meshcentral.js', b"console.log('meshcentral main ran');\n")
-        result = self.start(main=main)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(SMOKE.HARDEN_MARKER, result.stdout)
-
-    def test_missing_image_size_stops_the_process(self):
-        self.assert_refused(self.start(), 'image-size cannot be resolved from')
-
-    def test_missing_disable_api_stops_the_process(self):
-        self.install_image_size(self.root / 'srv', 'no-disable')
-        self.assert_refused(self.start(), 'does not provide disableTypes()')
-
-    def test_changed_parser_layout_stops_the_process(self):
-        self.install_image_size(self.root / 'srv', 'renamed')
-        self.assert_refused(self.start(), 'no longer lists the parser(s) jxl-stream')
-
-    def test_a_parser_that_stays_enabled_stops_the_process(self):
-        self.install_image_size(self.root / 'srv', 'noop')
-        self.assert_refused(self.start(), 'the icns probe was parsed')
+    def test_a_non_linux_pack_or_a_changed_tarball_is_refused(self):
+        self.record['platform'] = 'win32'
+        self.assertIn('release packs run on Linux (D4)', self.verify().stderr)
+        self.record['platform'] = 'linux'
+        write(self.meshcentral / 'deploy/dist/meshcentral-1.3.1.tgz', b'changed after packing')
+        self.assertIn('but pack.js recorded ' + self.integrity, self.verify().stderr)
 
 
 class HostRecoveryTests(FixtureCase):
@@ -1071,8 +1165,7 @@ class HostRecoveryTests(FixtureCase):
             write(self.base / relative, data)
         # The candidate allowlists the host files, so it reaches `docker run` and fails there.
         allowlist = [{'path': relative, 'sha256': sha256(data)} for relative, data in self.HOST_FILES.items()]
-        self.candidate = make_release(self.release_dir(DIGEST), {'data/MeshService64.exe': b'exe'},
-                                      shadowAllowlist=allowlist)
+        self.candidate = make_release(self.release_dir(DIGEST), shadowAllowlist=allowlist)
         self.calls = []
         self.during_candidate = lambda: None
         for name, value in {'run': mock.Mock(side_effect=self.fake_run), 'prepare': mock.Mock(return_value=self.candidate),
@@ -1120,10 +1213,10 @@ class HostRecoveryTests(FixtureCase):
             MANAGER.recover(self.config, transaction)
         self.assertFalse(self.restarted_host())
 
-    def test_a_host_that_cannot_be_recorded_is_refused_before_anything_stops(self):
+    def test_a_host_the_candidate_would_refuse_is_refused_before_anything_stops(self):
         (self.base / 'meshcentral-data/modules_meshcore_min').mkdir()
         with self.assertRaisesRegex(MANAGER.meshcentral_shadow_check.ShadowCopyError,
-                                    '(?s)Cannot record.*modules_meshcore_min/: empty folder'):
+                                    '(?s)modules_meshcore_min/: empty folder'):
             MANAGER.promote(self.config, DIGEST)
         self.assertEqual(self.calls, [])
         self.assertFalse((self.state / 'transaction.json').exists())
