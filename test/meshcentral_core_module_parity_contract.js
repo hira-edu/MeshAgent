@@ -22,18 +22,20 @@ const { forkFile, upstreamPackageDir } = require('./lib/meshcentral_paths');
 const root = path.resolve(__dirname, '..');
 const FOLDERS = ['modules_meshcore', 'modules_meshcore_min'];
 
-// D22: the modules MeshAgent and upstream both carry, which the package ships as MeshAgent's copy.
-const MESHAGENT_OWNED = [
-    'amt-lme', 'amt-mei', 'monitor-border', 'smbios', 'util-agentlog', 'wifi-scanner',
-    'wifi-scanner-windows', 'win-console', 'win-deskutils', 'win-securitycenter', 'win-volumes'
-];
+// D22 (option b, operator 2026-10-28): modules upstream also ships that the package carries as
+// MeshAgent's copy: the four the agent embeds, and wifi-scanner (deliberate fork change). The other
+// overlapping modules (amt-lme, amt-mei, smbios, wifi-scanner-windows, win-securitycenter, win-volumes)
+// are not embedded and stay upstream's, so the upstream rule covers them.
+const MESHAGENT_OWNED = ['monitor-border', 'util-agentlog', 'win-console', 'win-deskutils', 'wifi-scanner'];
 // Upstream ships these, and the fork replaces them with MeshAgent's copy.
 const FORK_REPLACES_UPSTREAM = ['win-terminal', 'win-virtual-terminal'];
 // Deliberate exceptions, each with the reason the server copy must differ from modules/.
 const retained = {
     // Builds that do not embed clipboard (before 2026-10-07) also lack the
     // MeshClipboardBridgeW export the current module requires. The server copy
-    // keeps their in-process clipboard.
+    // keeps their in-process clipboard. Open (S1.6): the server sends it with the release date,
+    // which is newer than the embedded copy (2026-10-07), so it also replaces that copy on
+    // every build embedded before the release; production does the same today (2026-10-25).
     'clipboard': ',MeshClipboardBridgeW'
 };
 
