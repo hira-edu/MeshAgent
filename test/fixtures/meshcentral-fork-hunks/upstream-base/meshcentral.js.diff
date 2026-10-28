@@ -1,6 +1,51 @@
 --- a/meshcentral.js
 +++ b/meshcentral.js
-@@ -1921,12 +1921,12 @@
+@@ -20,6 +20,9 @@
+ // If app metrics is available
+ if (process.argv[2] == '--launch') { try { require('appmetrics-dash').monitor({ url: '/', title: 'MeshCentral', port: 88, host: '127.0.0.1' }); } catch (ex) { } }
+ 
++// Fork: printed by a child that refused to start (obj.fatalStartupError); its parent then exits with 1.
++const FATAL_STARTUP_MARKER = 'Server fatal startup error, not restarting...';
++
+ function CreateMeshCentralServer(config, args) {
+     const obj = {};
+     obj.db = null;
+@@ -611,6 +614,14 @@
+         }
+     };
+ 
++    // Fork: a startup refusal that a restart cannot fix. The errors go to stderr; the marker on stdout tells a
++    // parent started without --launch to stop rather than restart this child every 5 seconds.
++    obj.fatalStartupError = function (lines) {
++        for (const line of lines) { console.error('ERROR: ' + line); }
++        console.log(FATAL_STARTUP_MARKER);
++        process.exit(1);
++    };
++
+     // Launch MeshCentral as a child server and monitor it.
+     obj.launchChildServer = function (startArgs) {
+         const child_process = require('child_process');
+@@ -623,6 +634,11 @@
+             } else if (childProcess.xrestart == 2) {
+                 console.log('Expected exit...');
+                 process.exit(); // User CTRL-C exit.
++            } else if (childProcess.xrestart == 4) {
++                // Fork: the child refused to start (agent binary pins or module version manifest). Restarting cannot
++                // fix that, so stop with a failure the service manager and the release controller can see.
++                console.log('ERROR: MeshCentral refused to start; not restarting.');
++                process.exit(1);
+             } else if (childProcess.xrestart == 3) {
+                 // Server self-update exit
+                 var version = '';
+@@ -683,6 +699,7 @@
+             if (data.indexOf('Updating settings folder...') >= 0) { childProcess.xrestart = 1; }
+             else if (data.indexOf('Updating server certificates...') >= 0) { childProcess.xrestart = 1; }
+             else if (data.indexOf('Server Ctrl-C exit...') >= 0) { childProcess.xrestart = 2; }
++            else if (data.indexOf(FATAL_STARTUP_MARKER) >= 0) { childProcess.xrestart = 4; }
+             else if (data.indexOf('Starting self upgrade...') >= 0) { childProcess.xrestart = 3; }
+             else if (data.indexOf('Server restart...') >= 0) { childProcess.xrestart = 1; }
+             else if (data.indexOf('Starting self upgrade to: ') >= 0) {
+@@ -1921,12 +1938,12 @@
          // holds until this first signing pass and table load have finished.
          obj.agentTablesReady = new Promise(function (resolve) { obj.agentTablesLoaded = resolve; });
          obj.agentDefaults = require('./agentbuilds').CreateAgentDefaults(obj);
@@ -13,13 +58,13 @@
 +        // The fork serves only the agent binaries pinned in agents/agent-defaults.json and never downloads any.
 +        // prepare() only hashes local files, so wait for it; a missing or mismatched pin stops the server, like
 +        // the module-version manifest does.
-+        try { await obj.agentDefaults.prepare(); } catch (ex) { console.error('ERROR: fork agent binaries: ' + ((ex && ex.message) || ex)); process.exit(1); return; }
++        try { await obj.agentDefaults.prepare(); } catch (ex) { obj.fatalStartupError(['fork agent binaries: ' + ((ex && ex.message) || ex)]); return; }
 +        const agentDefaultsErrors = obj.agentDefaults.status().errors;
-+        if (agentDefaultsErrors.length > 0) { for (const error of agentDefaultsErrors) { console.error('ERROR: fork agent binaries: ' + error); } process.exit(1); return; }
++        if (agentDefaultsErrors.length > 0) { obj.fatalStartupError(agentDefaultsErrors.map(function (error) { return 'fork agent binaries: ' + error; })); return; }
          obj.agentDefaults.start();
  
          // Load the list of MeshCentral tools
-@@ -2329,6 +2329,12 @@
+@@ -2329,6 +2346,12 @@
                  obj.pendingProxyCertificatesRequests++;
                  var dnsname = obj.config.domains[i].dns;
                  if ((dnsname == null) && (obj.config.settings.cert != null)) { dnsname = obj.config.settings.cert; }
@@ -32,7 +77,7 @@
                  obj.certificateOperations.loadCertificate(obj.config.domains[i].certurl, dnsname, obj.config.domains[i], function (url, cert, xhostname, xdomain) {
                      obj.pendingProxyCertificatesRequests--;
                      if (cert != null) {
-@@ -2967,6 +2973,26 @@
+@@ -2967,6 +2990,26 @@
          return r;
      }
  
@@ -41,7 +86,7 @@
 +    // the version is newer than its own copy, so a version must never come from file or install times.
 +    // A missing manifest, or a served module it does not list, stops the server and names the module.
 +    const moduleVersionPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-+    function moduleVersionFailure(message) { console.error('ERROR: agent core module versions: ' + message); process.exit(1); }
++    function moduleVersionFailure(message) { obj.fatalStartupError(['agent core module versions: ' + message]); }
 +    function readModuleVersions() {
 +        const manifestPath = obj.path.join(__dirname, 'agents', 'module-versions.json');
 +        var manifest = null;
@@ -59,7 +104,7 @@
      // Update the default mesh core
      obj.updateMeshCore = function (func, dumpToFile) {
          // Figure out where meshcore.js is
-@@ -3023,6 +3049,7 @@
+@@ -3023,6 +3066,7 @@
              if (obj.args.minifycore !== false) { try { moduleDirPath = obj.path.join(meshcorePath, 'modules_meshcore_min'); modulesDir = obj.fs.readdirSync(moduleDirPath); } catch (ex) { } } // Favor minified modules if present.
              if (modulesDir == null) { try { moduleDirPath = obj.path.join(meshcorePath, 'modules_meshcore'); modulesDir = obj.fs.readdirSync(moduleDirPath); } catch (ex) { } } // Use non-minified mofules.
              if (modulesDir != null) {
@@ -67,7 +112,7 @@
                  for (var i in modulesDir) {
                      if (modulesDir[i].toLowerCase().endsWith('.json')) {
                          // We are adding a JSON file to the meshcores
-@@ -3041,9 +3068,8 @@
+@@ -3041,9 +3085,8 @@
                          var moduleName = modulesDir[i].substring(0, modulesDir[i].length - 3);
                          if (moduleName.endsWith('.min')) { moduleName = moduleName.substring(0, moduleName.length - 4); } // Remove the ".min" for ".min.js" files.
                          const modulePath = obj.path.join(moduleDirPath, modulesDir[i]);
@@ -79,7 +124,7 @@
  
                          // Merge this module
                          // NOTE: "smbios" module makes some non-AI Linux segfault, only include for IA platforms.
-@@ -3066,15 +3092,16 @@
+@@ -3066,15 +3109,16 @@
                          }
  
                          // Merge this module to recovery modules if needed
@@ -98,7 +143,7 @@
                                  modulesAdd['windows-agentrecovery'].push(...moduleData);
                              }
                          }
-@@ -3685,10 +3712,6 @@
+@@ -3685,10 +3729,6 @@
          const agentTable = {};
          function done() { objx.meshAgentBinaries = agentTable; if (func != null) func(); }
  
@@ -109,7 +154,7 @@
          var archcount = 0;
          for (var archid in obj.meshAgentsArchitectureNumbers) {
              var agentpath;
-@@ -3725,7 +3748,6 @@
+@@ -3725,7 +3765,6 @@
              if (release && domain.id === '' && agentpath !== override) agentTable[archid].release = release;
              agentTable[archid].url = 'http://' + obj.certificates.CommonName + ':' + ((typeof obj.args.aliasport == 'number') ? obj.args.aliasport : obj.args.port) + '/meshagents?id=' + archid;
              agentTable[archid].size = stats.size;
@@ -117,7 +162,7 @@
  
              // If this is a windows binary, pull binary information
              if (obj.meshAgentsArchitectureNumbers[archid].platform == 'win32') {
-@@ -4426,7 +4448,6 @@
+@@ -4426,7 +4465,6 @@
          var allsspi = true;
          var yubikey = false;
          var ssh = false;
@@ -125,7 +170,7 @@
          var domainCount = 0;
          var wildleek = false;
          var nodemailer = false;
-@@ -4451,7 +4472,6 @@
+@@ -4451,7 +4489,6 @@
                  if (typeof config.domains[i].authstrategies.oidc == 'object') { passport.push('openid-client@5.7.1'); }
                  if ((typeof config.domains[i].authstrategies.saml == 'object') || (typeof config.domains[i].authstrategies.jumpcloud == 'object')) { passport.push('passport-saml@3.2.4'); }
              }
@@ -133,7 +178,7 @@
              if ((config.domains[i].passwordrequirements != null) && (config.domains[i].passwordrequirements.bancommonpasswords == true)) { wildleek = true; }
              if ((config.domains[i].newaccountscaptcha != null) && (config.domains[i].newaccountscaptcha !== false)) { captcha = true; }
              if ((typeof config.domains[i].duo2factor == 'object') && (passport.indexOf('@duosecurity/duo_universal') == -1)) { passport.push('@duosecurity/duo_universal@2.1.0'); }
-@@ -4466,7 +4486,6 @@
+@@ -4466,7 +4503,6 @@
          if (passport != null) { passport = passport.filter((value, index, self) => self.indexOf(value) === index); modules.push(...passport); }
          if (captcha == true) { modules.push('svg-captcha@1.4.0'); }
  
@@ -141,7 +186,7 @@
          if (config.letsencrypt != null) { modules.push('acme-client@4.2.5'); } // Add acme-client module. We need to force v4.2.4 or higher since olver versions using SHA-1 which is no longer supported by Let's Encrypt.
          if (config.settings.mqtt != null) { modules.push('aedes@0.51.3'); } // Add MQTT Modules
          if (config.settings.mysql != null) { modules.push('mysql2@3.15.1'); } // Add MySQL.
-@@ -4507,9 +4526,6 @@
+@@ -4507,9 +4543,6 @@
              if (allsspi == false) { modules.push('otplib@13.4.1'); } // Google Authenticator support (v10 supports older NodeJS versions).
          }
  
