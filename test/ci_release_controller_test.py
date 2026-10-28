@@ -43,7 +43,7 @@ class ControllerTests(unittest.TestCase):
         self.config_path = self.base / 'meshcentral-data/config.json'
         self.original_config = {'settings': {'noagentupdate': True, 'keep': 'private-fixture'}}
         self.config_path.write_text(json.dumps(self.original_config))
-        self.config = {'image': 'ghcr.io/fixture/release', 'schema': 2, 'reviewed_versions': ['1.2.5'],
+        self.config = {'image': 'ghcr.io/fixture/release', 'schema': 3, 'reviewed_versions': ['1.2.5'],
                        'health_url': 'https://fixture.invalid/health.ashx', 'enable_fleet_update': True}
         self.release = self.root / 'release'
         self.release.mkdir()
@@ -52,7 +52,8 @@ class ControllerTests(unittest.TestCase):
             patch = mock.patch.object(MANAGER.os, 'chown', create=True)
             patch.start()
             self.addCleanup(patch.stop)
-        for name, value in {'BASE': self.base, 'STATE': self.state}.items():
+        legacy = (self.root / 'absent/harden-image-size.js', self.root / 'absent/30-harden-image-size.conf')
+        for name, value in {'BASE': self.base, 'STATE': self.state, 'LEGACY_PRELOAD': legacy}.items():
             patch = mock.patch.object(MANAGER, name, value)
             patch.start()
             self.addCleanup(patch.stop)

@@ -118,16 +118,14 @@ host service. It creates the root-owned controller
 `/usr/local/libexec/meshcentral_shadow_check.py` beside it), the
 `/usr/local/sbin/meshcentral-ci-entry` forced-command entry, the `meshdeploy`
 account, its sudoers rule, and `/etc/meshcentral-deploy.json` (mode 0600). It
-also installs the image-size mitigation from this checkout (see
-[Image-size mitigation](#image-size-mitigation)). It does not stop MeshCentral,
-and it refuses to overwrite an existing configuration, account, or controller
+does not stop MeshCentral, and it refuses to overwrite an existing configuration, account, or controller
 file. That key can submit only `deploy sha256:<digest>`; it cannot obtain a shell,
 upload arbitrary scripts, forward ports, or invoke an arbitrary sudo command.
 No SSH password fallback or trust-on-first-use host-key scan is used by CI.
 
-The configuration is schema 2: `image`, `health_url`, `enable_fleet_update`,
-`reviewed_versions` (seeded with the version of the running
-`node_modules/meshcentral` package), and `image_size_mitigation_sha256`.
+The configuration is schema 3: `image`, `health_url`, `enable_fleet_update`,
+and `reviewed_versions` (seeded with the version of the running
+`node_modules/meshcentral` package).
 
 To replace the controller code of an existing installation from a reviewed
 checkout, run as root:
@@ -138,21 +136,24 @@ sudo python3 tools/deployment/install_controller.py --upgrade
 
 `--upgrade` takes no installation options; the installed policy is kept and
 edited in place. It refuses while another controller operation holds the lock,
-while `transaction.json` exists (run `recover` first), when the installation is
-incomplete, or when an installed mitigation file differs from the tracked one.
-It then replaces the controller, CI entry, and shadow-check files, installs any
-missing mitigation file, and migrates the configuration atomically. A schema-1
-configuration's single `meshcentral_version` becomes the first
-`reviewed_versions` entry, the mitigation's sha256 is recorded, and every other
-key is kept. The original file is kept as
+while `transaction.json` exists (run `recover` first), or when the installation
+is incomplete. It then replaces the controller, CI entry, and shadow-check files
+and migrates the configuration atomically. A schema-1 configuration's single
+`meshcentral_version` becomes the first `reviewed_versions` entry; a schema-2
+configuration loses `image_size_mitigation_sha256` (the upgrade prints that it
+removed it); every other key is kept. It does not touch the host service's
+image-size preload (see [Image-size preload](#image-size-preload)). The original
+file is kept as
 `/etc/meshcentral-deploy.json.pre-upgrade-<UTC stamp>`. Running it again leaves a
 current configuration unchanged. The sudoers rule, SSH key, and `meshdeploy`
 account are not touched.
 
 The controller refuses a configuration that still uses `meshcentral_version`
 ("migrate it with install_controller.py --upgrade"), one that mixes it with
-schema-2 keys, and one without `image_size_mitigation_sha256`; every
+schema-2 keys, and one that still sets `image_size_mitigation_sha256`; every
 deployment, recovery, and rollback stops until the configuration is migrated.
+The retired key is refused rather than ignored so that dropping the preload
+policy is an explicit, logged operator step, like the earlier schema change.
 
 On the first promotion, the controller pulls/verifies the candidate before
 stopping the host service, then retains the old installation for recovery.
@@ -171,8 +172,9 @@ publication commands concurrently with container releases; platform-specific
 updates must publish through the release process after migration.
 
 Every container start, including recovery and rollback, first checks the
-release (manifest digests, reviewed version, agent folders, shadow copies,
-mitigation) and refuses to start on any failure.
+release (manifest digests, reviewed version, agent folders, shadow copies)
+and refuses to start on any failure. No `NODE_OPTIONS` preload is passed to the
+container.
 
 ### Reviewed MeshCentral versions
 
@@ -281,38 +283,28 @@ record before re-enabling `meshcentral.service`. Any added or changed file block
 the restart, is named, and keeps the transaction for an operator. A journal
 without that record is refused the same way.
 
-### Image-size mitigation
+### Image-size preload
 
-`tools/deployment/harden-image-size.js` disables image-size's ICNS, JXL,
-JXL-stream, and HEIF parsers, which have unpatched denial-of-service advisories
-and are reachable from agent desktop tiles and recordings.
-`tools/deployment/30-harden-image-size.conf` is the systemd drop-in that preloads
-it into the host service with
-`NODE_OPTIONS=--require /opt/meshcentral/bin/harden-image-size.js`.
+The fork does not use `image-size`: desktop tiles and recording blocks are sized
+by its own JPEG/PNG reader, the server never asks npm for `image-size`, and the
+deployment package does not install it. The runtime preload that disabled
+image-size's ICNS, JXL and HEIF parsers (`harden-image-size.js` with the systemd
+drop-in `30-harden-image-size.conf`) is therefore retired: it is no longer
+tracked, installed, mounted, or required, and release containers start without
+`NODE_OPTIONS`.
 
-`install_controller.py` installs a missing copy of either file
+The 1.2.5 host installation keeps its preload
 (`/opt/meshcentral/bin/harden-image-size.js` and
-`/etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf`, LF line
-endings, root-owned, mode 0644) and runs `systemctl daemon-reload` after
-installing the drop-in; the host service loads it at its next restart. An
-identical installed copy is kept. An installed copy that differs from the tracked
-file, or is not a regular file, stops installation or upgrade before anything
-changes; review the difference and reconcile the installed file by hand first.
-The installed script's sha256 is recorded as `image_size_mitigation_sha256`.
-Every container start refuses a missing or changed script, then mounts it
-read-only and preloads it with `NODE_OPTIONS`.
-
-The script resolves `image-size` the way MeshCentral does: from the directory of
-the script Node starts (after resolving symlinks), then from the working
-directory. It does not assume an install path. It fails closed: when image-size
-cannot be resolved, lacks `disableTypes()`, `imageSize()`, or `types`, no longer
-lists one of the four parsers, or a per-parser probe is not refused as
-`disabled file type: <name>`, it throws during preload. The process exits with
-"harden-image-size: refusing to start MeshCentral with the unpatched image-size
-parsers enabled: <reason>". Only after all four probes are refused does it print
-`harden-image-size: disabled unpatched parsers: icns, jxl, jxl-stream, heif`.
-Any other Node process that inherits the same `NODE_OPTIONS` is subject to the
-same check.
+`/etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf`) while it
+is the recovery target of a first promotion. Before stopping anything, a
+promotion refuses a preload path that is a link or not a regular file. After a
+promotion has committed, the controller moves both files to
+`/var/lib/meshcentral-deploy/retired-host-preload/<UTC stamp>/`, prints one line
+per file with its sha256 ("Retired the legacy image-size preload: moved ..."),
+and runs `systemctl daemon-reload`. A host without them is left unchanged. A
+failed first promotion leaves them in place, so the restored host service runs
+with its preload. If moving them fails after the commit, the new release stays
+active and the deployment reports the failure with the paths to remove by hand.
 
 ### Image smoke test
 
@@ -325,11 +317,11 @@ RELEASE_IMAGE=<ghcr digest reference or local sha256 image ID> python3 tools/dep
 
 It reads `release-overrides/manifest.json` out of the image and refuses an image
 whose manifest cannot be checked before booting it. It boots the image read-only
-on disposable data with the tracked mitigation preloaded exactly as production
-does, creates a disposable account, restarts the container, and then asserts
+on disposable data as production runs it (no `NODE_OPTIONS` preload), creates a disposable account, restarts the container, and then asserts
 (`tools/deployment/smoke_checks.py`):
 
-- the server log contains the mitigation's success line;
+- `image-size` is not installed (`node_modules/image-size` and
+  `node_modules/meshcentral/node_modules/image-size` do not exist);
 - `GET /release-smoke-version`, a `~showversion` redirect defined by the smoke
   configuration, returns `MeshCentral v<manifest meshcentral_version>`;
 - the installed `node_modules/meshcentral/package.json` carries the manifest's
@@ -350,11 +342,11 @@ Against a running local duplicate server, the same assertions run with:
 
 ```sh
 SMOKE_USERNAME=<account> SMOKE_PASSWORD=<password> python3 tools/deployment/smoke_image.py \
-  --server-url <url> --install-root <dir> --manifest <manifest.json> --server-log <log>
+  --server-url <url> --install-root <dir> --manifest <manifest.json>
 ```
 
 That server must define the `release-smoke-version` redirect in its default
-domain and run with the same `NODE_OPTIONS` preload, logging to `--server-log`.
+domain.
 
 ### Image build context
 
@@ -409,8 +401,8 @@ sudo /usr/local/libexec/meshcentral-release rollback  # previous container diges
 
 `rollback` promotes the previous digest again and `recover` restarts the release
 recorded before the interrupted transaction. Both apply the same start checks
-(reviewed version, agent runtime rebuilt from its manifest, shadow copies,
-mitigation), so a release that no longer passes them is not restarted. When an
+(reviewed version, agent runtime rebuilt from its manifest, shadow copies),
+so a release that no longer passes them is not restarted. When an
 interrupted first migration has no previous release, `recover` restarts the host
 service only after the shadow-copy comparison described above.
 

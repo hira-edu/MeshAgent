@@ -1,7 +1,7 @@
 """Fork-safety tests for the image release tooling; never invoke Docker, SSH, systemd, or a live endpoint.
 
 Covers agent seeding (T11), the reviewed-version allowlist (D5/T23), the start-time shadow-copy
-check (G4), the smoke assertions (T22), the tracked image-size mitigation (T24) and the
+check (G4), the smoke assertions (T22), the retired image-size preload (T24, DEP-21) and the
 image build context (T20).
 """
 import hashlib
@@ -42,13 +42,16 @@ DIGEST = 'sha256:' + 'a' * 64
 PREVIOUS = 'sha256:' + 'b' * 64
 SERVICE_ACCOUNT = types.SimpleNamespace(pw_uid=0, pw_gid=0, pw_dir='/nonexistent')
 FORK_REVISION = 'c' * 40
-TRACKED_MITIGATION = DEPLOYMENT / 'harden-image-size.js'
-TRACKED_DROPIN = DEPLOYMENT / '30-harden-image-size.conf'
-# Installed copies use LF whatever the checkout's line endings are.
-MITIGATION_SHA = hashlib.sha256(TRACKED_MITIGATION.read_text(encoding='utf-8').encode('utf-8')).hexdigest()
-FIXTURE_MITIGATION = b'// fixture mitigation\n'
 SCHEMA1_CONFIG = {'image': 'ghcr.io/fixture/release', 'health_url': 'https://fixture.invalid/health.ashx',
                   'meshcentral_version': '1.2.5', 'enable_fleet_update': False}
+# A schema-2 configuration as install_controller wrote it while the image-size preload was policy.
+SCHEMA2_CONFIG = {'schema': 2, 'image': 'ghcr.io/fixture/release', 'health_url': 'https://fixture.invalid/health.ashx',
+                  'reviewed_versions': ['1.2.5'], 'enable_fleet_update': False,
+                  'image_size_mitigation_sha256': 'e' * 64}
+CURRENT_CONFIG = {'schema': 3, 'image': 'ghcr.io/fixture/release', 'health_url': 'https://fixture.invalid/health.ashx',
+                  'reviewed_versions': ['1.2.5'], 'enable_fleet_update': False}
+LEGACY_SCRIPT = b'// production harden-image-size.js\n'
+LEGACY_DROPIN = b'[Service]\nEnvironment="NODE_OPTIONS=--require /opt/meshcentral/bin/harden-image-size.js"\n'
 
 
 def sha256(data):
@@ -89,13 +92,13 @@ class FixtureCase(unittest.TestCase):
         (self.base / 'meshcentral-web').mkdir()
         self.config_path = self.base / 'meshcentral-data/config.json'
         self.config_path.write_text(json.dumps({'settings': {'noagentupdate': True}}))
-        self.config = {'schema': 2, 'image': 'ghcr.io/fixture/release', 'reviewed_versions': ['1.2.5'],
-                       'health_url': 'https://fixture.invalid/health.ashx', 'enable_fleet_update': True,
-                       'image_size_mitigation_sha256': sha256(FIXTURE_MITIGATION)}
-        mitigation = self.base / 'bin/harden-image-size.js'
-        mitigation.parent.mkdir()
-        mitigation.write_bytes(FIXTURE_MITIGATION)
+        self.config = {'schema': 3, 'image': 'ghcr.io/fixture/release', 'reviewed_versions': ['1.2.5'],
+                       'health_url': 'https://fixture.invalid/health.ashx', 'enable_fleet_update': True}
+        # The legacy host preload paths, absent unless a test installs them.
+        self.legacy = (self.base / 'bin/harden-image-size.js',
+                       self.root / 'etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf')
         for target, name, value in ((MANAGER, 'BASE', self.base), (MANAGER, 'STATE', self.state),
+                                    (MANAGER, 'LEGACY_PRELOAD', self.legacy),
                                     (MANAGER, 'pwd', types.SimpleNamespace(getpwnam=lambda name: SERVICE_ACCOUNT))):
             patch = mock.patch.object(target, name, value)
             patch.start()
@@ -224,13 +227,26 @@ class ConfigPolicyTests(unittest.TestCase):
     """D5/T23: the controller keeps an allowlist of reviewed versions."""
 
     def test_schema1_config_migrates_to_an_allowlist_of_its_single_version(self):
-        migrated = MANAGER.migrate_config(SCHEMA1_CONFIG, MITIGATION_SHA)
-        self.assertEqual(migrated, {'schema': 2, 'image': SCHEMA1_CONFIG['image'],
-                                    'health_url': SCHEMA1_CONFIG['health_url'],
-                                    'reviewed_versions': ['1.2.5'], 'enable_fleet_update': False,
-                                    'image_size_mitigation_sha256': MITIGATION_SHA})
-        self.assertEqual(MANAGER.migrate_config(migrated, MITIGATION_SHA), migrated)
+        migrated = MANAGER.migrate_config(SCHEMA1_CONFIG)
+        self.assertEqual(migrated, CURRENT_CONFIG)
+        self.assertEqual(MANAGER.migrate_config(migrated), migrated)
         self.assertIn('meshcentral_version', SCHEMA1_CONFIG)  # input is not modified
+
+    def test_schema2_config_loses_the_retired_mitigation_digest(self):
+        self.assertEqual(MANAGER.migrate_config(SCHEMA2_CONFIG), CURRENT_CONFIG)
+        self.assertIn('image_size_mitigation_sha256', SCHEMA2_CONFIG)  # input is not modified
+        with self.assertRaisesRegex(ValueError, 'Unsupported release controller configuration schema'):
+            MANAGER.migrate_config(dict(CURRENT_CONFIG, schema=4))
+
+    def test_a_config_that_still_names_the_preload_is_refused_until_migrated(self):
+        # Fail closed: the controller never silently drops the preload policy the operator configured.
+        for config in (SCHEMA2_CONFIG, dict(CURRENT_CONFIG, image_size_mitigation_sha256='e' * 64)):
+            with self.subTest(schema=config['schema']), \
+                    self.assertRaisesRegex(ValueError, 'image_size_mitigation_sha256.*retired image-size preload.*--upgrade'):
+                MANAGER.validate_config(config)
+        without_key = {key: value for key, value in SCHEMA2_CONFIG.items() if key != 'image_size_mitigation_sha256'}
+        with self.assertRaisesRegex(ValueError, 'schema'):
+            MANAGER.validate_config(without_key)
 
     def test_unmigrated_or_mixed_config_is_refused_with_the_migration_command(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -240,19 +256,17 @@ class ConfigPolicyTests(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, 'retired single meshcentral_version.*--upgrade'):
                 MANAGER.load_config()
         with self.assertRaisesRegex(ValueError, 'mixes meshcentral_version'):
-            MANAGER.migrate_config(dict(SCHEMA1_CONFIG, reviewed_versions=['1.2.6']), MITIGATION_SHA)
+            MANAGER.migrate_config(dict(SCHEMA1_CONFIG, reviewed_versions=['1.2.6']))
 
     def test_reviewed_versions_must_be_an_explicit_list_of_exact_versions(self):
-        config = MANAGER.migrate_config(SCHEMA1_CONFIG, MITIGATION_SHA)
+        config = MANAGER.migrate_config(SCHEMA1_CONFIG)
         for versions in ([], '1.2.5', ['1.2'], ['1.2.5', '1.2.5'], ['v1.2.5'], ['1.2.*'], None):
             with self.subTest(versions=versions), self.assertRaisesRegex(ValueError, 'reviewed_versions'):
                 MANAGER.validate_config(dict(config, reviewed_versions=versions))
         MANAGER.validate_config(dict(config, reviewed_versions=['1.2.5', '1.2.6', '1.3.0-fork.1']))
-        with self.assertRaisesRegex(ValueError, 'schema'):
-            MANAGER.validate_config(dict(config, schema=3))
-        config.pop('image_size_mitigation_sha256')
-        with self.assertRaisesRegex(ValueError, 'image_size_mitigation_sha256 is missing.*--upgrade'):
-            MANAGER.validate_config(config)
+        for schema in (2, 4):
+            with self.subTest(schema=schema), self.assertRaisesRegex(ValueError, 'schema'):
+                MANAGER.validate_config(dict(config, schema=schema))
 
 
 class ManifestVersionTests(unittest.TestCase):
@@ -377,16 +391,14 @@ class ControllerUpgradeTests(unittest.TestCase):
                      INSTALLER.SHADOW_CHECK: self.shadow_check}
         code = tuple((name, installed[destination], mode) for name, destination, mode in INSTALLER.CODE)
         lock = types.SimpleNamespace(flock=mock.Mock(), LOCK_EX=2, LOCK_NB=4)
-        # An installed mitigation identical to the tracked files (production must be reconciled first).
-        self.mitigation = self.root / 'opt/meshcentral/bin/harden-image-size.js'
-        self.dropin = self.root / 'etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf'
-        for source, destination in ((TRACKED_MITIGATION, self.mitigation), (TRACKED_DROPIN, self.dropin)):
-            destination.parent.mkdir(parents=True)
-            destination.write_bytes(source.read_text(encoding='utf-8').encode('utf-8'))
-        files = ((TRACKED_MITIGATION.name, self.mitigation, False), (TRACKED_DROPIN.name, self.dropin, True))
+        # The 1.2.5 host service's preload, which an upgrade must leave in place for that service.
+        self.legacy = (self.root / 'opt/meshcentral/bin/harden-image-size.js',
+                       self.root / 'etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf')
+        for path, data in zip(self.legacy, (LEGACY_SCRIPT, LEGACY_DROPIN)):
+            path.parent.mkdir(parents=True)
+            path.write_bytes(data)
         patches = [mock.patch.object(INSTALLER, name, value) for name, value in paths.items()]
-        patches += [mock.patch.object(INSTALLER, 'MITIGATION', self.mitigation),
-                    mock.patch.object(INSTALLER, 'MITIGATION_FILES', files),
+        patches += [mock.patch.object(INSTALLER.release_manager, 'LEGACY_PRELOAD', self.legacy),
                     mock.patch.object(INSTALLER.subprocess, 'run'),
                     mock.patch.object(INSTALLER, 'CODE', code), mock.patch.object(INSTALLER, 'fcntl', lock),
                     mock.patch.object(INSTALLER.release_manager, 'STATE', self.state),
@@ -400,8 +412,8 @@ class ControllerUpgradeTests(unittest.TestCase):
     def test_upgrade_migrates_config_keeps_a_backup_and_installs_code(self):
         original = self.config.read_bytes()
         INSTALLER.upgrade()
-        self.assertEqual(json.loads(self.config.read_text()), MANAGER.migrate_config(SCHEMA1_CONFIG, MITIGATION_SHA))
-        INSTALLER.subprocess.run.assert_not_called()  # identical mitigation: nothing installed or reloaded
+        self.assertEqual(json.loads(self.config.read_text()), CURRENT_CONFIG)
+        INSTALLER.subprocess.run.assert_not_called()  # nothing installed into or reloaded for the host service
         backups = list(self.config.parent.glob('meshcentral-deploy.json.pre-upgrade-*'))
         self.assertEqual([path.read_bytes() for path in backups], [original])
         expected = (DEPLOYMENT / 'release_manager.py').read_text(encoding='utf-8')
@@ -429,12 +441,16 @@ class ControllerUpgradeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'No controller configuration'):
             INSTALLER.upgrade()
 
-    def test_upgrade_refuses_a_differing_installed_mitigation_before_changing_anything(self):
-        self.mitigation.write_bytes(b'// edited on the server\n')
-        with self.assertRaisesRegex(ValueError, 'differs from the tracked'):
+    def test_upgrade_removes_the_mitigation_digest_and_leaves_the_host_preload(self):
+        self.config.write_text(json.dumps(SCHEMA2_CONFIG))
+        with mock.patch('sys.stdout', new_callable=lambda: __import__('io').StringIO()) as stdout:
             INSTALLER.upgrade()
-        self.assertEqual(self.paths['CONTROLLER'].read_text(), 'installed before upgrade\n')
-        self.assertEqual(json.loads(self.config.read_text()), SCHEMA1_CONFIG)
+        self.assertEqual(json.loads(self.config.read_text()), CURRENT_CONFIG)
+        self.assertIn('Removed image_size_mitigation_sha256', stdout.getvalue())
+        self.assertEqual([path.read_bytes() for path in self.legacy], [LEGACY_SCRIPT, LEGACY_DROPIN])
+        INSTALLER.subprocess.run.assert_not_called()
+        backups = list(self.config.parent.glob('meshcentral-deploy.json.pre-upgrade-*'))
+        self.assertEqual([json.loads(path.read_text()) for path in backups], [SCHEMA2_CONFIG])
 
     def test_upgrade_refuses_while_another_operation_holds_the_lock(self):
         INSTALLER.fcntl.flock.side_effect = BlockingIOError()
@@ -609,97 +625,112 @@ class StartShadowCheckTests(FixtureCase):
             MANAGER.validate_manifest(directory / 'overrides', self.config['reviewed_versions'])
 
 
-class TrackedMitigationTests(unittest.TestCase):
-    """T24: the production image-size mitigation is tracked and installed from the repository."""
-
-    def test_tracked_files_agree_on_the_preload_path(self):
-        dropin = TRACKED_DROPIN.read_text(encoding='utf-8')
-        self.assertIn('Environment="NODE_OPTIONS=--require /opt/meshcentral/bin/harden-image-size.js"', dropin)
-        self.assertEqual(INSTALLER.MITIGATION.as_posix(), '/opt/meshcentral/bin/harden-image-size.js')
-        self.assertEqual((MANAGER.BASE / 'bin/harden-image-size.js').as_posix(), INSTALLER.MITIGATION.as_posix())
-        destinations = {name: destination.as_posix() for name, destination, _ in INSTALLER.MITIGATION_FILES}
-        self.assertEqual(destinations, {
-            'harden-image-size.js': '/opt/meshcentral/bin/harden-image-size.js',
-            '30-harden-image-size.conf': '/etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf'})
-
-    def test_shim_disables_the_unpatched_parsers_and_logs_the_smoke_marker(self):
-        shim = TRACKED_MITIGATION.read_text(encoding='utf-8')
-        self.assertIn("var DISABLE = ['icns', 'jxl', 'jxl-stream', 'heif'];", shim)
-        self.assertIn("'harden-image-size: disabled unpatched parsers: '", shim)
-        self.assertEqual(SMOKE.HARDEN_MARKER, 'harden-image-size: disabled unpatched parsers: icns, jxl, jxl-stream, heif')
-
-
-class MitigationInstallerTests(unittest.TestCase):
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
-        self.mitigation = self.root / 'opt/meshcentral/bin/harden-image-size.js'
-        self.dropin = self.root / 'etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf'
-        files = ((TRACKED_MITIGATION.name, self.mitigation, False), (TRACKED_DROPIN.name, self.dropin, True))
-        for patch in (mock.patch.object(INSTALLER, 'MITIGATION', self.mitigation),
-                      mock.patch.object(INSTALLER, 'MITIGATION_FILES', files),
-                      mock.patch.object(INSTALLER.subprocess, 'run'),
-                      mock.patch.object(INSTALLER.os, 'chown', create=True)):
-            patch.start()
-            self.addCleanup(patch.stop)
-
-    def test_missing_files_are_installed_with_lf_endings_and_systemd_reloads(self):
-        self.assertEqual(INSTALLER.install_mitigation(), MITIGATION_SHA)
-        self.assertEqual(self.mitigation.read_bytes(), TRACKED_MITIGATION.read_text(encoding='utf-8').encode('utf-8'))
-        self.assertNotIn(b'\r\n', self.dropin.read_bytes())
-        INSTALLER.subprocess.run.assert_called_once_with(['systemctl', 'daemon-reload'], check=True)
-
-    def test_identical_installed_files_are_kept_without_a_reload(self):
-        INSTALLER.install_mitigation()
-        INSTALLER.subprocess.run.reset_mock()
-        before = self.mitigation.stat().st_mtime_ns
-        self.assertEqual(INSTALLER.install_mitigation(), MITIGATION_SHA)
-        self.assertEqual(self.mitigation.stat().st_mtime_ns, before)
-        INSTALLER.subprocess.run.assert_not_called()
-
-    def test_a_differing_installed_file_is_refused_and_left_alone(self):
-        self.mitigation.parent.mkdir(parents=True)
-        self.mitigation.write_bytes(b'// locally edited\n')
-        with self.assertRaisesRegex(ValueError, 'harden-image-size.js differs from the tracked'):
-            INSTALLER.install_mitigation()
-        self.assertEqual(self.mitigation.read_bytes(), b'// locally edited\n')
-        self.assertFalse(self.dropin.exists())
-        INSTALLER.subprocess.run.assert_not_called()
-
-    def test_a_missing_tracked_source_is_refused(self):
-        with mock.patch.object(INSTALLER, 'SOURCE', self.root):
-            with self.assertRaisesRegex(ValueError, 'Missing tracked mitigation source'):
-                INSTALLER.install_mitigation()
-
-
-class StartMitigationTests(FixtureCase):
-    """start() preloads exactly the installed mitigation and refuses a missing or changed copy."""
+class RetiredPreloadTests(FixtureCase):
+    """D4/DEP-21: no image-size preload is tracked, installed, mounted or required by a release start."""
 
     def setUp(self):
         super().setUp()
         self.docker_runs = []
-        patch = mock.patch.object(MANAGER, 'run', side_effect=lambda *args, **kw: self.docker_runs.append(args))
+        self.run_calls = []
+
+        def run(*args, capture=False):
+            self.run_calls.append(args)
+            if args[:2] == ('docker', 'run'):
+                self.docker_runs.append(args)
+            return ''
+
+        for name, value in {'run': mock.Mock(side_effect=run), 'remove_container': mock.Mock(),
+                            'healthy': mock.Mock(return_value=True)}.items():
+            patch = mock.patch.object(MANAGER, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.candidate = make_release(self.release_dir(DIGEST), {'data/MeshService64.exe': b'exe'})
+        patch = mock.patch.object(MANAGER, 'prepare', return_value=self.candidate)
         patch.start()
         self.addCleanup(patch.stop)
-        directory = make_release(self.release_dir(DIGEST), {'data/MeshService64.exe': b'exe'})
-        self.release = {'digest': DIGEST, 'directory': str(directory), 'runtime': str(MANAGER.seed_agents(directory))}
-        self.mitigation = self.base / 'bin/harden-image-size.js'
 
-    def test_container_preloads_the_mitigation_read_only(self):
-        MANAGER.start(self.config, self.release)
+    def install_legacy_preload(self):
+        for path, data in zip(self.legacy, (LEGACY_SCRIPT, LEGACY_DROPIN)):
+            write(path, data)
+
+    def retired(self):
+        return sorted(path.relative_to(self.state / 'retired-host-preload').as_posix()
+                      for path in (self.state / 'retired-host-preload').rglob('*') if path.is_file())
+
+    def test_no_preload_is_tracked_or_installed(self):
+        for name in ('harden-image-size.js', '30-harden-image-size.conf'):
+            self.assertFalse((DEPLOYMENT / name).exists(), name)
+        self.assertFalse(hasattr(INSTALLER, 'MITIGATION_FILES'))
+        self.assertNotIn('NODE_OPTIONS', (DEPLOYMENT / 'smoke_image.py').read_text(encoding='utf-8').split('"""', 2)[2])
+
+    def test_container_starts_without_node_options_or_a_preload_mount(self):
+        directory = make_release(self.release_dir(PREVIOUS), {'data/MeshService64.exe': b'exe'})
+        MANAGER.start(self.config, {'digest': PREVIOUS, 'directory': str(directory),
+                                    'runtime': str(MANAGER.seed_agents(directory))})
         args = self.docker_runs[0]
-        self.assertIn('NODE_OPTIONS=--require=' + str(self.mitigation), args)
-        self.assertIn('type=bind,src={0},dst={0},readonly'.format(self.mitigation), args)
+        self.assertFalse([arg for arg in args if 'NODE_OPTIONS' in arg or 'harden-image-size' in arg], args)
 
-    def test_missing_or_changed_mitigation_is_refused(self):
-        self.mitigation.write_bytes(b'// changed\n')
-        with self.assertRaisesRegex(ValueError, 'differs from the copy install_controller.py installed'):
-            MANAGER.start(self.config, self.release)
-        self.mitigation.unlink()
-        with self.assertRaisesRegex(ValueError, 'mitigation .* is missing.*--upgrade'):
-            MANAGER.start(self.config, self.release)
-        self.assertEqual(self.docker_runs, [])
+    def test_first_release_retires_the_host_preload_after_promotion(self):
+        self.install_legacy_preload()
+        with mock.patch('sys.stdout', new_callable=lambda: __import__('io').StringIO()) as stdout:
+            MANAGER.promote(self.config, DIGEST)
+        self.assertEqual(json.loads((self.state / 'active.json').read_text())['digest'], DIGEST)
+        self.assertFalse(any(path.exists() for path in self.legacy))
+        retired = self.retired()
+        self.assertEqual([name.split('/', 1)[1] for name in retired], ['30-harden-image-size.conf', 'harden-image-size.js'])
+        stamp = retired[0].split('/')[0]
+        archive = self.state / 'retired-host-preload' / stamp
+        self.assertEqual((archive / 'harden-image-size.js').read_bytes(), LEGACY_SCRIPT)
+        self.assertEqual((archive / '30-harden-image-size.conf').read_bytes(), LEGACY_DROPIN)
+        for path, data in zip(self.legacy, (LEGACY_SCRIPT, LEGACY_DROPIN)):
+            self.assertIn('Retired the legacy image-size preload: moved ' + str(path) + ' (sha256 ' + sha256(data) + ')',
+                          stdout.getvalue())
+        self.assertEqual(self.run_calls[-1], ('systemctl', 'daemon-reload'))
+        self.assertLess(self.run_calls.index(('systemctl', 'disable', '--now', 'meshcentral')),
+                        self.run_calls.index(('systemctl', 'daemon-reload')))
+
+    def test_a_failed_first_release_restarts_the_host_with_its_preload(self):
+        self.install_legacy_preload()
+
+        def fail_candidate(*args, capture=False):
+            self.run_calls.append(args)
+            if args[:2] == ('docker', 'run'):
+                raise RuntimeError('candidate start')
+            return ''
+
+        MANAGER.run.side_effect = fail_candidate
+        with self.assertRaisesRegex(RuntimeError, 'candidate start'):
+            MANAGER.promote(self.config, DIGEST)
+        self.assertEqual([path.read_bytes() for path in self.legacy], [LEGACY_SCRIPT, LEGACY_DROPIN])
+        self.assertIn(('systemctl', 'enable', '--now', 'meshcentral'), self.run_calls)
+        self.assertNotIn(('systemctl', 'daemon-reload'), self.run_calls)
+
+    def test_a_host_without_the_preload_is_left_alone(self):
+        MANAGER.promote(self.config, DIGEST)
+        self.assertNotIn(('systemctl', 'daemon-reload'), self.run_calls)
+        self.assertFalse((self.state / 'retired-host-preload').exists())
+
+    def test_a_linked_preload_is_refused_before_anything_stops(self):
+        target = write(self.root / 'elsewhere.conf', LEGACY_DROPIN)
+        self.legacy[1].parent.mkdir(parents=True)
+        try:
+            self.legacy[1].symlink_to(target)
+        except OSError as error:
+            self.skipTest('Symlinks are unavailable: ' + str(error))
+        with self.assertRaisesRegex(ValueError, 'legacy image-size preload .* is not a regular file'):
+            MANAGER.promote(self.config, DIGEST)
+        self.assertEqual(self.run_calls, [])
+        self.assertFalse((self.state / 'transaction.json').exists())
+
+    def test_a_retirement_failure_keeps_the_promoted_release_and_says_so(self):
+        self.install_legacy_preload()
+        with mock.patch.object(MANAGER.shutil, 'move', side_effect=OSError('read-only file system')):
+            with self.assertRaisesRegex(RuntimeError, 'Promoted ' + DIGEST + ', but retiring the legacy image-size '
+                                                      'preload failed: read-only file system'):
+                MANAGER.promote(self.config, DIGEST)
+        self.assertEqual(json.loads((self.state / 'active.json').read_text())['digest'], DIGEST)
+        self.assertFalse((self.state / 'transaction.json').exists())
+        self.assertNotIn(('systemctl', 'enable', '--now', 'meshcentral'), self.run_calls)
 
 
 CORE_HASH = 'd' * 96
@@ -827,33 +858,33 @@ class SmokeAssertionTests(unittest.TestCase):
         with self.assertRaisesRegex(SMOKE.SmokeFailure, 'Unexpected agent core table row'):
             SMOKE.parse_core_hashes(cores_page([('windows-amd64', 'not-a-hash')]))
 
-    def test_version_revision_and_preload_checks(self):
+    def test_version_revision_and_image_size_checks(self):
         self.assertEqual(SMOKE.check_served_version('MeshCentral v1.2.5', self.expected), [])
         self.assertEqual(SMOKE.check_served_version('MeshCentral v1.2.6', self.expected),
                          ["served version 'MeshCentral v1.2.6' is not MeshCentral v1.2.5"])
         self.assertEqual(SMOKE.check_fork_revision(json.dumps({'version': '1.2.5', 'forkRevision': FORK_REVISION}),
                                                    self.expected), [])
         self.assertIn('forkRevision None', SMOKE.check_fork_revision('{"version": "1.2.5"}', self.expected)[0])
-        shim = TRACKED_MITIGATION.read_text(encoding='utf-8')
-        logged = 'harden-image-size: disabled unpatched parsers: ' + ', '.join(
-            re.search(r"var DISABLE = \[([^]]*)\]", shim).group(1).replace("'", '').split(', '))
-        self.assertEqual(SMOKE.check_preload('MeshCentral HTTP server running\n' + logged + '\n'), [])
-        self.assertIn('preload did not run', SMOKE.check_preload(
-            'harden-image-size: WARNING - could not harden image-size: Cannot find module')[0])
+        self.assertEqual(SMOKE.check_no_image_size(self.exists), [])
+        self.files['node_modules/image-size/package.json'] = b'{}'
+        self.files['node_modules/image-size'] = b''
+        self.assertEqual(SMOKE.check_no_image_size(self.exists), [
+            'node_modules/image-size is installed; the fork package tree must not contain image-size'])
 
     def test_run_checks_reports_every_failure_together(self):
         server = FakeServer(version='MeshCentral v1.2.6', cores={'windows-amd64': 'f' * 96})
         self.files.clear()
         with self.assertRaises(SMOKE.SmokeFailure) as raised:
-            SMOKE.run_checks(smoke_manifest(), server, ('smoke', 'secret'), 'no marker', '{}', self.exists, self.digest)
+            self.files['node_modules/image-size'] = b''
+            SMOKE.run_checks(smoke_manifest(), server, ('smoke', 'secret'), '{}', self.exists, self.digest)
         message = str(raised.exception)
-        for text in ('preload did not run', 'served version', 'forkRevision', "agent core 'windows-amd64'",
-                     'agent 4:'):
+        for text in ('node_modules/image-size is installed', 'served version', 'forkRevision',
+                     "agent core 'windows-amd64'", 'agent 4:'):
             self.assertIn(text, message)
         self.assertEqual(server.logins, [('smoke', 'secret')])
         passing = FakeServer()
-        self.files['node_modules/meshcentral/agents/MeshService64.exe'] = b'agent'
-        SMOKE.run_checks(smoke_manifest(), passing, ('smoke', 'secret'), SMOKE.HARDEN_MARKER,
+        self.files = {'node_modules/meshcentral/agents/MeshService64.exe': b'agent'}
+        SMOKE.run_checks(smoke_manifest(), passing, ('smoke', 'secret'),
                          json.dumps({'forkRevision': FORK_REVISION}), self.exists, self.digest)
 
 
@@ -867,36 +898,31 @@ class SmokeCommandTests(unittest.TestCase):
             write(root / 'node_modules/meshcentral/package.json',
                   json.dumps({'version': '1.2.5', 'forkRevision': FORK_REVISION}).encode())
             manifest = write(root / 'manifest.json', json.dumps(smoke_manifest()).encode())
-            log = write(root / 'server.log', (SMOKE.HARDEN_MARKER + '\n').encode())
             server = FakeServer()
             with mock.patch.dict(os.environ, {'SMOKE_USERNAME': 'smoke', 'SMOKE_PASSWORD': 'secret'}), \
                     mock.patch.object(SMOKE_IMAGE.smoke_checks, 'Server', return_value=server):
                 SMOKE_IMAGE.main(['--server-url', 'http://127.0.0.1:4430', '--install-root', str(root),
-                                  '--manifest', str(manifest), '--server-log', str(log)])
+                                  '--manifest', str(manifest)])
             self.assertEqual(server.logins, [('smoke', 'secret')])
             write(root / 'node_modules/meshcentral/agents/MeshService64.exe', b'changed')
             with mock.patch.dict(os.environ, {'SMOKE_USERNAME': 'smoke', 'SMOKE_PASSWORD': 'secret'}), \
                     mock.patch.object(SMOKE_IMAGE.smoke_checks, 'Server', return_value=FakeServer()), \
                     self.assertRaisesRegex(SMOKE_IMAGE.smoke_checks.SmokeFailure, 'agent 4: .* has sha256'):
                 SMOKE_IMAGE.main(['--server-url', 'http://127.0.0.1:4430', '--install-root', str(root),
-                                  '--manifest', str(manifest), '--server-log', str(log)])
+                                  '--manifest', str(manifest)])
 
     def test_partial_duplicate_server_options_and_missing_credentials_are_refused(self):
         with mock.patch('sys.stderr'), self.assertRaises(SystemExit):
             SMOKE_IMAGE.main(['--server-url', 'http://127.0.0.1:4430'])
         with mock.patch.dict(os.environ, {'SMOKE_USERNAME': '', 'SMOKE_PASSWORD': ''}), \
                 self.assertRaisesRegex(ValueError, 'SMOKE_USERNAME and SMOKE_PASSWORD'):
-            SMOKE_IMAGE.smoke_server('http://127.0.0.1:4430', '.', 'manifest.json', 'server.log')
+            SMOKE_IMAGE.smoke_server('http://127.0.0.1:4430', '.', 'manifest.json')
 
     def test_image_mode_refuses_mutable_references_before_docker(self):
         with mock.patch.object(SMOKE_IMAGE, 'run') as run, \
                 self.assertRaisesRegex(ValueError, 'immutable registry digest'):
             SMOKE_IMAGE.smoke_image('ghcr.io/fixture/release:latest')
         run.assert_not_called()
-
-    def test_image_mode_preloads_the_tracked_mitigation(self):
-        self.assertEqual(SMOKE_IMAGE.MITIGATION_SOURCE, TRACKED_MITIGATION)
-        self.assertEqual(SMOKE_IMAGE.MITIGATION_TARGET, INSTALLER.MITIGATION.as_posix())
 
 
 def docker_ignore_rules(path):
@@ -964,97 +990,6 @@ class DockerContextTests(unittest.TestCase):
         rules = [(False, re.compile(r'[^/]*\Z')), (True, re.compile(r'a/b\Z'))]
         self.assertFalse(docker_excludes(rules, 'a/b'))
         self.assertTrue(docker_excludes(rules, 'a/c'))
-
-
-# A stand-in for image-size 2.0.2's public surface (types, disableTypes, imageSize and its
-# "disabled file type" refusal), with variants for a changed or broken package.
-FAKE_IMAGE_SIZE = r"""
-var mode = require('./mode.json').mode;
-var types = ['bmp', 'heif', 'icns', 'jpg', 'jxl', 'jxl-stream', 'png'];
-if (mode === 'renamed') { types = types.map(function (t) { return t === 'jxl-stream' ? 'jxl-codestream' : t; }); }
-var disabled = [];
-function detect(b) {
-    if (b.slice(0, 4).toString() === 'icns') { return 'icns'; }
-    if (b[0] === 0xff && b[1] === 0x0a) { return 'jxl-stream'; }
-    var box = b.slice(4, 8).toString();
-    if (box === 'JXL ') { return 'jxl'; }
-    if (box === 'ftyp') { return 'heif'; }
-}
-exports.types = types;
-exports.imageSize = function (b) {
-    var t = detect(b);
-    if (disabled.indexOf(t) >= 0) { throw new TypeError('disabled file type: ' + t); }
-    return { width: 1, height: 1, type: t };
-};
-if (mode !== 'no-disable') { exports.disableTypes = function (list) { if (mode !== 'noop') { disabled = list; } }; }
-"""
-
-
-@unittest.skipUnless(shutil.which('node'), 'Node.js is required to run the preload shim')
-class MitigationShimTests(unittest.TestCase):
-    """T24 follow-up: the shim resolves image-size like MeshCentral does and fails closed."""
-
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
-        # A non-/opt install layout: <root>/srv/node_modules/{meshcentral,image-size}.
-        self.main = write(self.root / 'srv/node_modules/meshcentral/meshcentral.js',
-                          b"console.log('meshcentral main ran');\n")
-        self.elsewhere = self.root / 'elsewhere'
-        self.elsewhere.mkdir()
-
-    def install_image_size(self, folder, mode='ok'):
-        package = folder / 'node_modules/image-size'
-        write(package / 'package.json', json.dumps({'name': 'image-size', 'version': '2.0.2',
-                                                    'main': 'index.js'}).encode())
-        write(package / 'index.js', FAKE_IMAGE_SIZE.encode())
-        write(package / 'mode.json', json.dumps({'mode': mode}).encode())
-
-    def start(self, main=None, cwd=None):
-        environment = {key: value for key, value in os.environ.items() if key != 'NODE_OPTIONS'}
-        return subprocess.run(['node', '--require', str(TRACKED_MITIGATION), str(main or self.main)],
-                              cwd=str(cwd or self.elsewhere), env=environment, capture_output=True,
-                              text=True, timeout=60)
-
-    def assert_refused(self, result, reason):
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn('meshcentral main ran', result.stdout)
-        self.assertIn('refusing to start MeshCentral with the unpatched image-size parsers enabled', result.stderr)
-        self.assertIn(reason, result.stderr)
-        self.assertNotEqual(SMOKE.check_preload(result.stdout + result.stderr), [])
-
-    def test_no_install_path_is_hardcoded(self):
-        self.assertNotIn('/opt/', TRACKED_MITIGATION.read_text(encoding='utf-8'))
-
-    def test_resolves_from_the_started_script_in_a_non_opt_layout(self):
-        self.install_image_size(self.root / 'srv')
-        result = self.start()  # working directory has no node_modules
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), [SMOKE.HARDEN_MARKER, 'meshcentral main ran'])
-        self.assertEqual(SMOKE.check_preload(result.stdout), [])
-
-    def test_falls_back_to_the_working_directory(self):
-        self.install_image_size(self.elsewhere)
-        main = write(self.root / 'bare/meshcentral.js', b"console.log('meshcentral main ran');\n")
-        result = self.start(main=main)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(SMOKE.HARDEN_MARKER, result.stdout)
-
-    def test_missing_image_size_stops_the_process(self):
-        self.assert_refused(self.start(), 'image-size cannot be resolved from')
-
-    def test_missing_disable_api_stops_the_process(self):
-        self.install_image_size(self.root / 'srv', 'no-disable')
-        self.assert_refused(self.start(), 'does not provide disableTypes()')
-
-    def test_changed_parser_layout_stops_the_process(self):
-        self.install_image_size(self.root / 'srv', 'renamed')
-        self.assert_refused(self.start(), 'no longer lists the parser(s) jxl-stream')
-
-    def test_a_parser_that_stays_enabled_stops_the_process(self):
-        self.install_image_size(self.root / 'srv', 'noop')
-        self.assert_refused(self.start(), 'the icns probe was parsed')
 
 
 class HostRecoveryTests(FixtureCase):

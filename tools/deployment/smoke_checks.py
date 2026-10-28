@@ -2,7 +2,7 @@
 
 A release passes only when the running server proves it is the reviewed fork build:
 
-- the image-size mitigation preload ran (its log marker is present);
+- image-size is not installed (the fork sizes tiles and recordings itself; D4, DEP-21);
 - the served MeshCentral version equals the manifest's reviewed version;
 - the installed package carries the manifest's forkRevision;
 - every agent core the manifest lists is served with the manifest's SHA-384;
@@ -30,7 +30,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-HARDEN_MARKER = 'harden-image-size: disabled unpatched parsers: icns, jxl, jxl-stream, heif'
+# Install-root paths where npm would place image-size; the fork's package tree has none.
+IMAGE_SIZE_PATHS = ('node_modules/image-size', 'node_modules/meshcentral/node_modules/image-size')
 # A ~showversion redirect the smoke configuration defines (webserver.js handleDomainRedirect).
 VERSION_PATH = 'release-smoke-version'
 PACKAGE_DIR = 'node_modules/meshcentral'
@@ -97,10 +98,10 @@ def selected_agent_path(entry, exists):
     return path
 
 
-def check_preload(log_text):
-    if HARDEN_MARKER not in log_text:
-        return ['image-size mitigation preload did not run: the server log lacks "' + HARDEN_MARKER + '"']
-    return []
+def check_no_image_size(exists):
+    """image-size has unpatched parser advisories and the fork no longer uses it; it must not be installed."""
+    return [path + ' is installed; the fork package tree must not contain image-size'
+            for path in IMAGE_SIZE_PATHS if exists(path)]
 
 
 def check_served_version(body, expected):
@@ -213,10 +214,10 @@ class Server:
         return parse_core_hashes(page)
 
 
-def run_checks(manifest, server, credentials, log_text, package_json, exists, sha256):
+def run_checks(manifest, server, credentials, package_json, exists, sha256):
     """Run every assertion against a running server and raise SmokeFailure listing all failures."""
     expected = expectations(manifest)
-    problems = check_preload(log_text)
+    problems = check_no_image_size(exists)
     problems += check_served_version(server.get(VERSION_PATH), expected)
     problems += check_fork_revision(package_json, expected)
     server.login(*credentials)

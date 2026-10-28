@@ -62,8 +62,10 @@ def validate_digest(value):
 
 
 # Controller configuration schema 2 replaced the single 'meshcentral_version' value with an
-# allowlist of reviewed MeshCentral versions ('reviewed_versions').
-CONFIG_SCHEMA = 2
+# allowlist of reviewed MeshCentral versions ('reviewed_versions'). Schema 3 retired the image-size
+# preload and its 'image_size_mitigation_sha256' (the fork no longer installs image-size).
+CONFIG_SCHEMA = 3
+RETIRED_MITIGATION_KEY = 'image_size_mitigation_sha256'
 VERSION_PATTERN = r'[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?'
 FORK_REVISION_PATTERN = r'[0-9a-f]{40}'
 
@@ -81,6 +83,11 @@ def validate_config(config):
     if 'meshcentral_version' in config:
         raise ValueError(str(CONFIG) + ' uses the retired single meshcentral_version policy; '
                          'migrate it with "install_controller.py --upgrade" before deploying')
+    if RETIRED_MITIGATION_KEY in config:
+        # Refused, not ignored: the key records the image-size preload policy this controller no longer
+        # applies, so the operator acknowledges the change through the one reviewed migration path.
+        raise ValueError(str(CONFIG) + ' still sets ' + RETIRED_MITIGATION_KEY + ' (the retired image-size '
+                         'preload); migrate it with "install_controller.py --upgrade" before deploying')
     if config.get('schema') != CONFIG_SCHEMA:
         raise ValueError('Unsupported release controller configuration schema: ' + repr(config.get('schema')))
     if not re.fullmatch(r'ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+', config['image']):
@@ -90,35 +97,31 @@ def validate_config(config):
     if not isinstance(config.get('enable_fleet_update'), bool):
         raise ValueError('Explicit enable_fleet_update policy is required')
     validate_reviewed_versions(config.get('reviewed_versions'))
-    digest = config.get('image_size_mitigation_sha256')
-    if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
-        raise ValueError('image_size_mitigation_sha256 is missing; install the tracked mitigation with '
-                         '"install_controller.py --upgrade"')
     return config
 
 
-def new_config(image, health_url, reviewed_version, enable_fleet_update, mitigation_sha256):
+def new_config(image, health_url, reviewed_version, enable_fleet_update):
     return validate_config({'schema': CONFIG_SCHEMA, 'image': image, 'health_url': health_url,
                             'reviewed_versions': [reviewed_version],
-                            'enable_fleet_update': enable_fleet_update,
-                            'image_size_mitigation_sha256': mitigation_sha256})
+                            'enable_fleet_update': enable_fleet_update})
 
 
-def migrate_config(config, mitigation_sha256):
-    """Return the schema-2 form of a controller configuration.
+def migrate_config(config):
+    """Return the current (schema 3) form of a controller configuration.
 
-    The single reviewed value of a schema-1 configuration becomes the first allowlist entry,
-    so every release that the old configuration accepted is still accepted. The sha256 of the
-    image-size mitigation that install_controller installed from the repository is recorded.
-    Other settings are kept unchanged.
+    Schema 1: the single reviewed value becomes the first allowlist entry, so every release the
+    old configuration accepted is still accepted. Schema 2: the retired image-size mitigation
+    digest is removed. Other settings are kept unchanged.
     """
     config = dict(config)
     if 'meshcentral_version' in config:
         if 'schema' in config or 'reviewed_versions' in config:
             raise ValueError('Configuration mixes meshcentral_version with schema 2 fields; resolve it by hand')
         config['reviewed_versions'] = [config.pop('meshcentral_version')]
-        config['schema'] = CONFIG_SCHEMA
-    config['image_size_mitigation_sha256'] = mitigation_sha256
+    elif config.get('schema') not in (2, CONFIG_SCHEMA):
+        raise ValueError('Unsupported release controller configuration schema: ' + repr(config.get('schema')))
+    config.pop(RETIRED_MITIGATION_KEY, None)
+    config['schema'] = CONFIG_SCHEMA
     return validate_config(config)
 
 
@@ -406,19 +409,47 @@ def start(config, release):
         mount(Path(release['runtime']) / role, BASE / 'meshcentral-data' / name, role == 'data')
     for item in manifest['mounts']:
         mount(directory / 'overrides' / item['source'], item['target'], True)
-    # Preserve the production image-size mitigation, tracked as tools/deployment/harden-image-size.js
-    # and installed by install_controller.py, which records its sha256 in the configuration.
-    mitigation = BASE / 'bin/harden-image-size.js'
-    if mitigation.is_symlink() or not mitigation.is_file():
-        raise ValueError('The image-size mitigation ' + str(mitigation) + ' is missing; reinstall it with '
-                         '"install_controller.py --upgrade"')
-    if file_sha256(mitigation) != config['image_size_mitigation_sha256']:
-        raise ValueError('The image-size mitigation ' + str(mitigation) + ' differs from the copy '
-                         'install_controller.py installed; review it and reinstall with "install_controller.py --upgrade"')
-    mount(mitigation, mitigation, True)
-    args.extend(['--env', 'NODE_OPTIONS=--require=' + str(mitigation)])
+    # No NODE_OPTIONS: the release image does not install image-size, so nothing is preloaded.
     args.append(config['image'] + '@' + release['digest'])
     run(*args)
+
+
+# The host service's image-size preload (DEP-21), installed before the fork release. The 1.2.5 host
+# installation needs it for as long as it is the rollback target of an interrupted first migration, so
+# it is retired only after a container release has been promoted, and kept for the manual return to it.
+LEGACY_PRELOAD = (Path('/opt/meshcentral/bin/harden-image-size.js'),
+                  Path('/etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf'))
+RETIRED_PRELOAD = 'retired-host-preload'
+
+
+def check_legacy_preload():
+    """Refuse before anything changes when a legacy preload path is not a regular file."""
+    for path in LEGACY_PRELOAD:
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ValueError('The legacy image-size preload ' + str(path) + ' is not a regular file; '
+                             'inspect it and remove it by hand before deploying')
+
+
+def retire_legacy_preload():
+    """Move the legacy host preload into the controller state, naming each file. Returns the moved paths.
+
+    Runs after every successful promotion; a host without the preload is left unchanged.
+    """
+    present = [path for path in LEGACY_PRELOAD if path.is_symlink() or path.exists()]
+    if not present:
+        return []
+    check_legacy_preload()
+    archive = STATE / RETIRED_PRELOAD / time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+    archive.mkdir(mode=0o700, parents=True)
+    for path in present:
+        digest = file_sha256(path)
+        shutil.move(str(path), str(archive / path.name))
+        print('Retired the legacy image-size preload: moved ' + str(path) + ' (sha256 ' + digest + ') to ' +
+              str(archive / path.name))
+    sync_directory(archive)
+    if LEGACY_PRELOAD[1] in present:
+        run('systemctl', 'daemon-reload')
+    return present
 
 
 def remove_container():
@@ -507,6 +538,7 @@ def promote(config, digest):
     if not healthy(config, previous['digest'] if previous else None, attempts=1):
         raise RuntimeError('Current production service is unhealthy; refusing promotion')
     directory = prepare(config, digest)
+    check_legacy_preload()
     runtime = seed_agents(directory)
     release = {'digest': digest, 'directory': str(directory), 'runtime': str(runtime)}
     # First migration: record the healthy host installation's shadow copies, the explicit allowlist
@@ -543,6 +575,13 @@ def promote(config, digest):
     except BaseException:
         recover(config, transaction)
         raise
+    # After the commit: a failure here leaves the promoted release running and is reported, not rolled back.
+    try:
+        retire_legacy_preload()
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        raise RuntimeError('Promoted ' + digest + ', but retiring the legacy image-size preload failed: ' +
+                           str(error) + '. Move ' + ' and '.join(str(path) for path in LEGACY_PRELOAD) +
+                           ' out by hand and run systemctl daemon-reload.') from error
 
 
 def main():

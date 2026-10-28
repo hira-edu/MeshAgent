@@ -16,11 +16,11 @@ permissions and directory fsync; Windows fixtures stub only POSIX-only APIs.
 `docs/DEPLOYMENT.md`: the `reviewed_versions` policy and the
 `install_controller.py --upgrade` migration, manifest-only agent seeding across
 promotion and recovery, the shadow-copy check and the host recovery snapshot,
-installation and start-time checks of the image-size mitigation, the smoke
-assertions against fixture pages, and the Docker build-context rules. Its
-`MitigationShimTests` run `harden-image-size.js` under `node` against stand-in
-`image-size` packages and are skipped when `node` is absent. Two symlink cases
-are skipped on Windows hosts that cannot create symlinks.
+the retired image-size preload (no preload started or required, the schema-3
+configuration migration, and the legacy host preload moved aside only after a
+committed promotion), the smoke assertions against fixture pages, and the Docker
+build-context rules. Symlink cases are skipped on Windows hosts that cannot
+create symlinks.
 
 Validate hook/coordinated-release.yml and the public repository dispatch workflows with
 `actionlint`. The release workflow also aggregates the Windows matrix and runs
