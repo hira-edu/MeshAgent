@@ -7,8 +7,15 @@ Persistent application data is never replaced or restored by an image rollback.
 A release image is the fork package installed from its tarball and nothing else (Stage 4, D11): it
 carries one release manifest (/opt/meshcentral/release/manifest.json) and no overlay files, mounts
 or agent folders. Agents are served from the package, verified against agents/agent-defaults.json.
+
+One controller serves two independent server instances on the same host (INSTANCES): production
+(the default; its paths, container and argv are those of the first release) and preview
+(preview.high.support). A process serves exactly one instance, selected by --instance before
+anything else runs (activate); each instance has its own install root, state, lock, controller
+configuration, container, service account and health URL, and every mismatch between them is refused.
 """
 import argparse
+from dataclasses import dataclass
 import fcntl
 import hashlib
 import json
@@ -29,10 +36,49 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import meshcentral_shadow_check  # noqa: E402
 
-BASE = Path('/opt/meshcentral')
-STATE = Path('/var/lib/meshcentral-deploy')
-CONFIG = Path('/etc/meshcentral-deploy.json')
-CONTAINER = 'meshcentral-production'
+
+@dataclass(frozen=True)
+class Instance:
+    """One server instance the controller deploys. Paths are host paths."""
+    name: str
+    base: Path            # host folder holding meshcentral-data, -files, -web, -recordings, -backups
+    state: Path           # releases, active/previous/transaction records, the lock
+    config: Path          # controller configuration
+    container: str
+    account: str          # service account the container runs as
+    host_service: str | None  # the retained pre-container systemd service (first migration), if any
+    mount_root: PurePosixPath | None  # container folder the persistent folders are mounted under; None: their host path
+    health_url: str | None  # fixed public health URL, or None when the configuration names it
+    web_port: int         # MeshCentral settings.port (127.0.0.1, behind Caddy)
+    mps_port: int         # MeshCentral settings.mpsport
+    database: str         # MongoDB database (settings.mongodbname)
+    server_host: str | None  # the public host of the instance's server and agents, when fixed here
+    distinct_from: tuple  # instances whose certificates and keys this instance must never hold
+
+
+# The image's install root: MeshCentral derives every default path from it (meshcentral.js:89-101).
+IMAGE_ROOT = PurePosixPath('/opt/meshcentral')
+INSTANCES = {
+    'production': Instance('production', Path('/opt/meshcentral'), Path('/var/lib/meshcentral-deploy'),
+                           Path('/etc/meshcentral-deploy.json'), 'meshcentral-production', 'meshcentral',
+                           'meshcentral', None, None, 4430, 4433, 'meshcentral', None, ()),
+    'preview': Instance('preview', Path('/opt/meshcentral-preview'), Path('/var/lib/meshcentral-deploy-preview'),
+                        Path('/etc/meshcentral-deploy-preview.json'), 'meshcentral-preview', 'meshcentral-preview',
+                        None, IMAGE_ROOT, 'https://preview.high.support/health.ashx', 4440, 4441,
+                        'meshcentral_preview', 'preview.high.support', ('production',)),
+}
+# Docker label naming the instance a container was started for.
+INSTANCE_LABEL = 'meshcentral-release.instance'
+
+# The active instance (activate() selects it). Production by default.
+INSTANCE = INSTANCES['production']
+BASE = INSTANCE.base
+STATE = INSTANCE.state
+CONFIG = INSTANCE.config
+CONTAINER = INSTANCE.container
+SERVICE_ACCOUNT = INSTANCE.account
+HOST_SERVICE = INSTANCE.host_service
+MOUNT_ROOT = INSTANCE.mount_root
 
 
 def run(*args, capture=False):
@@ -84,14 +130,25 @@ def validate_reviewed_versions(versions):
     return versions
 
 
-def validate_config(config):
+def validate_config(config, instance=None):
+    """Validate a controller configuration for ``instance`` (a name; default: the active instance).
+
+    The configuration names its instance ("instance"; absent means production, the form every production
+    configuration has had), and a configuration of another instance is refused.
+    """
+    instance = INSTANCES[instance] if instance else INSTANCE
+    path = CONFIG if instance is INSTANCE else instance.config
+    named = config.get('instance', 'production')
+    if named != instance.name:
+        raise ValueError(str(path) + ' is the controller configuration of instance ' + repr(named) + ', not ' +
+                         instance.name + '; refusing to use it')
     if 'meshcentral_version' in config:
-        raise ValueError(str(CONFIG) + ' uses the retired single meshcentral_version policy; '
+        raise ValueError(str(path) + ' uses the retired single meshcentral_version policy; '
                          'migrate it with "install_controller.py --upgrade" before deploying')
     if RETIRED_MITIGATION_KEY in config:
         # Refused, not ignored: the key records the image-size preload policy this controller no longer
         # applies, so the operator acknowledges the change through the one reviewed migration path.
-        raise ValueError(str(CONFIG) + ' still sets ' + RETIRED_MITIGATION_KEY + ' (the retired image-size '
+        raise ValueError(str(path) + ' still sets ' + RETIRED_MITIGATION_KEY + ' (the retired image-size '
                          'preload); migrate it with "install_controller.py --upgrade" before deploying')
     if config.get('schema') != CONFIG_SCHEMA:
         raise ValueError('Unsupported release controller configuration schema: ' + repr(config.get('schema')))
@@ -99,6 +156,12 @@ def validate_config(config):
         raise ValueError('Only the configured GHCR image repository is accepted')
     if not config['health_url'].startswith('https://') or not config['health_url'].endswith('/health.ashx'):
         raise ValueError('health_url must be an HTTPS MeshCentral health.ashx endpoint')
+    if instance.health_url and config['health_url'] != instance.health_url:
+        raise ValueError('The ' + instance.name + ' health_url must be ' + instance.health_url)
+    for other in INSTANCES.values():
+        if other is not instance and other.health_url and config['health_url'] == other.health_url:
+            raise ValueError('health_url ' + config['health_url'] + ' belongs to the ' + other.name +
+                             ' instance; the ' + instance.name + ' instance must probe its own server')
     if not isinstance(config.get('enable_fleet_update'), bool):
         raise ValueError('Explicit enable_fleet_update policy is required')
     validate_reviewed_versions(config.get('reviewed_versions'))
@@ -109,6 +172,14 @@ def new_config(image, health_url, reviewed_version, enable_fleet_update):
     return validate_config({'schema': CONFIG_SCHEMA, 'image': image, 'health_url': health_url,
                             'reviewed_versions': [reviewed_version],
                             'enable_fleet_update': enable_fleet_update})
+
+
+def new_instance_config(instance, image, reviewed_versions, enable_fleet_update):
+    """A configuration for a non-production instance: it names the instance and its fixed health URL."""
+    definition = INSTANCES[instance]
+    return validate_config({'schema': CONFIG_SCHEMA, 'instance': definition.name, 'image': image,
+                            'health_url': definition.health_url, 'reviewed_versions': list(reviewed_versions),
+                            'enable_fleet_update': enable_fleet_update}, definition.name)
 
 
 def migrate_config(config):
@@ -131,7 +202,60 @@ def migrate_config(config):
 
 
 def load_config():
+    if not CONFIG.is_file():
+        raise ValueError('No controller configuration for the ' + INSTANCE.name + ' instance at ' + str(CONFIG) +
+                         '; install it with install_controller.py' +
+                         ('' if INSTANCE.name == 'production' else ' --instance ' + INSTANCE.name))
     return validate_config(json.loads(CONFIG.read_text()))
+
+
+def activate(name):
+    """Select the instance this process serves. Called once, before anything else runs."""
+    global INSTANCE, BASE, STATE, CONFIG, CONTAINER, SERVICE_ACCOUNT, HOST_SERVICE, MOUNT_ROOT, LEGACY_PRELOAD
+    if name not in INSTANCES:
+        raise ValueError('Unknown instance ' + repr(name) + '; expected one of ' + ', '.join(sorted(INSTANCES)))
+    INSTANCE = INSTANCES[name]
+    BASE, STATE, CONFIG = INSTANCE.base, INSTANCE.state, INSTANCE.config
+    CONTAINER, SERVICE_ACCOUNT = INSTANCE.container, INSTANCE.account
+    HOST_SERVICE, MOUNT_ROOT = INSTANCE.host_service, INSTANCE.mount_root
+    # The image-size preload belongs to the production host service; no other instance has one.
+    LEGACY_PRELOAD = HOST_PRELOAD if HOST_SERVICE else ()
+    return INSTANCE
+
+
+def container_root():
+    """The container folder the persistent folders are mounted under (production: their own host paths)."""
+    return MOUNT_ROOT if MOUNT_ROOT is not None else BASE
+
+
+def _overlaps(first, second):
+    return first == second or first in second.parents or second in first.parents
+
+
+def check_instance_isolation():
+    """Refuse when the active instance's host paths are, contain or lie inside another instance's.
+
+    Symbolic links are resolved, so a preview folder linked to production's is refused. Each mounted
+    folder is checked too, since the container writes through it.
+    """
+    problems = []
+    mine = [('install root', BASE), ('state directory', STATE), ('controller configuration', CONFIG)]
+    mine += [('mounted folder', BASE / name) for name in MOUNTED_FOLDERS]
+    for other in INSTANCES.values():
+        if other.name == INSTANCE.name:
+            continue
+        theirs = (('install root', other.base), ('state directory', other.state),
+                  ('controller configuration', other.config))
+        for label, path in mine:
+            resolved = Path(path).resolve()
+            for other_label, other_path in theirs:
+                if _overlaps(resolved, Path(other_path).resolve()):
+                    problems.append('the ' + INSTANCE.name + ' ' + label + ' ' + str(path) + ' resolves to ' +
+                                    str(resolved) + ', which overlaps the ' + other.name + ' ' + other_label + ' ' +
+                                    str(other_path))
+    if problems:
+        raise ValueError('Instance paths overlap; refusing to act on the ' + INSTANCE.name + ' instance:\n  ' +
+                         '\n  '.join(problems))
 
 
 def release_identity(manifest):
@@ -203,15 +327,34 @@ def inspect_container():
     return json.loads(result.stdout)[0]
 
 
+def container_problem(info):
+    """Why the inspected container is not the active instance's, or None.
+
+    It must carry the instance label (production also accepts the unlabelled container of the first
+    controller releases) and bind-mount only folders of the instance's own install root.
+    """
+    label = ((info.get('Config') or {}).get('Labels') or {}).get(INSTANCE_LABEL)
+    if label != INSTANCE.name and not (label is None and INSTANCE.name == 'production'):
+        return 'container ' + CONTAINER + ' is labelled for instance ' + repr(label) + ', not ' + INSTANCE.name
+    root = PurePosixPath(Path(BASE).as_posix())
+    for item in info.get('Mounts') or []:
+        source = PurePosixPath(str(item.get('Source', '')))
+        if item.get('Type') == 'bind' and not (source == root or root in source.parents):
+            return ('container ' + CONTAINER + ' mounts ' + str(source) + ', outside the ' + INSTANCE.name +
+                    ' install root ' + str(root))
+    return None
+
+
 def healthy(config, digest=None, attempts=24):
     for attempt in range(attempts):
         service_ok = False
         if digest:
             info = inspect_container()
             service_ok = bool(info and info['State']['Running'] and
-                              info['Config']['Image'] == config['image'] + '@' + digest)
-        else:
-            service_ok = subprocess.run(['systemctl', 'is-active', '--quiet', 'meshcentral']).returncode == 0
+                              info['Config']['Image'] == config['image'] + '@' + digest and
+                              container_problem(info) is None)
+        elif HOST_SERVICE:
+            service_ok = subprocess.run(['systemctl', 'is-active', '--quiet', HOST_SERVICE]).returncode == 0
         try:
             # Non-cacheable request, exact status/body, CA/hostname verification enabled.
             url = config['health_url'] + '?release_probe=' + uuid.uuid4().hex
@@ -282,6 +425,14 @@ def check_shadow_copies(manifest):
 # The folders start() mounts into the container: written by the server, and read only.
 WRITABLE_MOUNTS = ('meshcentral-data', 'meshcentral-files', 'meshcentral-recordings', 'meshcentral-backups')
 READONLY_MOUNTS = ('meshcentral-web',)
+MOUNTED_FOLDERS = ('meshcentral-data', 'meshcentral-files', 'meshcentral-web',
+                   'meshcentral-recordings', 'meshcentral-backups')
+
+
+def _lower_keys(value):
+    if isinstance(value, dict):
+        return {str(key).lower(): _lower_keys(item) for key, item in value.items()}
+    return value
 
 
 def server_config_paths(server_config):
@@ -292,12 +443,7 @@ def server_config_paths(server_config):
     not listed: the container's --datapath and --filespath override them (getConfig copies the command
     line over config.settings).
     """
-    def lower(value):
-        if isinstance(value, dict):
-            return {str(key).lower(): lower(item) for key, item in value.items()}
-        return value
-
-    config = lower(server_config) if isinstance(server_config, dict) else {}
+    config = _lower_keys(server_config) if isinstance(server_config, dict) else {}
     settings = config.get('settings') if isinstance(config.get('settings'), dict) else {}
     paths = []
     # Autobackup runs unless it is false (meshcentral.js:2210-2212); backuppath goes through path.resolve
@@ -351,24 +497,151 @@ def check_server_config_paths(server_config, base=None):
                          '\n  '.join(problems))
 
 
+# Values the operator must replace in tools/deployment/meshcentral-preview-config.template.json.
+TEMPLATE_PLACEHOLDER = 'REPLACE_'
+# MeshCentral's values when the keys are absent: database (db.js:1012-1013) and MPS port.
+DEFAULT_DATABASE = 'meshcentral'
+DEFAULT_MPS_PORT = 4433
+LOOPBACK = '127.0.0.1'
+
+
+def _url_host(value):
+    match = re.fullmatch(r'[a-z][a-z0-9+.-]*://([^/:?#]+).*', value.strip(), re.IGNORECASE) \
+        if isinstance(value, str) else None
+    return match.group(1).lower() if match else None
+
+
+def _placeholders(value, label):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _placeholders(item, label + '.' + str(key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _placeholders(item, label + '[' + str(index) + ']')
+    elif isinstance(value, str) and value.startswith(TEMPLATE_PLACEHOLDER):
+        yield label
+
+
+def server_config_instance_problems(server_config, instance=None):
+    """Return why a MeshCentral config does not fit ``instance`` (a name; default: the active instance).
+
+    Every instance refuses another instance's listening ports, database and public host. An instance with
+    a fixed public host (preview) must also use exactly its own: web port and MPS port (or 0) bound to
+    127.0.0.1, redirect port 0, a MongoDB URI with its database, its host in cert, agentAliasDNS and the
+    default domain's certUrl, and no unreplaced template placeholder. Messages name keys and non-secret
+    values only (ports, database and host names); the MongoDB URI and secrets are never printed.
+    """
+    instance = INSTANCES[instance] if instance else INSTANCE
+    config = _lower_keys(server_config) if isinstance(server_config, dict) else {}
+    settings = config.get('settings') if isinstance(config.get('settings'), dict) else {}
+    domains = config.get('domains') if isinstance(config.get('domains'), dict) else {}
+    default_domain = domains.get('') if isinstance(domains.get(''), dict) else {}
+    port, mps_port = settings.get('port'), settings.get('mpsport', DEFAULT_MPS_PORT)
+    database = settings.get('mongodbname', DEFAULT_DATABASE)
+
+    def text(value):
+        return value if isinstance(value, str) else None
+
+    hosts = (('settings.cert', text(settings.get('cert'))),
+             ('settings.agentaliasdns', text(settings.get('agentaliasdns'))),
+             ('domains[""].certurl', _url_host(default_domain.get('certurl'))))
+    problems = []
+    for other in INSTANCES.values():
+        if other is instance:
+            continue
+        for key, value in (('settings.port', port), ('settings.mpsport', mps_port)):
+            if type(value) is int and value in (other.web_port, other.mps_port):
+                problems.append(key + ' = ' + str(value) + ' is a port of the ' + other.name + ' instance' +
+                                ('' if key[9:] in settings else ' (MeshCentral\'s default when the key is absent)'))
+        if 'mongodb' in settings and database == other.database:
+            problems.append('settings.mongodbname = ' + str(database) + ' is the ' + other.name + ' instance\'s '
+                            'database' + ('' if 'mongodbname' in settings else
+                                          ' (MeshCentral\'s default when the key is absent)'))
+        for key, host in hosts:
+            if other.server_host and host and host.lower() == other.server_host:
+                problems.append(key + ' names ' + host + ', the ' + other.name + ' instance\'s host')
+    if instance.server_host:
+        def exact(key, value, expected):
+            if type(value) is not type(expected) or value != expected:
+                problems.append(key + ' must be ' + json.dumps(expected) + ' for the ' + instance.name + ' instance' +
+                                (', found ' + json.dumps(value) if isinstance(value, (int, str)) else ''))
+
+        exact('settings.port', port, instance.web_port)
+        exact('settings.portbind', settings.get('portbind'), LOOPBACK)
+        exact('settings.redirport', settings.get('redirport'), 0)
+        if type(mps_port) is not int or mps_port != 0:
+            exact('settings.mpsport', mps_port, instance.mps_port)
+            exact('settings.mpsportbind', settings.get('mpsportbind'), LOOPBACK)
+        if not isinstance(settings.get('mongodb'), str) or not settings['mongodb'].strip():
+            problems.append('settings.mongodb must give the MongoDB URI of the ' + instance.name + ' database user')
+        exact('settings.mongodbname', settings.get('mongodbname'), instance.database)
+        exact('settings.cert', settings.get('cert'), instance.server_host)
+        for key, host in hosts[1:]:
+            if host is not None and host != instance.server_host:
+                problems.append(key + ' names ' + host + '; the ' + instance.name + ' instance uses ' +
+                                instance.server_host)
+        problems += [label + ' still holds a ' + TEMPLATE_PLACEHOLDER + ' template placeholder'
+                     for label in _placeholders(server_config, 'config')]
+    return problems
+
+
+def check_server_config_instance(server_config):
+    problems = server_config_instance_problems(server_config)
+    if problems:
+        raise ValueError('The MeshCentral configuration does not fit the ' + INSTANCE.name + ' instance:\n  ' +
+                         '\n  '.join(problems))
+
+
 def check_server_config():
-    """check_server_config_paths on the meshcentral-data/config.json the container will read."""
+    """check_server_config_paths and check_server_config_instance on the meshcentral-data/config.json the
+    container will read. Its paths are the container's: the folders are mounted under container_root()."""
     path = BASE / 'meshcentral-data/config.json'
     try:
         server_config = json.loads(path.read_text(encoding='utf-8'))
     except ValueError as error:
         raise ValueError(str(path) + ' is not valid JSON (' + type(error).__name__ + ')') from None
-    check_server_config_paths(server_config)
+    try:
+        check_server_config_paths(server_config, container_root())
+    except ValueError as error:
+        if MOUNT_ROOT is None:
+            raise
+        raise ValueError(str(error) + '\n  The ' + INSTANCE.name + ' container mounts ' + str(BASE) + '/<folder> at ' +
+                         str(MOUNT_ROOT) + '/<folder>; write configuration paths as the container sees them.') from None
+    check_server_config_instance(server_config)
+
+
+def check_identity_separation():
+    """Refuse when the active instance's meshcentral-data holds a certificate or key file of an instance it
+    must stay distinct from: a copied agent certificate would give both servers one ServerID. Files are
+    compared by sha256 in memory; only their names are printed."""
+    data = BASE / 'meshcentral-data'
+    problems = []
+    for name in INSTANCE.distinct_from:
+        other = INSTANCES[name].base / 'meshcentral-data'
+        theirs = {}
+        for path in (sorted(other.glob('*-cert-*')) if other.is_dir() else ()):
+            if path.is_file():
+                theirs.setdefault(file_sha256(path), path.name)
+        for path in (sorted(data.glob('*-cert-*')) if data.is_dir() else ()):
+            digest = file_sha256(path) if path.is_file() else None
+            if digest in theirs:
+                problems.append(str(path) + ' equals the ' + name + ' instance\'s ' + theirs[digest])
+    if problems:
+        raise ValueError('The ' + INSTANCE.name + ' instance must generate its own certificates and keys (its own '
+                         'ServerID); move these files out of ' + str(data) + ':\n  ' + '\n  '.join(problems))
 
 
 def start(config, release):
     manifest = validate_manifest(Path(release['directory']) / RELEASE_FOLDER, config['reviewed_versions'])
+    check_instance_isolation()
     # Runs at every start, including recovery and rollback, so data/web copies placed since the
     # release was promoted are refused rather than trusted.
     check_shadow_copies(manifest)
     check_server_config()
-    user = pwd.getpwnam('meshcentral')
-    args = ['docker', 'run', '--detach', '--name', CONTAINER, '--restart', 'unless-stopped',
+    check_identity_separation()
+    user = pwd.getpwnam(SERVICE_ACCOUNT)
+    args = ['docker', 'run', '--detach', '--name', CONTAINER, '--label', INSTANCE_LABEL + '=' + INSTANCE.name,
+            '--restart', 'unless-stopped',
             '--network', 'host', '--read-only', '--cap-drop', 'ALL',
             '--security-opt', 'no-new-privileges:true', '--user', f'{user.pw_uid}:{user.pw_gid}',
             '--init', '--stop-timeout', '60', '--tmpfs', '/tmp:rw,nosuid,nodev,size=128m',
@@ -376,9 +649,8 @@ def start(config, release):
     def mount(source, target, readonly=False):
         args.extend(['--mount', f'type=bind,src={source},dst={target}' + (',readonly' if readonly else '')])
     # Only the persistent folders: the code, its agents and its cores come from the image's package.
-    for name in ('meshcentral-data', 'meshcentral-files', 'meshcentral-web',
-                 'meshcentral-recordings', 'meshcentral-backups'):
-        mount(BASE / name, BASE / name, name == 'meshcentral-web')
+    for name in MOUNTED_FOLDERS:
+        mount(BASE / name, container_root() / name, name in READONLY_MOUNTS)
     # No NODE_OPTIONS: the release image does not install image-size, so nothing is preloaded.
     args.append(config['image'] + '@' + release['digest'])
     run(*args)
@@ -387,8 +659,10 @@ def start(config, release):
 # The host service's image-size preload (DEP-21), installed before the fork release. The 1.2.5 host
 # installation needs it for as long as it is the rollback target of an interrupted first migration, so
 # it is retired only after a container release has been promoted, and kept for the manual return to it.
-LEGACY_PRELOAD = (Path('/opt/meshcentral/bin/harden-image-size.js'),
-                  Path('/etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf'))
+HOST_PRELOAD = (Path('/opt/meshcentral/bin/harden-image-size.js'),
+                Path('/etc/systemd/system/meshcentral.service.d/30-harden-image-size.conf'))
+# The active instance's preload (activate): production's host service has one, other instances none.
+LEGACY_PRELOAD = HOST_PRELOAD
 RETIRED_PRELOAD = 'retired-host-preload'
 
 
@@ -423,7 +697,11 @@ def retire_legacy_preload():
 
 
 def remove_container():
-    if inspect_container() is not None:
+    info = inspect_container()
+    if info is not None:
+        problem = container_problem(info)
+        if problem:
+            raise RuntimeError('Not stopping it: ' + problem + '. Inspect the container by hand.')
         run('docker', 'stop', '--time', '60', CONTAINER)
         run('docker', 'rm', CONTAINER)
 
@@ -467,6 +745,9 @@ def recover(config, transaction):
     previous = transaction['previous']
     if previous:
         start(config, previous)
+    elif not HOST_SERVICE:
+        # No earlier release and no host service: the instance stays stopped.
+        print('No earlier ' + INSTANCE.name + ' release to restore; the ' + INSTANCE.name + ' instance is stopped.')
     else:
         # The retained host installation has no release manifest. Its explicit allowlist is the
         # snapshot promote() recorded while that service was healthy, before stopping it; anything
@@ -483,8 +764,8 @@ def recover(config, transaction):
             raise meshcentral_shadow_check.ShadowCopyError(
                 'Not restoring the host MeshCentral service: its data or web folders changed after the promotion '
                 'stopped it. Operator action is needed; the transaction is retained.\n' + str(error)) from error
-        run('systemctl', 'enable', '--now', 'meshcentral')
-    if not healthy(config, previous['digest'] if previous else None):
+        run('systemctl', 'enable', '--now', HOST_SERVICE)
+    if (previous or HOST_SERVICE) and not healthy(config, previous['digest'] if previous else None):
         raise RuntimeError('Recovery health failed; transaction retained for operator recovery')
     atomic_json(STATE / 'active.json', previous)
     (STATE / 'transaction.json').unlink()
@@ -502,18 +783,21 @@ def promote(config, digest):
             raise RuntimeError('Active release is unhealthy')
         print('Requested digest is already active')
         return
-    if not healthy(config, previous['digest'] if previous else None, attempts=1):
-        raise RuntimeError('Current production service is unhealthy; refusing promotion')
+    # An instance with nothing running yet (no release, no host service) has no incumbent to protect.
+    if (previous or HOST_SERVICE) and not healthy(config, previous['digest'] if previous else None, attempts=1):
+        raise RuntimeError('Current ' + INSTANCE.name + ' service is unhealthy; refusing promotion')
     directory = prepare(config, digest)
     release = {'digest': digest, 'directory': str(directory)}
     check_legacy_preload()
-    # The same shadow check start() runs, before anything is stopped: a host that the candidate would
+    # The same checks start() runs, before anything is stopped: a host that the candidate would
     # refuse is reported without an outage.
+    check_instance_isolation()
     check_shadow_copies(release_manifest(release))
     check_server_config()
+    check_identity_separation()
     # First migration: record the healthy host installation's shadow copies, the explicit allowlist
     # recover() checks before restarting the host service. Refuses before anything is stopped.
-    host_allowlist = None if previous else meshcentral_shadow_check.snapshot(BASE)
+    host_allowlist = meshcentral_shadow_check.snapshot(BASE) if not previous and HOST_SERVICE else None
     backup = STATE / ('config-' + uuid.uuid4().hex + '.json')
     config_path = BASE / 'meshcentral-data/config.json'
     metadata = config_path.stat()
@@ -524,15 +808,16 @@ def promote(config, digest):
     transaction = {'previous': previous, 'candidate': release, 'config_backup': str(backup),
                    'config_metadata': {'uid': metadata.st_uid, 'gid': metadata.st_gid,
                                        'mode': metadata.st_mode & 0o777}}
-    if not previous:
+    if not previous and HOST_SERVICE:
         transaction['host_shadow_allowlist'] = host_allowlist
     atomic_json(journal, transaction)
     try:
-        if previous:
+        if previous or not HOST_SERVICE:
+            # Without a host service this also removes a container of this instance left without a record.
             remove_container()
         else:
             # Retain the host installation for first-migration rollback.
-            run('systemctl', 'disable', '--now', 'meshcentral')
+            run('systemctl', 'disable', '--now', HOST_SERVICE)
         apply_fleet_policy(config['enable_fleet_update'])
         start(config, release)
         if not healthy(config, digest):
@@ -556,11 +841,15 @@ def promote(config, digest):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--instance', choices=sorted(INSTANCES), default='production',
+                        help='server instance to act on (default: production)')
     parser.add_argument('command', choices=('deploy', 'recover', 'rollback', 'status'))
     parser.add_argument('digest', nargs='?')
     args = parser.parse_args()
+    activate(args.instance)
     if os.geteuid() != 0:
         raise SystemExit('Run through the installed root-owned systemd release controller')
+    check_instance_isolation()
     STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (STATE / 'lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -572,7 +861,8 @@ def main():
         elif args.command == 'rollback':
             previous = json.loads((STATE / 'previous.json').read_text())
             if not previous:
-                raise ValueError('First migration rollback requires the retained host-service recovery procedure')
+                raise ValueError('First migration rollback requires the retained host-service recovery procedure'
+                                 if HOST_SERVICE else 'No previous ' + INSTANCE.name + ' release to roll back to')
             promote(config, validate_digest(previous['digest']))
         else:
             print((STATE / 'active.json').read_text() if (STATE / 'active.json').exists() else 'null')

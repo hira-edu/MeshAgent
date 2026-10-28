@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Restricted, root-owned SSH forced-command entry point; accepts only a digest."""
+"""Restricted, root-owned SSH forced-command entry point; accepts only a digest.
+
+`deploy sha256:<digest>` deploys production (unchanged since the first release) and
+`deploy-preview sha256:<digest>` deploys the preview instance. Each runs the controller in its own
+systemd unit, so the two instances' deployments never share a unit name.
+"""
 import re
 import json
 import os
@@ -7,15 +12,22 @@ import subprocess
 import sys
 import tempfile
 
+CONTROLLER = '/usr/local/libexec/meshcentral-release'
+# Forced command -> (systemd unit, controller arguments before the command). Mirrors
+# release_manager.INSTANCES (checked by test/ci_release_preview_instance_test.py).
+COMMANDS = {'deploy': ('meshcentral-deploy', ()),
+            'deploy-preview': ('meshcentral-deploy-preview', ('--instance', 'preview'))}
+
 
 def command(value, credential_path=None):
-    match = re.fullmatch(r'deploy (sha256:[0-9a-f]{64})', value)
+    match = re.fullmatch(r'(deploy|deploy-preview) (sha256:[0-9a-f]{64})', value)
     if not match:
-        raise ValueError('Only deploy sha256:<digest> is allowed')
+        raise ValueError('Only deploy sha256:<digest> or deploy-preview sha256:<digest> is allowed')
+    unit, instance = COMMANDS[match.group(1)]
     credentials = ['--property=LoadCredential=ghcr:' + credential_path] if credential_path else []
-    return ['systemd-run', '--unit=meshcentral-deploy', '--collect', '--wait', '--pipe',
+    return ['systemd-run', '--unit=' + unit, '--collect', '--wait', '--pipe',
             '--property=Type=exec', '--property=TimeoutStartSec=30min', *credentials,
-            '/usr/local/libexec/meshcentral-release', 'deploy', match.group(1)]
+            CONTROLLER, *instance, 'deploy', match.group(2)]
 
 
 def registry_credentials(value):
