@@ -199,14 +199,11 @@ views and scripts, and the two viewer `-min` files) runs in the MeshCentral
 checkout with the toolchain pinned in `deploy/package.json`:
 
 ```powershell
-node deploy/scripts/regenerate.js --check --allow-pending ja-jp
+node deploy/scripts/regenerate.js --check
 ```
 
-It needs `npm ci` in `deploy/` and writes nothing with `--check`. Without
-`--allow-pending ja-jp` it fails on the stale `*_ja-jp` translations upstream
-1.2.5 ships, which its generators no longer produce. With it, those files are
-still listed, marked as skipped. `ja-jp` is the only pending id; others are
-refused.
+It needs `npm ci` in `deploy/` and writes nothing with `--check`. Every
+generated file must match; the fork ships no `*_ja-jp` translations (SSOT D23).
 
 `test/meshcentral_custom_js_script_refs_contract.js` reads only the string
 literals in the served `custom.js`,
