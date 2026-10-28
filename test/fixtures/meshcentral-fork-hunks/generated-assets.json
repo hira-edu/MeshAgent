@@ -1,22 +1,16 @@
 {
   "description": "Generated and minified files tracked in MeshCentral, checked by test/meshcentral_generated_assets_contract.js. builders run with --check; built files come wholly from a builder; no-builder-yet files are reported as PENDING until the named work package adds a builder; copy-of-source files must equal their source apart from a recorded knownDrift; vendored files are third-party build output. upstreamPublished: npm build output the fork ships unchanged, checked byte-equal to the pinned meshcentral@1.2.5 package.",
   "builders": {
-    "viewer-min": {
-      "script": "deploy/scripts/build-viewer-min.js",
+    "viewer": {
+      "script": "deploy/scripts/regenerate.js",
       "args": [
-        "--check"
+        "--check",
+        "--only",
+        "viewer"
       ],
       "covers": [
-        "public/scripts/agent-desktop-0.0.2-min.js"
-      ]
-    },
-    "desktop-audio-control": {
-      "script": "deploy/scripts/build-desktop-audio-control.js",
-      "args": [
-        "--check"
-      ],
-      "covers": [
-        "the generated desktop audio block at the end of public/scripts/agent-redir-ws-0.1.1.js and public/scripts/agent-redir-ws-0.1.1-min.js"
+        "public/scripts/agent-desktop-0.0.2-min.js",
+        "public/scripts/agent-redir-ws-0.1.1-min.js"
       ]
     },
     "views-translations": {
@@ -34,26 +28,21 @@
       ]
     }
   },
-  "pending": {
-    "redir-min": {
-      "workPackage": "Stage 1.5 (pinned regeneration toolchain: build-viewer-min.js also builds the redirector min)",
-      "reason": "Only the appended audio block is regenerated. The rest is upstream min plus a hand edit, and uglify of the current source does not reproduce it, so it cannot be regenerated today."
-    }
-  },
+  "pending": {},
   "files": {
     "public/scripts/agent-desktop-0.0.2-min.js": {
       "state": "built",
       "relation": "minified",
       "source": "public/scripts/agent-desktop-0.0.2.js",
-      "builder": "viewer-min",
-      "producedBy": "scripts/build-viewer-min.js: uglify-js 3.19.3, default compress and mangle, trailing newline."
+      "builder": "viewer",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain, viewer): uglify-js with default compress and mangle, CRLF line endings."
     },
     "public/scripts/agent-redir-ws-0.1.1-min.js": {
-      "state": "no-builder-yet",
-      "relation": "hand-edited",
+      "state": "built",
+      "relation": "minified",
       "source": "public/scripts/agent-redir-ws-0.1.1.js",
-      "pending": "redir-min",
-      "producedBy": "Upstream npm 1.2.5 agent-redir-ws-0.1.1-min.js with the protocol-2 connect deferral edited in by hand, followed by the desktop audio block that scripts/build-desktop-audio-control.js appends (only that block is checked)."
+      "builder": "viewer",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain, viewer; D25): translate.js minifyall of agent-redir-ws-0.1.1.js."
     },
     "views/default3-min.handlebars": {
       "state": "built",

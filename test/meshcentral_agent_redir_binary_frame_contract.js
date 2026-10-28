@@ -59,38 +59,17 @@ function evaluateStandard(source) {
     };
 }
 
-function evaluateMinified(source) {
-    return {
-        usesStockAccumulatorState:
-            source.includes('var s=0,i=0,d=0,g=[];') ||
-            source.includes('var c=0,t=0,s=0,i=[];'),
-        ignoresShortFramesWithoutAccumulator:
-            source.includes('0==d&&e.data.byteLength<4') ||
-            source.includes('0==s&&e.data.byteLength<4'),
-        accumulatesFragmentsUntilCmdSize:
-            (source.includes('i<=d') && source.includes('ProcessBinaryCommand(s,i,a)')) ||
-            (source.includes('c<=s') && source.includes('ProcessBinaryCommand(c,t,')),
-        unwrapsJumboFramesInline:
-            source.includes('27==u&&8==f') ||
-            source.includes('27==a&&8==c'),
-        omitsCustomBinaryReassemblyHelpers:
-            !source.includes('xxAppendBinaryAccumulator') &&
-            !source.includes('xxStoreBinaryAccumulator') &&
-            !source.includes('xxProcessBinaryData')
-    };
-}
-
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const redirPath = forkFile('public/scripts/agent-redir-ws-0.1.1.js');
-    const redirMinPath = forkFile('public/scripts/agent-redir-ws-0.1.1-min.js');
     const source = fs.readFileSync(redirPath, 'utf8');
-    const sourceMin = fs.readFileSync(redirMinPath, 'utf8');
 
+    // The -min is not grepped: its mangled names change with any edit, and
+    // meshcentral_viewer_min_build_contract.js proves it is exactly regenerate.js's
+    // minifyall build of this source.
     const checks = {
-        standard: evaluateStandard(source),
-        minified: evaluateMinified(sourceMin)
+        standard: evaluateStandard(source)
     };
 
     for (const [assetName, assetChecks] of Object.entries(checks)) {
@@ -101,7 +80,6 @@ function main() {
 
     const report = {
         redirPath,
-        redirMinPath,
         checks
     };
 
@@ -109,10 +87,8 @@ function main() {
         writeJson(path.join(evidenceDir, 'meshcentral_agent_redir_binary_frame_contract.json'), report);
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `REDIR_PATH=${redirPath}`,
-            `REDIR_MIN_PATH=${redirMinPath}`,
             'SUCCESS=true',
-            `STANDARD_CHECKS=${Object.entries(checks.standard).map(([name, passed]) => `${name}:${passed}`).join(',')}`,
-            `MINIFIED_CHECKS=${Object.entries(checks.minified).map(([name, passed]) => `${name}:${passed}`).join(',')}`
+            `STANDARD_CHECKS=${Object.entries(checks.standard).map(([name, passed]) => `${name}:${passed}`).join(',')}`
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');

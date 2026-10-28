@@ -79,6 +79,7 @@ window.calls = []; window.packets = [];
 function Q(id) { return document.getElementById(id); } function QV() {} function QS(id) { return (Q(id) || { style: {} }).style; }
 var xxdialogMode = 0, desktop = null, fullscreen = true, fullscreenzoom = 1, features2 = 0, currentNode = { agent: { id: 3 } };
 function GetNodeRights() { return 0xFFFFFFFF; } function setSessionActivity() { calls.push('setSessionActivity'); }
+${line(dm, '            document.onclick = function (e) {')}
 </script><script>${slice(dm, '        function dmousedown(e) {', '        //\n        // TERMINAL', 'default-mobile handlers')}</script></body></html>`,
             overrides: ''
         },
@@ -96,6 +97,7 @@ window.calls = []; window.packets = [];
 function Q(id) { return document.getElementById(id); } function QV() {} function QS(id) { return (Q(id) || { style: {} }).style; }
 var xxdialogMode = 0, desktop = null, fullscreen = true, fullscreenzoom = 1, viewOnly = 0, currentDevicePanel = 1, features2 = 0;
 function setSessionActivity() { calls.push('setSessionActivity'); } function haltEvent(e) { if (e.preventDefault) e.preventDefault(); if (e.stopPropagation) e.stopPropagation(); return false; }
+${line(sm, '            document.onclick = function (e) {')}
 </script><script>${slice(sm, '        function dmousedown(e) {', '        //\n        // TERMINAL', 'sharing-mobile handlers')}</script></body></html>`,
             overrides: ''
         },
@@ -137,7 +139,7 @@ async function openPage(browser, fixture, options) {
         const hex = p => Array.from(p, c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
         desktop = { m: CreateAgentRemoteDesktop('Desk'), State: 3 };
         const m = desktop.m;
-        m.parent = { State: 2, send: p => { if (((p.charCodeAt(0) << 8) | p.charCodeAt(1)) === 2) packets.push(hex(p)); }, xxStateChange: function (s) { this.State = s; m.xxStateChange(s); } };
+        m.parent = { State: 2, send: p => { if (((p.charCodeAt(0) << 8) | p.charCodeAt(1)) === 2) packets.push(hex(p)); }, xxStateChange: function (s) { this.State = s; m.xxStateChange(s); }, connected: function () { if (this.State == 2) this.xxStateChange(3); } };
         m.Start();
         m.ProcessBinaryCommand(7, 8, new Uint8Array([0, 7, 0, 8, 3, 32, 2, 88]));
         // The first frame would size the canvas to the 800x600 screen.
@@ -559,7 +561,7 @@ async function reviewScenarios(browser, fx) {
                     const hex = p => Array.from(p, c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
                     window.packets2 = [];
                     const m2 = CreateAgentRemoteDesktop('Desk');
-                    m2.parent = { State: 2, send: p => { if (((p.charCodeAt(0) << 8) | p.charCodeAt(1)) === 2) packets2.push(hex(p)); }, xxStateChange: function (s) { this.State = s; m2.xxStateChange(s); } };
+                    m2.parent = { State: 2, send: p => { if (((p.charCodeAt(0) << 8) | p.charCodeAt(1)) === 2) packets2.push(hex(p)); }, xxStateChange: function (s) { this.State = s; m2.xxStateChange(s); }, connected: function () { if (this.State == 2) this.xxStateChange(3); } };
                     m2.Start(); m2.ProcessBinaryCommand(7, 8, new Uint8Array([0, 7, 0, 8, 3, 32, 2, 88]));
                     m2.Canvas.canvas.width = 800; m2.Canvas.canvas.height = 600;
                     webRtcDesktop = { softdesktop: { m: m2 } };
@@ -762,7 +764,9 @@ async function zoomAndGuestScenarios(browser, fx) {
                 await h.tap(100, 100); await h.wait(400);
                 let s = await h.state();
                 assert.strictEqual(await h.page.evaluate(() => xxdialogMode), 0, 'the menu is closed');
-                assert(s.calls.includes('QV topMenu false'), 'through the page\'s own QV');
+                assert(s.calls.includes('QV topMenu false'), 'by the page\'s own click handler');
+                const adapterSource = fs.readFileSync(path.join(scripts, fx[viewName].script), 'utf8');
+                assert(!/setTimeout|xxdialogMode\s*=[^=]/.test(adapterSource), 'the adapter uses no timer and writes no page state to close the menu');
                 assert.deepStrictEqual(s.packets, [], 'the closing tap sends nothing');
                 await h.tap(100, 100); await h.wait(400);
                 assert.deepStrictEqual(buttons((await h.state()).packets), [2, 4], 'the next tap clicks');
@@ -895,7 +899,7 @@ async function zoomAndGuestScenarios(browser, fx) {
                 const hex = p => Array.from(p, c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
                 window.packets2 = [];
                 const m2 = CreateAgentRemoteDesktop('Desk');
-                m2.parent = { State: 2, send: p => { if (((p.charCodeAt(0) << 8) | p.charCodeAt(1)) === 2) packets2.push(hex(p)); }, xxStateChange: function (s) { this.State = s; m2.xxStateChange(s); } };
+                m2.parent = { State: 2, send: p => { if (((p.charCodeAt(0) << 8) | p.charCodeAt(1)) === 2) packets2.push(hex(p)); }, xxStateChange: function (s) { this.State = s; m2.xxStateChange(s); }, connected: function () { if (this.State == 2) this.xxStateChange(3); } };
                 m2.Start(); m2.ProcessBinaryCommand(7, 8, new Uint8Array([0, 7, 0, 8, 3, 32, 2, 88]));
                 m2.Canvas.canvas.width = 800; m2.Canvas.canvas.height = 600;
                 webRtcDesktop = { softdesktop: { m: m2 } };

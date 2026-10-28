@@ -45,7 +45,7 @@ function viewer(asset, observers) {
     vm.runInContext(source, context);
     const v = context.CreateAgentRemoteDesktop(canvas, null);
     const sink = { packets: [] };
-    v.parent = { State: 2, send(p) { sink.packets.push(Array.from(p, c => c.charCodeAt(0))); }, xxStateChange(s) { this.State = s; v.xxStateChange(s); } };
+    v.parent = { State: 2, send(p) { sink.packets.push(Array.from(p, c => c.charCodeAt(0))); }, xxStateChange(s) { this.State = s; v.xxStateChange(s); }, connected() { if (this.State == 2) { this.xxStateChange(3); } } };
     v.Start();
     v.ProcessBinaryCommand(7, 8, new Uint8Array([0, 7, 0, 8, 800 >> 8, 800 & 255, 600 >> 8, 600 & 255]));
     return { v, canvas, record: fn => { sink.packets = []; fn(); return sink.packets.filter(p => ((p[0] << 8) | p[1]) === 2); }, all: fn => { sink.packets = []; fn(); return sink.packets; } };
