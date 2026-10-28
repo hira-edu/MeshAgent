@@ -2,7 +2,7 @@
 const assert = require('assert'), fs = require('fs'), path = require('path'), vm = require('vm');
 const { forkFile } = require('./lib/meshcentral_paths');
 (async () => {
-for (const filename of ['meshcore.js','meshcore.min.js']) {
+for (const filename of ['meshcore.js']) {
     const source=fs.readFileSync(forkFile(path.join('agents',filename)),'utf8');
     const msgBegin=source.indexOf("                    case 'getclip':"), msgEnd=source.indexOf("                    case 'userSessions':",msgBegin);
     const conBegin=source.indexOf("            case 'getclip':",msgEnd), conEnd=source.indexOf("            case 'openurl':",conBegin);

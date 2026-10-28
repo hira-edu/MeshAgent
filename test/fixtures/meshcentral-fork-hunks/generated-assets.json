@@ -21,165 +21,12 @@
     }
   },
   "pending": {
-    "meshcore-min": {
-      "workPackage": "Stage 1.5 (pinned regeneration toolchain: meshcore.min.js builder, fix C1)",
-      "reason": "No builder in the repo produces meshcore.min.js; upstream uses WebSiteCompiler.exe. Served only when minifycore is on (default off)."
-    },
-    "module-min-copies": {
-      "workPackage": "Stage 1.5 (pinned regeneration toolchain: module minifier; or S6a removes modules_meshcore_min until one exists)",
-      "reason": "No builder produces modules_meshcore_min; the folder holds byte copies of each module as both x.js and x.min.js (no umhctl.min.js). Used only when minifycore is on."
-    },
     "redir-min": {
       "workPackage": "Stage 1.5 (pinned regeneration toolchain: build-viewer-min.js also builds the redirector min)",
       "reason": "Only the appended audio block is regenerated. The rest is upstream min plus a hand edit, and uglify of the current source does not reproduce it, so it cannot be regenerated today."
     }
   },
   "files": {
-    "agents/meshcore.min.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/meshcore.js",
-      "pending": "meshcore-min",
-      "producedBy": "Hand-copied from agents/meshcore.js; never minified. Upstream builds it with the external WebSiteCompiler.exe (agents/compressModules.bat), which is not reproducible from the repo.",
-      "knownDrift": {
-        "id": "C1",
-        "diff": "generated-assets/agents/meshcore.min.js.drift.diff",
-        "description": "stale copy: lacks the b54bb6292 ready-marker bypass in filterRunCommandBridgeMarker (Windows run-command output is empty when minifycore is on) and one later comment edit at onTunnelData tsid."
-      }
-    },
-    "agents/modules_meshcore_min/clipboard.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/clipboard.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/clipboard.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/clipboard.min.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/clipboard.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/clipboard.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/desktop-audio.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/desktop-audio.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/desktop-audio.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/desktop-audio.min.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/desktop-audio.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/desktop-audio.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/process-manager.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/process-manager.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/process-manager.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/process-manager.min.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/process-manager.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/process-manager.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/service-manager.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/service-manager.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/service-manager.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/service-manager.min.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/service-manager.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/service-manager.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/umhctl.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/umhctl.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/umhctl.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/user-sessions.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/user-sessions.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/user-sessions.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/user-sessions.min.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/user-sessions.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/user-sessions.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/win-registry.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/win-registry.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/win-registry.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/win-registry.min.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/win-registry.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/win-registry.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/win-system-paths.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/win-system-paths.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/win-system-paths.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/win-system-paths.min.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/win-system-paths.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/win-system-paths.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/win-terminal.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/win-terminal.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/win-terminal.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/win-terminal.min.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/win-terminal.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/win-terminal.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/win-virtual-terminal.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/win-virtual-terminal.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/win-virtual-terminal.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
-    "agents/modules_meshcore_min/win-virtual-terminal.min.js": {
-      "state": "no-builder-yet",
-      "relation": "copy-of-source",
-      "source": "agents/modules_meshcore/win-virtual-terminal.js",
-      "pending": "module-min-copies",
-      "producedBy": "Byte copy of agents/modules_meshcore/win-virtual-terminal.js; never minified. Upstream builds the folder with translate.js minifydir (agents/compressModules.bat)."
-    },
     "public/scripts/agent-desktop-0.0.2-min.js": {
       "state": "built",
       "relation": "minified",
@@ -215,23 +62,6 @@
     "agents/modules_meshcmd_min/smbios.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
     "agents/modules_meshcmd_min/sysinfo.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
     "agents/modules_meshcmd_min/win-securitycenter.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/amt-apfclient.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/amt-lme.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/amt-manage.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/amt-mei.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/coretranslations.json": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/linux-dhcp.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/monitor-border.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/smbios.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/sysinfo.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/util-agentlog.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/wifi-scanner-windows.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/wifi-scanner.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/win-console.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/win-deskutils.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/win-info.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/win-securitycenter.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
-    "agents/modules_meshcore_min/win-volumes.min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
     "public/scripts/agent-rdp-0.0.1-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
     "public/scripts/agent-redir-rtc-0.1.0-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",
     "public/scripts/amt-0.2.0-min.js": "upstream meshcentral@1.2.5 npm build output, shipped unchanged",

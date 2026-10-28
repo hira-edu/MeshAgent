@@ -286,9 +286,7 @@ function main() {
     const meshCentralRoot = meshcentralPaths.meshcentralRoot();
     assert(fs.existsSync(meshCentralRoot), `required input missing: ${meshCentralRoot} (MeshCentral checkout whose agents/modules_meshcore win-system-paths copies are checked)`);
     [
-        'agents/modules_meshcore/win-system-paths.js',
-        'agents/modules_meshcore_min/win-system-paths.js',
-        'agents/modules_meshcore_min/win-system-paths.min.js'
+        'agents/modules_meshcore/win-system-paths.js'
     ].forEach((relativePath) => {
         const deployedPath = path.join(meshCentralRoot, relativePath);
         assert(fs.existsSync(deployedPath), `required input missing: ${deployedPath} (MeshCentral copy of win-system-paths served to agents)`);

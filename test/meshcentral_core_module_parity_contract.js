@@ -1,13 +1,14 @@
 'use strict';
 // Module policy for the agent core modules the MeshCentral fork package serves (D22, G7).
 //
-// MeshCentral sends every file in agents/modules_meshcore (or modules_meshcore_min when minifycore
-// is on) inside the agent core as addModule(name, source, releaseDate). An agent replaces its own
-// copy of a module when the server's date is newer, so the package decides which code agents run.
+// MeshCentral sends every file in agents/modules_meshcore inside the agent core as
+// addModule(name, source, releaseDate). An agent replaces its own copy of a module when the server's
+// date is newer, so the package decides which code agents run.
+// D24: the package has no minified core. agents/modules_meshcore_min and agents/meshcore.min.js must
+// not exist; with minifycore on, MeshCentral would serve them instead of the files checked here.
 // Every package module file falls in exactly one class:
 //   - MeshAgent-owned (D22): modules both projects carry, shipped as MeshAgent's own copy. The
-//     package bytes equal MeshAgent's modules/<name>.js as git stores it (LF), byte for byte. This
-//     holds in modules_meshcore_min too: with minifycore on, MeshCentral serves that folder instead.
+//     package bytes equal MeshAgent's modules/<name>.js as git stores it (LF), byte for byte.
 //   - fork: modules upstream does not ship, or that the fork replaces. They equal MeshAgent's
 //     modules/<name>.js apart from line endings (the package keeps production's CRLF bytes), except
 //     the retained copies below.
@@ -20,7 +21,9 @@ const path = require('path');
 const { forkFile, upstreamPackageDir } = require('./lib/meshcentral_paths');
 
 const root = path.resolve(__dirname, '..');
-const FOLDERS = ['modules_meshcore', 'modules_meshcore_min'];
+const FOLDER = 'modules_meshcore';
+// D24: removed from the package; each must be absent.
+const ABSENT = ['modules_meshcore_min', 'meshcore.min.js'];
 
 // D22 (option b, operator 2026-10-28): modules upstream also ships that the package carries as
 // MeshAgent's copy: the four the agent embeds, and wifi-scanner (deliberate fork change). The other
@@ -42,13 +45,22 @@ const retained = {
 const lf = (buffer) => buffer.toString('latin1').replace(/\r\n?/g, '\n');
 const moduleName = (file) => file.replace(/\.min\.js$/, '.js').replace(/\.(js|json)$/, '');
 const listModules = (directory) => fs.readdirSync(directory).filter((entry) => /\.(js|json)$/.test(entry)).sort();
+// true when the path exists; false only for ENOENT, so any other error stops the contract.
+function exists(target) {
+    try { fs.lstatSync(target); return true; } catch (error) { if (error.code === 'ENOENT') { return false; } throw error; }
+}
 
 function main() {
     const agents = forkFile('agents');
     const upstreamAgents = path.join(upstreamPackageDir(), 'agents');
-    const result = { owned: [], fork: [], retained: [], upstream: [], drifted: [], minifiedDrifted: [], unknown: [], missingUpstream: [], missingOwned: [] };
+    const result = { owned: [], fork: [], retained: [], upstream: [], drifted: [], unknown: [], missingUpstream: [], missingOwned: [], present: [] };
+    assert(fs.statSync(agents).isDirectory(), 'MeshCentral package folder missing: ' + agents);
+    for (const name of ABSENT) {
+        if (exists(path.join(agents, name))) { result.present.push('agents/' + name); }
+    }
 
-    for (const folder of FOLDERS) {
+    {
+        const folder = FOLDER;
         const directory = path.join(agents, folder);
         const upstreamDirectory = path.join(upstreamAgents, folder);
         assert(fs.statSync(directory).isDirectory(), 'MeshCentral package folder missing: ' + directory);
@@ -68,7 +80,7 @@ function main() {
             if (MESHAGENT_OWNED.includes(module)) {
                 result.owned.push(relative);
                 if (!hasSource || !bytes.equals(Buffer.from(lf(fs.readFileSync(source)), 'latin1'))) {
-                    (folder === 'modules_meshcore' ? result.drifted : result.minifiedDrifted).push(relative + ' (MeshAgent-owned: must equal modules/' + module + '.js)');
+                    result.drifted.push(relative + ' (MeshAgent-owned: must equal modules/' + module + '.js)');
                 }
             } else if (!inUpstream || FORK_REPLACES_UPSTREAM.includes(module)) {
                 if (!hasSource) { result.unknown.push(relative); continue; }
@@ -92,17 +104,17 @@ function main() {
 
     const checks = {
         // Guards against a vacuous pass if the layout changes.
-        everyClassPopulated: result.owned.length >= MESHAGENT_OWNED.length && result.fork.length >= 20 && result.retained.length === 3 && result.upstream.length >= 15,
+        everyClassPopulated: result.owned.length === MESHAGENT_OWNED.length && result.fork.length >= 9 && result.retained.length === 1 && result.upstream.length >= 15,
         everyMeshAgentOwnedModulePresent: result.missingOwned.length === 0,
         everyUpstreamModulePresent: result.missingUpstream.length === 0,
         noUnknownModule: result.unknown.length === 0,
         everyCopyMatchesItsSource: result.drifted.length === 0,
-        // Reported on its own: the minified folder is served only with minifycore on (production has it off).
-        everyMinifiedOwnedCopyMatchesModules: result.minifiedDrifted.length === 0
+        // D24: no minified core in the package (served instead of the files above with minifycore on).
+        noMinifiedCore: result.present.length === 0
     };
     const failed = Object.keys(checks).filter((name) => !checks[name]);
     const counts = { owned: result.owned.length, fork: result.fork.length, upstream: result.upstream.length };
-    process.stdout.write(JSON.stringify({ success: failed.length === 0, counts, retained: result.retained, drifted: result.drifted, minifiedDrifted: result.minifiedDrifted,
+    process.stdout.write(JSON.stringify({ success: failed.length === 0, counts, retained: result.retained, drifted: result.drifted, present: result.present,
         unknown: result.unknown, missingUpstream: result.missingUpstream, missingOwned: result.missingOwned, checks }, null, 2) + '\n');
     assert(failed.length === 0, 'MeshCentral core module policy failed: ' + failed.join(', '));
 }

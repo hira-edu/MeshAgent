@@ -139,7 +139,6 @@ function main() {
     const rootMeshcorePath = forkFile('meshcore.js');
     const rootMeshcoreMinPath = forkFile('meshcore.min.js');
     const meshcorePath = forkFile('agents/meshcore.js');
-    const meshcoreMinPath = forkFile('agents/meshcore.min.js');
     const meshcentralDataMeshcorePath = path.join(meshcentralRoot(), 'meshcentral-data', 'meshcore.js');
     const recoverycorePath = forkFile('agents/recoverycore.js');
 
@@ -156,7 +155,6 @@ function main() {
     const rootMeshcoreSource = loadOptionalText(rootMeshcorePath, 'legacy-layout MeshCentral root agent core', absentOptionalInputs);
     const rootMeshcoreMinSource = loadOptionalText(rootMeshcoreMinPath, 'legacy-layout MeshCentral root minified agent core', absentOptionalInputs);
     const meshcoreSource = loadText(meshcorePath, 'tracked MeshCentral agent core whose JavaScript updater must stay disabled on Windows');
-    const meshcoreMinSource = loadText(meshcoreMinPath, 'tracked MeshCentral minified agent core whose JavaScript updater must stay disabled on Windows');
     const meshcentralDataMeshcoreSource = loadOptionalText(meshcentralDataMeshcorePath, 'untracked meshcentral-data agent core left by earlier deploys', absentOptionalInputs);
     const recoverycoreSource = loadText(recoverycorePath, 'tracked MeshCentral recovery core whose JavaScript updater must stay disabled on Windows');
     const agentcoreSelfUpdate = extractFunction(agentcoreSource, 'void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)');
@@ -172,32 +170,26 @@ function main() {
     const rootMeshcoreLegacyHits = findTokens(rootMeshcoreSource, meshcentralLegacyTokens);
     const rootMeshcoreMinLegacyHits = findTokens(rootMeshcoreMinSource, meshcentralLegacyTokens);
     const meshcoreLegacyHits = findTokens(meshcoreSource, meshcentralLegacyTokens);
-    const meshcoreMinLegacyHits = findTokens(meshcoreMinSource, meshcentralLegacyTokens);
     const meshcentralDataMeshcoreLegacyHits = findTokens(meshcentralDataMeshcoreSource, meshcentralLegacyTokens);
     const recoverycoreLegacyHits = findTokens(recoverycoreSource, meshcentralLegacyTokens);
     const externalMeshCentralDrift = rootMeshcoreLegacyHits.length > 0 ||
         rootMeshcoreMinLegacyHits.length > 0 ||
         meshcoreLegacyHits.length > 0 ||
-        meshcoreMinLegacyHits.length > 0 ||
         meshcentralDataMeshcoreLegacyHits.length > 0 ||
         recoverycoreLegacyHits.length > 0;
 
     const checks = {
         meshcentralSourcesAvailableNoLegacyUpdater: meshcoreSource != null &&
-            meshcoreMinSource != null &&
             recoverycoreSource != null &&
             (rootMeshcoreSource == null || (rootMeshcoreLegacyHits.length === 0 && rootMeshcoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.'))) &&
             (rootMeshcoreMinSource == null || (rootMeshcoreMinLegacyHits.length === 0 && rootMeshcoreMinSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.'))) &&
             meshcoreLegacyHits.length === 0 &&
-            meshcoreMinLegacyHits.length === 0 &&
             (meshcentralDataMeshcoreSource == null || meshcentralDataMeshcoreLegacyHits.length === 0) &&
             recoverycoreLegacyHits.length === 0 &&
             meshcoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.') &&
-            meshcoreMinSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.') &&
             (meshcentralDataMeshcoreSource == null || meshcentralDataMeshcoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.')) &&
             recoverycoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.'),
         meshcentralJavaScriptUpdaterCannotTouchWindowsProcessImage: windowsUpdaterFailsClosedBeforeDirectReplacement(meshcoreSource) &&
-            windowsUpdaterFailsClosedBeforeDirectReplacement(meshcoreMinSource) &&
             (meshcentralDataMeshcoreSource == null || windowsUpdaterFailsClosedBeforeDirectReplacement(meshcentralDataMeshcoreSource)) &&
             windowsUpdaterFailsClosedBeforeDirectReplacement(recoverycoreSource) &&
             (rootMeshcoreSource == null || windowsUpdaterFailsClosedBeforeDirectReplacement(rootMeshcoreSource)) &&
@@ -285,17 +277,15 @@ function main() {
         rootMeshcorePath,
         rootMeshcoreMinPath,
         meshcorePath,
-        meshcoreMinPath,
         meshcentralDataMeshcorePath,
         recoverycorePath,
         externalMeshCentralDrift,
         rootMeshcoreLegacyHits,
         rootMeshcoreMinLegacyHits,
         meshcoreLegacyHits,
-        meshcoreMinLegacyHits,
         meshcentralDataMeshcoreLegacyHits,
         recoverycoreLegacyHits,
-        meshcentralSourcesAvailable: meshcoreSource != null && meshcoreMinSource != null && meshcentralDataMeshcoreSource != null && recoverycoreSource != null,
+        meshcentralSourcesAvailable: meshcoreSource != null && meshcentralDataMeshcoreSource != null && recoverycoreSource != null,
         absentOptionalInputs,
         checks
     };
@@ -309,7 +299,6 @@ function main() {
             `ROOT_MESHCORE_PATH=${rootMeshcorePath}`,
             `ROOT_MESHCORE_MIN_PATH=${rootMeshcoreMinPath}`,
             `MESHCORE_PATH=${meshcorePath}`,
-            `MESHCORE_MIN_PATH=${meshcoreMinPath}`,
             `MESHCENTRAL_DATA_MESHCORE_PATH=${meshcentralDataMeshcorePath}`,
             `RECOVERYCORE_PATH=${recoverycorePath}`,
             'SUCCESS=true',
@@ -317,7 +306,6 @@ function main() {
             `ROOT_MESHCORE_LEGACY_HITS=${formatTokenList(rootMeshcoreLegacyHits)}`,
             `ROOT_MESHCORE_MIN_LEGACY_HITS=${formatTokenList(rootMeshcoreMinLegacyHits)}`,
             `MESHCORE_LEGACY_HITS=${formatTokenList(meshcoreLegacyHits)}`,
-            `MESHCORE_MIN_LEGACY_HITS=${formatTokenList(meshcoreMinLegacyHits)}`,
             `MESHCENTRAL_DATA_MESHCORE_LEGACY_HITS=${formatTokenList(meshcentralDataMeshcoreLegacyHits)}`,
             `RECOVERYCORE_LEGACY_HITS=${formatTokenList(recoverycoreLegacyHits)}`,
             `ABSENT_OPTIONAL_INPUTS=${Object.keys(absentOptionalInputs).join(',') || 'none'}`,

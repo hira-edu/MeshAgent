@@ -5,7 +5,7 @@ const path = require('path');
 const vm = require('vm');
 const { forkFile } = require('./lib/meshcentral_paths');
 
-for (const filename of ['meshcore.js', 'meshcore.min.js']) {
+for (const filename of ['meshcore.js']) {
     const source = fs.readFileSync(forkFile(path.join('agents', filename)), 'utf8');
     function cases(first, last) {
         const begin = source.indexOf("case '" + first + "':");

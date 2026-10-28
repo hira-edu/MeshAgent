@@ -72,7 +72,7 @@ function main() {
     const args = parseArgs(process.argv);
     const meshCentralRoot = path.resolve(args.meshcentral || meshcentralPaths.meshcentralRoot());
     const fsSource = fs.readFileSync(path.resolve('microscript', 'ILibDuktape_fs.c'), 'utf8');
-    const corePaths = ['agents/meshcore.js', 'agents/meshcore.min.js', 'agents/recoverycore.js'];
+    const corePaths = ['agents/meshcore.js', 'agents/recoverycore.js'];
     const coreSources = corePaths.map((relativePath) => ({ relativePath, source: fs.readFileSync(path.join(meshCentralRoot, relativePath), 'utf8') }));
 
     const checks = {

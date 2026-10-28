@@ -138,7 +138,7 @@ for (const name of ['win-system-paths', 'agent-installer', 'win-userconsent']) {
 // Deployment publishes each server copy with a fresh mtime. Execute all three
 // against the same registry fixture; a stale server parser must fail this gate.
 const canonical = fs.readFileSync(path.join(root, 'modules/win-system-paths.js'), 'utf8').replace(/\r\n?/g, '\n');
-for (const variant of ['modules_meshcore/win-system-paths.js', 'modules_meshcore_min/win-system-paths.js', 'modules_meshcore_min/win-system-paths.min.js']) {
+for (const variant of ['modules_meshcore/win-system-paths.js']) {
     const serverSource = fs.readFileSync(forkFile(path.join('agents', variant)), 'utf8').replace(/\r\n?/g, '\n');
     assert.equal(serverSource, canonical, 'server/embedded parser parity: ' + variant);
     const serverContext = {...context, module: {exports: {}}};

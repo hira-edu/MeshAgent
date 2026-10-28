@@ -127,7 +127,7 @@ function main() {
     // custom.js lives in the deployment wrapper since Stage 1 (the package copy is npm's empty stub).
     const customPath = meshcentralPaths.wrapperFile('meshcentral-web/public/scripts/custom.js', { env: { MESHCENTRAL_ROOT: meshCentralRoot } });
     const customSource = fs.readFileSync(customPath, 'utf8');
-    const corePaths = ['agents/meshcore.js', 'agents/meshcore.min.js', 'agents/recoverycore.js'];
+    const corePaths = ['agents/meshcore.js', 'agents/recoverycore.js'];
     const cores = corePaths.map((relativePath) => ({ relativePath, source: fs.readFileSync(path.join(meshCentralRoot, relativePath), 'utf8') }));
     const recoverySource = cores.find(({ relativePath }) => relativePath === 'agents/recoverycore.js').source;
 
