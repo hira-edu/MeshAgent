@@ -776,6 +776,20 @@ fallback, and the login key is held only in a local temporary file that is
 deleted afterwards. `--dry-run` lists the online targets without submitting
 updates; it still fetches the login key over SSH.
 
+After submitting, the command watches for `--wait-seconds` (default 90) for
+each targeted agent to reconnect. It succeeds only when every targeted agent
+reconnected. Agents still pending at the end are listed, and the command exits
+with status 1. `--wait-seconds 0` only submits the update and does not watch.
+
+`--native-activate` is a break-glass repair and is off by default. For each
+pending agent it looks for a staged `*.update.exe` payload, writes
+`deploy-activate.ini` in the lifecycle state directory, and runs the installed
+service DLL's `MeshLifecycleHostW` through `rundll32` with a remote command. It
+then watches again for `--activation-wait-seconds` (default 180). Use it only
+for an agent whose own update has stalled. The fix for a stalled update belongs
+in the agent's update path. Agents still pending after the repair also fail
+the command.
+
 ## macOS release
 
 A Mac releases the macOS agent with the `macos` profile; the Windows workstation

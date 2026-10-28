@@ -263,9 +263,18 @@ const verifyPublishBody = extractFunction('verify_remote_publish');
 assert(!verifyPublishBody.includes('verify_remote_embedded_service_bundle('), 'verify_remote_publish must not SCP-download EXEs for redundant embedded checks');
 assert(verifyPublishBody.includes('return [REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR]'), 'verify_remote_publish must report transport failure explicitly');
 
+// update-online: lifecycle-host activation is break-glass (opt-in), and nodes left pending fail the
+// command. test/deploy_update_online_runtime.py runs both behaviours.
+assert(source.includes('"--native-activate", action=argparse.BooleanOptionalAction, default=False,'), 'update-online --native-activate must be off by default');
+const updateOnlineBody = extractFunction('cmd_update_online');
+const pendingFailure = updateOnlineBody.indexOf('[FAILED] {len(pending)} of {len(online_nodes)} node(s) still pending');
+const watchedSuccess = updateOnlineBody.lastIndexOf('[SUCCESS]');
+assert(pendingFailure >= 0 && updateOnlineBody.indexOf('return False', pendingFailure) < watchedSuccess, 'update-online must fail, before reporting success, while nodes are still pending');
+
+// The break-glass activation itself: binary-only packages for older agents.
 const activateUpdateBody = extractFunction('activate_remote_pending_update');
-assert(activateUpdateBody.includes("'RequireConfig=0'"), 'manual pending update activation must allow binary-only MeshCentral packages for older agents');
-assert(!activateUpdateBody.includes("'RequireConfig=1'"), 'manual pending update activation must not force package-embedded provisioning');
+assert(activateUpdateBody.includes("'RequireConfig=0'"), 'break-glass pending update activation must allow binary-only MeshCentral packages for older agents');
+assert(!activateUpdateBody.includes("'RequireConfig=1'"), 'break-glass pending update activation must not force package-embedded provisioning');
 
 const report = {
     generatedUtc: new Date().toISOString(),

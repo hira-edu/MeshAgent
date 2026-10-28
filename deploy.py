@@ -3932,10 +3932,10 @@ def cmd_update_online(args):
 
         activation_attempts = {}
         activation_errors = {}
-        activation_warnings = {}
         if pending and args.native_activate:
+            # Break-glass only: the agent's own update path is the fix for a stalled update.
             print("\n  Pending nodes still online/stuck after initial watch.")
-            print("  Probing staged update payloads and triggering the compatibility lifecycle host where safe.")
+            print("  Break-glass: probing staged update payloads and triggering the compatibility lifecycle host where safe.")
             for nodeid in sorted(pending):
                 name = names_by_id.get(nodeid, nodeid)
                 try:
@@ -3961,8 +3961,7 @@ def cmd_update_online(args):
                         "host_dll_path": install_paths["host_dll_path"],
                         "mode": "runtime-host-lifecycle-update",
                     }
-                    warning_note = f" ({activation_warnings[nodeid]})" if nodeid in activation_warnings else ""
-                    print(f"    {name}: launched compatibility lifecycle update using {chosen_update}{warning_note}")
+                    print(f"    {name}: launched compatibility lifecycle update using {chosen_update}")
                 except Exception as ex:
                     activation_errors[nodeid] = str(ex)
                     print(f"    {name}: native activation failed: {ex}")
@@ -4008,12 +4007,16 @@ def cmd_update_online(args):
             for nodeid in sorted(activation_errors):
                 print(f"    {names_by_id.get(nodeid, nodeid)}  {activation_errors[nodeid]}")
 
-        if activation_warnings:
-            print("\n  Native activation warnings:")
-            for nodeid in sorted(activation_warnings):
-                print(f"    {names_by_id.get(nodeid, nodeid)}  {activation_warnings[nodeid]}")
+        if pending:
+            print(
+                f"\n[FAILED] {len(pending)} of {len(online_nodes)} node(s) still pending after the wait window: "
+                + ", ".join(names_by_id.get(nodeid, nodeid) for nodeid in sorted(pending))
+            )
+            if not args.native_activate:
+                print("  Lifecycle activation was not attempted; --native-activate is the break-glass path (docs/DEPLOYMENT.md).")
+            return False
 
-        print("\n[SUCCESS] Update commands submitted.")
+        print(f"\n[SUCCESS] All {len(online_nodes)} node(s) reconnected after the update.")
         return True
     finally:
         try:
@@ -4086,7 +4089,7 @@ def main():
     update_p.add_argument("--batch-size", type=int, default=50, help="Number of node IDs per updateAgents request")
     update_p.add_argument("--wait-seconds", type=int, default=90, help="How long to watch for reconnects after submission")
     update_p.add_argument("--poll-seconds", type=int, default=10, help="Polling interval while watching reconnects")
-    update_p.add_argument("--native-activate", action=argparse.BooleanOptionalAction, default=True, help="If nodes stay stuck with a staged update payload, trigger the compatibility lifecycle host remotely")
+    update_p.add_argument("--native-activate", action=argparse.BooleanOptionalAction, default=False, help="Break-glass, off by default: if nodes stay stuck with a staged update payload, trigger the compatibility lifecycle host remotely (docs/DEPLOYMENT.md, Online agent updates)")
     update_p.add_argument("--activation-wait-seconds", type=int, default=180, help="How long to watch for reconnects after native activation remediation")
     update_p.add_argument("--dry-run", action="store_true", help="List online targets without submitting updates")
 
