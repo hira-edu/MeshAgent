@@ -16,7 +16,7 @@ vm.runInContext(fs.readFileSync(sourcePath, 'utf8'), sandbox, { filename: source
 function createHarness() {
     const parent = {
         trafficStats: { desktopMultiplex: { sessions: 0 } },
-        parent: { debug() {}, DispatchEvent() {} },
+        parent: { args: {}, debug() {}, DispatchEvent() {} },
         db: { Get(id, cb) { cb(null, [{ meshid: 'mesh/test/group', name: 'test', icon: 1 }]); } },
         users: {}, wsagents: {}, meshes: {}
     };

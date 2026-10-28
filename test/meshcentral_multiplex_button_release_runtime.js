@@ -20,7 +20,7 @@ const hex = b => Buffer.from(b).toString('hex');
 function harness(options) {
     const parent = {
         trafficStats: { desktopMultiplex: { sessions: 0 } },
-        parent: { debug() {}, DispatchEvent() {} },
+        parent: { args: {}, debug() {}, DispatchEvent() {} },
         db: { Get(id, cb) { cb(null, [{ meshid: 'mesh/test/group', name: 'test', icon: 1 }]); } },
         users: {}, wsagents: {}, meshes: {}
     };

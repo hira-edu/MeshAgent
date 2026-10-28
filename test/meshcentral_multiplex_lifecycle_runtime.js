@@ -1,6 +1,8 @@
 // Exercise the desktop multiplexor relay lifecycle with controllable timers, DB and fs completions.
-// Covers: pending-creation marker handling, late creation results, cookie expire timer cleanup,
-// recording descriptors opened for a session that already ended, and table entry ownership.
+// Covers: peers waiting on a multiplexor that is being created (S9: a callback list, no polling), agent
+// liveness by WebSocket ping/pong (S9: no silence or stall thresholds, one agent per session), cookie
+// expire timer cleanup, recording descriptors opened for a session that already ended, recording write
+// errors (S8), and table entry ownership.
 // No server, endpoint session, credentials, or real user input is needed.
 const assert = require('assert');
 const fs = require('fs');
@@ -35,7 +37,7 @@ function makeParent(opts) {
     const parent = {
         trafficStats: { desktopMultiplex: { sessions: 0 } }, relaySessionCount: 0, relaySessionErrorCount: 0,
         parent: {
-            args: {}, debug(category, text) { debugLines.push(category + ': ' + text); }, DispatchEvent(targets, source, event) { events.push({ targets, event }); }, AddEventDispatch() {}, RemoveAllEventDispatch() {},
+            args: opts.args || {}, debug(category, text) { debugLines.push(category + ': ' + text); }, DispatchEvent(targets, source, event) { events.push({ targets, event }); }, AddEventDispatch() {}, RemoveAllEventDispatch() {},
             decodeCookie() { return { ruserid: 'user/test/u', nodeid: 'node/test/device' }; },
             fs: {
                 mkdirSync() {}, open(f, m, cb) { opens.push({ f, cb }); if (opts.openSync) { cb(null, 9); } },
@@ -57,6 +59,8 @@ function fakeWs() {
     ws.closed = false;
     ws.close = () => { ws.closed = true; };
     ws.send = (d, cb) => { if (cb) cb(); };
+    ws.pings = 0;
+    ws.ping = () => { ws.pings++; };
     return ws;
 }
 
@@ -67,6 +71,17 @@ function agentRelay(parent, domain, id) {
     return { ws, relay, req };
 }
 
+function viewerRelay(parent) {
+    const ws = fakeWs();
+    const req = { query: { id: 'sess', nodeid: 'node/test/device', p: '2', rauth: 'x', browser: 1 }, clientIp: '127.0.0.1' };
+    const relay = sandbox.CreateMeshRelayEx2(parent, ws, req, { id: '' }, null, null);
+    return { ws, relay, req };
+}
+
+const NODE = { meshid: 'mesh/test/group', name: 't', icon: 1 };
+const liveTimers = () => timers.filter(t => !t.cleared);
+const heartbeat = () => { const beats = timers.filter(t => t.interval && !t.cleared); assert.strictEqual(beats.length, 1, 'one agent ping interval'); return beats[0]; };
+
 function recordingViewer(mux) {
     const viewer = { req: { query: { browser: 1 } }, user: { _id: 'user/test/v', name: 'v', flags: 2 }, ws: fakeWs(), close() { this.closed = true; mux.removePeer(this); } };
     viewer.deskMultiplexor = mux;
@@ -74,35 +89,135 @@ function recordingViewer(mux) {
 }
 
 const tests = {
-    'message arriving while the multiplexor is still pending must not throw'() {
+    'a message arriving while the multiplexor is being created must not throw'() {
         const { parent } = makeParent({ dbGet() { /* never completes */ } });
         agentRelay(parent, { id: '' });
         assert.strictEqual(parent.desktoprelays['node/test/device'], 1, 'creation pending marker set');
-        const waiter = agentRelay(parent, { id: '' }); // Holds the pending marker as its multiplexor reference
-        assert.strictEqual(waiter.relay.deskMultiplexor, 1);
+        const waiter = viewerRelay(parent);
+        assert.strictEqual(waiter.relay.deskMultiplexor, undefined, 'a waiting peer is not attached yet');
         assert.doesNotThrow(() => waiter.ws.emit('message', Buffer.from([0, 1, 0, 4])));
     },
-    'a creation that never completes releases the node after the retry budget and a late result is discarded'() {
-        let lateCb = null, calls = 0;
-        const { parent } = makeParent({ dbGet(id, cb) { calls++; if (calls == 1) { lateCb = cb; } else { cb(null, [{ meshid: 'mesh/test/group', name: 't', icon: 1 }]); } } });
-        agentRelay(parent, { id: '' });
+    'peers arriving during a slow creation wait without polling and join when it completes'() {
+        let complete = null;
+        const { parent } = makeParent({ dbGet(id, cb) { complete = cb; } });
+        const agent = agentRelay(parent, { id: '' });
+        const viewers = [viewerRelay(parent), viewerRelay(parent)];
+        const leaver = viewerRelay(parent);
+        leaver.ws.emit('close'); // Gives up while waiting
+        now += 600000; // However long the creation takes, nothing expires and nothing polls.
+        assert.deepStrictEqual(liveTimers(), [], 'no retry or watchdog timer while waiting');
         assert.strictEqual(parent.desktoprelays['node/test/device'], 1);
-        const second = agentRelay(parent, { id: '' });
-        // The second peer polls every 50ms until it gives up after 200 retries.
-        let guard = 0;
-        while (!second.ws.closed && guard++ < 400) { assert(runOnce() > 0, 'retry timer must be scheduled'); }
-        assert.strictEqual(second.ws.closed, true, 'waiting peer closes after the retry budget');
-        assert.notStrictEqual(parent.desktoprelays['node/test/device'], 1, 'stale pending marker must be released');
-        // A fresh connection can now create a working multiplexor.
-        const third = agentRelay(parent, { id: '' });
+        complete(null, [NODE]);
         const mux = parent.desktoprelays['node/test/device'];
-        assert(mux && typeof mux == 'object', 'new multiplexor installed');
-        assert.strictEqual(mux.agent, third.relay);
-        // The original creation finally completes: it must not replace the newer multiplexor.
-        lateCb(null, [{ meshid: 'mesh/test/group', name: 't', icon: 1 }]);
-        assert.strictEqual(parent.desktoprelays['node/test/device'], mux, 'late multiplexor must not clobber the live one');
-        assert.strictEqual(mux.viewers.length, 0); assert.strictEqual(mux.agent, third.relay);
-        assert.strictEqual(timers.filter(t => t.interval && !t.cleared).length, 1, 'only the live multiplexor keeps a watchdog');
+        assert(mux && typeof mux == 'object', 'the created multiplexor is installed');
+        assert.strictEqual(mux.agent, agent.relay, 'the creating agent joined');
+        assert.deepStrictEqual(Array.from(mux.viewers), viewers.map(v => v.relay), 'every waiting viewer joined, in order');
+        for (const peer of [agent].concat(viewers)) {
+            assert.strictEqual(peer.relay.deskMultiplexor, mux);
+            assert.strictEqual(peer.ws.closed, false);
+        }
+        assert.strictEqual(leaver.relay.deskMultiplexor, undefined, 'a peer that left while waiting is not attached');
+    },
+    'a creating peer that leaves does not stop the peers still waiting'() {
+        let complete = null;
+        const { parent } = makeParent({ dbGet(id, cb) { complete = cb; } });
+        const creator = viewerRelay(parent);
+        const agent = agentRelay(parent, { id: '' });
+        creator.ws.emit('close');
+        complete(null, [NODE]);
+        const mux = parent.desktoprelays['node/test/device'];
+        assert(mux && typeof mux == 'object');
+        assert.strictEqual(mux.agent, agent.relay);
+        assert.strictEqual(mux.viewers.length, 0);
+    },
+    'a creation where every peer left leaves no multiplexor behind'() {
+        let complete = null;
+        const { parent } = makeParent({ dbGet(id, cb) { complete = cb; } });
+        const a = agentRelay(parent, { id: '' }), v = viewerRelay(parent);
+        a.ws.emit('close'); v.ws.emit('close');
+        complete(null, [NODE]);
+        assert.strictEqual(parent.desktoprelays['node/test/device'], undefined);
+    },
+    'a failed creation closes every waiting peer and frees the node'() {
+        let complete = null, calls = 0;
+        const { parent } = makeParent({ dbGet(id, cb) { if (calls++ == 0) { complete = cb; } else { cb(null, [NODE]); } } });
+        const peers = [agentRelay(parent, { id: '' }), viewerRelay(parent), viewerRelay(parent)];
+        complete(new Error('db unavailable'), null);
+        for (const peer of peers) { assert.strictEqual(peer.ws.closed, true); }
+        assert.strictEqual(parent.desktoprelays['node/test/device'], undefined, 'the node is free again');
+        const next = agentRelay(parent, { id: '' });
+        assert.strictEqual(parent.desktoprelays['node/test/device'].agent, next.relay, 'the next connection creates a multiplexor');
+    },
+    'a second agent tunnel is refused however long the agent has been silent'() {
+        // Replaces "a silent agent is replaced" (TST-17): there is no silence or stall threshold. A session
+        // gets a new agent only after its agent closed or failed, and that ends the session.
+        const { parent } = makeParent();
+        const first = agentRelay(parent, { id: '' });
+        const mux = parent.desktoprelays['node/test/device'];
+        const viewer = viewerRelay(parent);
+        now += 3600000;
+        const second = agentRelay(parent, { id: '' });
+        assert.strictEqual(second.ws.closed, true, 'the second tunnel is closed');
+        assert.strictEqual(mux.agent, first.relay, 'the session keeps its agent');
+        assert.strictEqual(first.ws.closed, false);
+        assert.deepStrictEqual(Array.from(mux.viewers), [viewer.relay]);
+        first.ws.emit('close');
+        assert.strictEqual(viewer.ws.closed, true, 'the agent closing ends the session');
+        const third = agentRelay(parent, { id: '' });
+        const next = parent.desktoprelays['node/test/device'];
+        assert.notStrictEqual(next, mux, 'a new tunnel after the close starts a new session');
+        assert.strictEqual(next.agent, third.relay);
+    },
+    'an agent that does not answer a ping is closed and its session ends'() {
+        const { parent } = makeParent({ args: { agentidletimeout: 150000 } });
+        const agent = agentRelay(parent, { id: '' });
+        const viewer = viewerRelay(parent);
+        const mux = parent.desktoprelays['node/test/device'];
+        const beat = heartbeat();
+        assert.strictEqual(beat.ms, 150000, 'pinged every --agentidletimeout');
+        beat.fn();
+        assert.strictEqual(agent.ws.pings, 1);
+        agent.ws.emit('pong');
+        beat.fn();
+        assert.strictEqual(agent.ws.pings, 2, 'an answered ping is followed by the next one');
+        assert.strictEqual(agent.ws.closed, false);
+        beat.fn(); // The second ping was not answered
+        assert.strictEqual(agent.ws._socket.destroyed, true, 'the unresponsive agent socket is destroyed');
+        assert.strictEqual(viewer.ws.closed, true, 'the session ends');
+        assert.strictEqual(mux.viewers, undefined);
+        assert.strictEqual(parent.desktoprelays['node/test/device'], undefined);
+        assert.strictEqual(beat.cleared, true, 'the ping interval stops with the session');
+        assert.strictEqual(viewer.ws.pings, 0, 'viewers are not pinged');
+    },
+    'no ping is judged while flow control has paused the agent'() {
+        const { parent } = makeParent({ args: { agentidletimeout: 150000 } });
+        const agent = agentRelay(parent, { id: '' });
+        const viewer = viewerRelay(parent);
+        const mux = parent.desktoprelays['node/test/device'];
+        const beat = heartbeat();
+        beat.fn(); // Ping sent, not yet answered
+        const held = [];
+        viewer.ws.send = (d, cb) => { if (cb) held.push(cb); };
+        for (let i = 0; i < 8; i++) { mux.sendToViewer(viewer.relay, Buffer.from([0, 88, 0, 5, i])); }
+        held.shift()(); // The first send completes with the rest still queued
+        assert.strictEqual(agent.relay.paused, true, 'the only viewer backs up, so reading from the agent is paused');
+        for (let i = 0; i < 3; i++) { beat.fn(); }
+        assert.strictEqual(agent.ws.closed, false, 'a pong cannot be read while paused, so the agent is not judged');
+        assert.strictEqual(agent.ws.pings, 1, 'and not pinged');
+        while (held.length) { held.shift()(); }
+        assert.strictEqual(agent.relay.paused, false);
+        beat.fn();
+        assert.strictEqual(agent.ws.closed, false, 'the ping sent before the pause is not held against the agent');
+        assert.strictEqual(agent.ws.pings, 2);
+        agent.ws.emit('pong');
+        beat.fn();
+        assert.strictEqual(agent.ws.closed, false);
+    },
+    'with --agentidletimeout 0 the agent is not pinged'() {
+        const { parent } = makeParent({ args: { agentidletimeout: 0 } });
+        agentRelay(parent, { id: '' });
+        assert(parent.desktoprelays['node/test/device'].agent);
+        assert.deepStrictEqual(timers.filter(t => t.interval && !t.cleared), []);
     },
     'closing a relay clears its cookie expire timer'() {
         const { parent } = makeParent();
@@ -224,11 +339,11 @@ const tests = {
         mux.addPeer(late);
         runOnce();
         assert(lateOut.indexOf(available) >= 0, 'a viewer joining later receives the cached availability message');
-        mux.addPeer({ req: { query: {} }, ws: fakeWs(), deskMultiplexor: mux }); // A second agent tunnel: refused while the agent is responsive
-        mux.agent.paused = false; mux.agentLastRx = 0; // The current agent went silent, so the next agent tunnel replaces it
-        const replacement = { req: { query: {} }, ws: fakeWs(), deskMultiplexor: mux };
-        assert.strictEqual(mux.addPeer(replacement), true, 'a silent agent is replaced');
-        assert.strictEqual(mux.lastAudioMessage, null, 'a replacement agent must advertise audio itself before late viewers see it');
+        const agent = { req: { query: {} }, ws: fakeWs(), deskMultiplexor: mux };
+        assert.strictEqual(mux.addPeer(agent), true);
+        now += 3600000;
+        assert.strictEqual(mux.addPeer({ req: { query: {} }, ws: fakeWs(), deskMultiplexor: mux }), false, 'a second agent tunnel is refused');
+        assert.strictEqual(mux.lastAudioMessage, available, 'the session keeps its agent and its audio offer');
     },
     'a peer closing on a disposed multiplexor does not remove a newer one for the same node'() {
         const { parent } = makeParent();
