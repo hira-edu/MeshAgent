@@ -30,6 +30,21 @@ const server = read(forkFile('meshagent.js'));
 const agentcore = read(path.join(repo, 'meshcore', 'agentcore.c'));
 const agentcoreHeader = read(path.join(repo, 'meshcore', 'agentcore.h'));
 
+// The architecture table the Windows helpers derive from (SRV-10), read from the fork's meshcentral.js.
+function readArchitectureTable() {
+    const source = read(forkFile('meshcentral.js'));
+    const signature = 'obj.meshAgentsArchitectureNumbers = {';
+    const start = source.indexOf(signature);
+    assert(start >= 0, 'meshcentral.js must define meshAgentsArchitectureNumbers');
+    let depth = 0;
+    for (let i = start + signature.length - 1; i < source.length; ++i) {
+        if (source[i] === '{') depth++;
+        if (source[i] === '}' && --depth === 0) return new Function('return ' + source.slice(start + signature.length - 1, i + 1) + ';')();
+    }
+    throw new Error('unterminated meshAgentsArchitectureNumbers');
+}
+const meshAgentsArchitectureNumbers = readArchitectureTable();
+
 // Agent side: the facts the gate relies on.
 assert(/MeshCommand_AuthInfo_CapabilitiesMask_STREAMING_COMPRESSION = 0x200/.test(agentcoreHeader), 'agentcore.h must define 0x200 as streaming compression');
 assert(/MeshCommand_AuthInfo_CapabilitiesMask_LIFECYCLE_UPDATE = 0x400/.test(agentcoreHeader), 'agentcore.h must define 0x400 as lifecycle update');
@@ -56,7 +71,7 @@ function select(id, capabilities, options = {}) {
     const debug = [];
     const obj = { nodeid: '0123456789abcdef0123', agentInfo: (capabilities === null) ? null : { capabilities } };
     const args = { agentupdatetest: options.test, agentupdatesystem: options.system };
-    const parent = { parent: { meshAgentBinaries: {}, debug: function (source, message) { debug.push(message); } } };
+    const parent = { parent: { meshAgentBinaries: {}, meshAgentsArchitectureNumbers, debug: function (source, message) { debug.push(message); } } };
     const result = selectorFactory(obj, args, {}, parent)({ id, hash: 'NEW' }, 'OLD');
     return { result, debug };
 }
