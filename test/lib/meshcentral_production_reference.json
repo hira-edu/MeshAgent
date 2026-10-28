@@ -1,0 +1,9 @@
+{
+  "comment": "The stock npm MeshCentral package production runs until the Stage 4 cutover (1.2.5). Only the duplicate server layout A and its contract use it; the fork itself is compared with meshcentral_upstream_reference.json. integrity is the npm tarball sha512; treeDigest is the digest of the extracted package tree. Populate the cache with: python test/lib/fetch_upstream_reference.py --pin test/lib/meshcentral_production_reference.json",
+  "name": "meshcentral",
+  "version": "1.2.5",
+  "tarball": "https://registry.npmjs.org/meshcentral/-/meshcentral-1.2.5.tgz",
+  "integrity": "sha512-9j/FuqbnkrG6yFy5jR9Q9POIQSxWJAGjVf53oREjkCAsQ9Me2G0jt+4gayU8rFcvEXDHKjwkXLyxOW9IPpbEJg==",
+  "fileCount": 2675,
+  "treeDigest": "sha256:565670c75e53dc9b604e9dea51202f2774f2d6f1f23c87e5efe1dde634ba499a"
+}

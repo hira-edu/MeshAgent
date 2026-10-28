@@ -689,12 +689,14 @@ def layout_variant(name):
     return record.get("variant", name)
 
 
-UPSTREAM_PIN = WORKTREE_ROOT / "test" / "lib" / "meshcentral_upstream_reference.json"
+# Production runs stock npm 1.2.5 until the Stage 4 cutover, while the fork (and the shared test reference)
+# moved to 1.3.1 in Stage 6, so layout A has its own pin.
+UPSTREAM_PIN = WORKTREE_ROOT / "test" / "lib" / "meshcentral_production_reference.json"
 
 
 def upstream_tarball():
     """The stock npm package production runs, checked against the pin the tests use
-    (test/lib/meshcentral_upstream_reference.json). Layout A installs it; `layout-b --standin` too."""
+    (test/lib/meshcentral_production_reference.json). Layout A installs it; `layout-b --standin` too."""
     pin = read_json(UPSTREAM_PIN)
     if pin.get("name") != "meshcentral" or pin.get("version") != MESHCENTRAL_VERSION:
         raise DupError(f"{UPSTREAM_PIN} pins {pin.get('name')}@{pin.get('version')}, expected meshcentral@{MESHCENTRAL_VERSION}")

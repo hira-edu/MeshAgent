@@ -27,12 +27,14 @@ env:
   MESHCENTRAL_REPOSITORY: hira-edu/MeshCentral
   # Precedence: dispatch input, then the repository variable, then main.
   MESHCENTRAL_REF: ${{ inputs.meshcentral_ref || vars.MESHCENTRAL_REF || 'main' }}
-  # The fork does not carry the upstream release tags, and the upstream-base contract
-  # diffs against 1.2.5. The tag is fetched from upstream and pinned to this commit, so a
-  # moved or replaced upstream tag fails the job instead of changing the baseline.
+  # The fork does not carry the upstream release tags. Since Stage 6 the fork is based on
+  # 1.3.1; 1.2.5 stays while the duplicate server's layout A models production (1.2.5 until
+  # the cutover). Each tag is fetched from upstream and pinned to its commit, so a moved or
+  # replaced upstream tag fails the job instead of changing the baseline.
   MESHCENTRAL_UPSTREAM_URL: https://github.com/Ylianst/MeshCentral.git
   MESHCENTRAL_UPSTREAM_TAGS: >-
     1.2.5=b09b1d60328de8e2d2f7387561ed51c64011c82a
+    1.3.1=f436143527458d56da0336ea3047c006703fb4e4
   # Node matches the duplicate server and production (SSOT D20). Python matches the
   # release workflow.
   NODE_VERSION: '20.20.2'
@@ -149,7 +151,11 @@ jobs:
         # the installed package is the fork). The tool checks the tarball sha512 and the
         # extracted tree digest pinned in test/lib/meshcentral_upstream_reference.json; the
         # tests themselves never download it.
-        run: python test/lib/fetch_upstream_reference.py
+        # The second pin is the package production runs until the Stage 4 cutover (duplicate layout A).
+        run: |
+          set -euo pipefail
+          python test/lib/fetch_upstream_reference.py
+          python test/lib/fetch_upstream_reference.py --pin test/lib/meshcentral_production_reference.json
 
       - name: Install MeshCentral wrapper dependencies
         id: wrapper

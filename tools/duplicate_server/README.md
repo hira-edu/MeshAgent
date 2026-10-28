@@ -39,7 +39,7 @@ probe output and checklist results.
    - `npm ci` of the deployment wrapper (`MeshCentral/deploy`: `package.json`, lockfile and the packed
      fork tarball it pins, made by `node deploy/scripts/pack.js`), with the integrity checked against
      the lock. `node_modules/meshcentral` is then replaced by the stock npm `meshcentral@1.2.5`
-     production runs, checked against the pin in `test/lib/meshcentral_upstream_reference.json`, and
+     production runs, checked against the pin in `test/lib/meshcentral_production_reference.json`, and
      the installed tree must equal that tarball;
    - `deploy.py`'s own publish map, imported read-only. `ARTIFACTS`, `CORE_ARTIFACTS`,
      `get_publish_path`, `get_core_publish_path` and `validate_local_service_bundle_artifacts` are used

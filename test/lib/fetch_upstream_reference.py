@@ -6,6 +6,8 @@ upstreamPackageDir() (Node). They never download it; this tool is the only write
 
     python test/lib/fetch_upstream_reference.py              # download the pinned npm tarball
     python test/lib/fetch_upstream_reference.py --tarball F  # use a local copy of it instead
+    python test/lib/fetch_upstream_reference.py --pin test/lib/meshcentral_production_reference.json
+                                                             # the package production runs (duplicate layout A)
 
 The tarball must match the sha512 integrity in meshcentral_upstream_reference.json, and the
 extracted tree must match its treeDigest and fileCount, before anything replaces the cache.
@@ -165,6 +167,7 @@ def populate(pin, tarball_arg, env=None, meshagent_root=None, pin_path=None):
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--tarball", help="local copy of the pinned npm tarball (verified against the pin)")
+    parser.add_argument("--pin", help="pin file to fetch (default test/lib/meshcentral_upstream_reference.json)")
     parser.add_argument("--print-tree-digest", metavar="DIR",
                         help="print treeDigest and fileCount of an extracted package folder and exit (for updating the pin)")
     args = parser.parse_args(argv)
@@ -172,9 +175,9 @@ def main(argv):
         digest, count = meshcentral_paths.tree_digest(Path(args.print_tree_digest))
         print(json.dumps({"treeDigest": digest, "fileCount": count}))
         return 0
-    pin = meshcentral_paths.load_reference_pin()
     try:
-        populate(pin, args.tarball)
+        pin = meshcentral_paths.load_reference_pin(args.pin)
+        populate(pin, args.tarball, pin_path=args.pin)
     except (FetchError, OSError, tarfile.TarError, meshcentral_paths.MeshCentralPathError) as error:
         print(f"FAIL {error}", file=sys.stderr)
         return 1

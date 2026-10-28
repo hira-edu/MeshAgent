@@ -158,6 +158,8 @@ def wrapper_file(rel, env=None, meshagent_root=None):
 
 
 REFERENCE_PIN_PATH = Path(__file__).resolve().parent / "meshcentral_upstream_reference.json"
+# What production runs until the Stage 4 cutover (npm 1.2.5): only the duplicate server layout A uses it.
+PRODUCTION_REFERENCE_PIN_PATH = Path(__file__).resolve().parent / "meshcentral_production_reference.json"
 UPSTREAM_CACHE_ENV = "MESHCENTRAL_UPSTREAM_CACHE"
 FETCH_COMMAND = "python test/lib/fetch_upstream_reference.py"
 REFERENCE_MARKER = "reference.json"

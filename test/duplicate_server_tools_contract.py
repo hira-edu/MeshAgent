@@ -4,7 +4,8 @@ Runs without the duplicate running and without network. It uses a temporary MC_D
 denylists and fixtures, and these read-only inputs, which must exist (missing ones fail loudly):
   - the MeshCentral checkout with the Stage 1 layout (MESHCENTRAL_ROOT or the sibling): the
     deploy/ wrapper's config template,
-  - the pinned upstream meshcentral 1.2.5 reference (python test/lib/fetch_upstream_reference.py),
+  - the production meshcentral 1.2.5 reference (python test/lib/fetch_upstream_reference.py --pin
+    test/lib/meshcentral_production_reference.json),
   - the SSOT evidence folder (summary.txt for the production key set).
 """
 import hashlib
@@ -109,7 +110,7 @@ def test_reset_selects_only_its_own_reports():
 def test_production_loader_rebuild(deploy):
     # Layout A's meshcentral.js is production's: stock 1.2.5 plus deploy.py's transforms, which must
     # reproduce production's sha256 exactly. The fork's committed loader is not used for it.
-    pristine = (meshcentral_paths.upstream_package_dir() / "meshcentral.js").read_bytes()
+    pristine = (meshcentral_paths.upstream_package_dir(pin_path=meshcentral_paths.PRODUCTION_REFERENCE_PIN_PATH) / "meshcentral.js").read_bytes()
     production = dup_layout.load_production_hashes()[dup_layout.PRODUCTION_LOADER]["sha256"]
     data, record = dup_layout.production_loader(deploy, pristine, production)
     assert hashlib.sha256(data).hexdigest() == production and record["equals_production"] is True
