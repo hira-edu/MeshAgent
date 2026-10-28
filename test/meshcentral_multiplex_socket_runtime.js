@@ -10,7 +10,10 @@ const { forkFile, installedPackageDir } = require('./lib/meshcentral_paths');
 const sourcePath = path.resolve(process.argv[2] || forkFile('meshdesktopmultiplex.js'));
 const serverRequire = createRequire(path.resolve(process.argv[3] || path.join(installedPackageDir().dir, 'package.json')));
 const WebSocket = serverRequire('ws');
-const sandbox = { require: serverRequire, module: { exports: {} }, Buffer, console, setTimeout, clearTimeout, setInterval, clearInterval };
+// Relative modules ('./mcrec.js') come from the fork beside the multiplexor, packages from the installed server.
+const sourceRequire = createRequire(sourcePath);
+const sandboxRequire = name => name.startsWith('./') ? sourceRequire(name) : serverRequire(name);
+const sandbox = { require: sandboxRequire, module: { exports: {} }, Buffer, console, setTimeout, clearTimeout, setInterval, clearInterval };
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(sourcePath, 'utf8'), sandbox, { filename: sourcePath });
 

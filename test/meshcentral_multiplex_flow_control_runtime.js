@@ -4,19 +4,19 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { createRequire } = require('module');
 const { forkFile } = require('./lib/meshcentral_paths');
 
 const sourcePath = path.resolve(process.argv[2] || forkFile('meshdesktopmultiplex.js'));
-const sandbox = { require, module: { exports: {} }, Buffer, console, setTimeout, clearTimeout, setInterval, clearInterval };
-// Only dimensions affect the linked image cache in these flow-control cases.
-sandbox.require = name => name === 'image-size' ? { imageSize() { return { width: 16, height: 16 }; } } : require(name);
+// The multiplexor's own require, so './mcrec.js' (the tile size reader) is the fork's.
+const sandbox = { require: createRequire(sourcePath), module: { exports: {} }, Buffer, console, setTimeout, clearTimeout, setInterval, clearInterval };
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(sourcePath, 'utf8'), sandbox, { filename: sourcePath });
 
 function createHarness() {
     const parent = {
         trafficStats: { desktopMultiplex: { sessions: 0 } },
-        parent: { debug() {}, DispatchEvent() {} },
+        parent: { args: {}, debug() {}, DispatchEvent() {} },
         db: { Get(id, cb) { cb(null, [{ meshid: 'mesh/test/group', name: 'test', icon: 1 }]); } },
         users: {}, wsagents: {}, meshes: {}
     };
@@ -49,7 +49,8 @@ function createHarness() {
     function join() { const viewer = peer(true); mux.addPeer(viewer); viewer.drain(); agent.drain(); return viewer; }
     function screen(withPicture) {
         mux.processAgentData(Buffer.from([0, 7, 0, 8, 0, 16, 0, 16]));
-        if (withPicture) mux.processAgentData(Buffer.from([0, 3, 0, 10, 0, 0, 0, 0, 1, 2]));
+        // Only the dimensions affect the linked image cache: a JPEG start of frame for a 16x16 tile.
+        if (withPicture) mux.processAgentData(Buffer.from('0003001700000000' + 'ffd8ffc0000b080010001001011100', 'hex'));
         slow.drain();
     }
     return { mux, agent, slow, overflow, join, screen, parent };
