@@ -31,11 +31,11 @@ function runOnce() { const pending = timers.filter(t => !t.cleared && !t.interva
 
 function makeParent(opts) {
     opts = opts || {};
-    const writes = [], opens = [], closedFds = [];
+    const writes = [], opens = [], closedFds = [], events = [];
     const parent = {
         trafficStats: { desktopMultiplex: { sessions: 0 } }, relaySessionCount: 0, relaySessionErrorCount: 0,
         parent: {
-            args: {}, debug() {}, DispatchEvent() {}, AddEventDispatch() {}, RemoveAllEventDispatch() {},
+            args: {}, debug() {}, DispatchEvent(targets, source, event) { events.push({ targets, event }); }, AddEventDispatch() {}, RemoveAllEventDispatch() {},
             decodeCookie() { return { ruserid: 'user/test/u', nodeid: 'node/test/device' }; },
             fs: {
                 mkdirSync() {}, open(f, m, cb) { opens.push({ f, cb }); if (opts.openSync) { cb(null, 9); } },
@@ -48,7 +48,7 @@ function makeParent(opts) {
         db: { Get(id, cb) { if (opts.dbGet) { opts.dbGet(id, cb); } else { cb(null, [{ meshid: 'mesh/test/group', name: 'test', icon: 1 }]); } }, SetUser() {} },
         users: {}, wsagents: {}, meshes: {}, desktoprelays: {}, userGroups: {}
     };
-    return { parent, writes, opens, closedFds };
+    return { parent, writes, opens, closedFds, events };
 }
 
 function fakeWs() {
@@ -144,6 +144,55 @@ const tests = {
         const w = writes.shift(); w.cb(null, w.len);
         assert(closedFds.indexOf(9) >= 0, 'descriptor closed after the late header write');
         assert(mux.recordingFile == null, 'no recording attached after late header write');
+    },
+    'a recording write error stops the recording, closes the file once and raises an event'() {
+        const { parent, writes, closedFds, events } = makeParent({ openSync: true });
+        const domain = { id: '', sessionrecording: { onlyselectedusers: true } };
+        let mux = null;
+        sandbox.CreateDesktopMultiplexor(parent, domain, 'node/test/device', 'sess', m => { mux = m; });
+        parent.desktoprelays['node/test/device'] = mux;
+        const viewer = recordingViewer(mux), out = [];
+        viewer.ws.send = (d, cb) => { out.push(d); if (cb) cb(); };
+        mux.addPeer(viewer);
+        const header = writes.shift(); header.cb(null, header.len);
+        assert.strictEqual(out[0], 'cr', 'the viewer is told the session is recorded');
+        const agent = { req: { query: {} }, ws: fakeWs(), deskMultiplexor: mux, close() {} };
+        mux.addPeer(agent);
+        for (let i = 0; i < 70; i++) { mux.processData(agent, Buffer.from([0, 88, 0, 5, i])); }
+        assert.strictEqual(agent.paused, true, 'a backed up recording queue pauses the agent');
+        const failed = writes.shift();
+        failed.cb(Object.assign(new Error('EIO: i/o error, write'), { code: 'EIO' }), 0);
+        assert.deepStrictEqual(closedFds, [9], 'the recording file is closed');
+        assert.strictEqual(mux.recordingFile, null, 'the session is no longer recorded');
+        assert.strictEqual(mux.recordingQueue.length, 0, 'queued blocks for the failed file are dropped');
+        assert.strictEqual(writes.length, 0, 'nothing more is written to the failed file');
+        assert.strictEqual(agent.paused, false, 'the agent is no longer held for the recording');
+        const failure = events.filter(e => /write error/.test(e.event.msg || ''));
+        assert.strictEqual(failure.length, 1, 'one failure event');
+        assert.strictEqual(failure[0].event.nodeid, 'node/test/device');
+        assert(/EIO/.test(failure[0].event.msg) && /\.mcrec$/.test(failure[0].event.filename), JSON.stringify(failure[0].event));
+        assert(failure[0].targets.indexOf('recording') >= 0);
+        mux.processData(agent, Buffer.from([0, 88, 0, 5, 99]));
+        assert.strictEqual(writes.length, 0, 'later agent data is not recorded');
+        viewer.close();
+        assert.deepStrictEqual(closedFds, [9], 'disposing the session does not close the file again');
+        assert.strictEqual(writes.length, 0, 'no end block is written to the failed file');
+        assert(!events.some(e => e.event.msgid === 146), 'no finished recording event for a failed recording');
+    },
+    'a failed recording header write leaves the viewer connected and unrecorded'() {
+        const { parent, writes, closedFds, events } = makeParent({ openSync: true });
+        const domain = { id: '', sessionrecording: { onlyselectedusers: true } };
+        let mux = null;
+        sandbox.CreateDesktopMultiplexor(parent, domain, 'node/test/device', 'sess', m => { mux = m; });
+        parent.desktoprelays['node/test/device'] = mux;
+        const viewer = recordingViewer(mux), out = [];
+        viewer.ws.send = (d, cb) => { out.push(d); if (cb) cb(); };
+        mux.addPeer(viewer);
+        const header = writes.shift(); header.cb(null, 0); // A write that reports no bytes written is a failure
+        assert.strictEqual(out[0], 'c', 'the viewer connects without the recording flag');
+        assert.strictEqual(mux.recordingFile, null);
+        assert.deepStrictEqual(closedFds, [9]);
+        assert.strictEqual(events.filter(e => /write error/.test(e.event.msg || '')).length, 1);
     },
     'desktop audio availability reaches current viewers and viewers that join later'() {
         const { parent } = makeParent();
