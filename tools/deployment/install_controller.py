@@ -7,8 +7,17 @@ Controller code is installed from this checkout.
 and migrates the configuration to the current schema (see release_manager.migrate_config). It does
 not touch the host service's legacy image-size preload: the 1.2.5 host installation keeps it until
 the first container release is promoted, which retires it (release_manager.retire_legacy_preload).
+The controller code is shared by every instance, so --upgrade also holds the preview instance's lock
+when that instance is installed.
+
+--instance preview installs the preview instance (release_manager.INSTANCES['preview']) beside an
+installed production controller whose code equals this checkout: its service account, its
+persistent folders and its controller configuration. It reads production's configuration (image
+repository and reviewed versions) and writes nothing of production's. The preview deploys through
+the same CI key and forced command (`deploy-preview sha256:<digest>`).
 """
 import argparse
+import contextlib
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -96,6 +105,24 @@ def migrate_config_file():
     return backup
 
 
+@contextlib.contextmanager
+def instance_lock(name):
+    """Hold a non-production instance's controller lock while it is installed (nothing otherwise)."""
+    state = release_manager.INSTANCES[name].state
+    if not state.is_dir():
+        yield
+        return
+    with (state / 'lock').open('w') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('A ' + name + ' release controller operation is running; retry the upgrade after it ends')
+        if (state / 'transaction.json').exists():
+            raise RuntimeError('An interrupted ' + name + ' transaction exists. Run "meshcentral-release --instance ' +
+                               name + ' recover" before upgrading the controller.')
+        yield
+
+
 def upgrade():
     """Replace the controller code and migrate the configuration."""
     if not CONFIG.is_file():
@@ -113,8 +140,13 @@ def upgrade():
             raise RuntimeError('A release controller operation is running; retry the upgrade after it ends')
         if (release_manager.STATE / 'transaction.json').exists():
             raise RuntimeError('An interrupted transaction exists. Run recover before upgrading the controller.')
-        install_code()
-        backup = migrate_config_file()
+        with contextlib.ExitStack() as other_instances:
+            # Every installed instance runs this code, so none of them may be mid-operation either.
+            for name in release_manager.INSTANCES:
+                if name != 'production':
+                    other_instances.enter_context(instance_lock(name))
+            install_code()
+            backup = migrate_config_file()
     config = release_manager.load_config()
     print('Controller code upgraded from ' + str(SOURCE) + '.')
     if backup:
@@ -175,10 +207,79 @@ def fresh_install(args):
     print('Review GitHub environment/registry access before the first digest promotion.')
 
 
+def installed_code_problems():
+    """Name every installed controller file that is missing or differs from this checkout."""
+    problems = []
+    for name, destination, _ in CODE:
+        if not destination.is_file():
+            problems.append(str(destination) + ' is missing')
+        elif destination.read_bytes() != normalized_text(SOURCE / name):
+            problems.append(str(destination) + ' differs from ' + str(SOURCE / name))
+    return problems
+
+
+def install_instance(name, enable_fleet_update):
+    """Install a non-production instance beside the production controller, writing nothing of production's."""
+    instance = release_manager.INSTANCES[name]
+    if instance.host_service or name == 'production':
+        raise ValueError('The production controller is installed without --instance')
+    require_sources()
+    # Shared with production: the CI key and forced command, the sudoers rule and the controller code.
+    for path in (CONFIG, SUDOERS, CONTROLLER, CI_ENTRY):
+        if not path.is_file():
+            raise ValueError('Install the production controller first; missing ' + str(path))
+    try:
+        pwd.getpwnam('meshdeploy')
+    except KeyError:
+        raise ValueError('The meshdeploy account of the production installation is missing') from None
+    problems = installed_code_problems()
+    if problems:
+        raise ValueError('The installed controller code is not this checkout\'s, so it cannot deploy the ' + name +
+                         ' instance yet. Run "install_controller.py --upgrade" from this checkout first:\n  ' +
+                         '\n  '.join(problems))
+    production = release_manager.validate_config(json.loads(CONFIG.read_text()), 'production')
+    release_manager.activate(name)
+    release_manager.check_instance_isolation()
+    for path, what in ((instance.config, 'controller configuration'), (instance.state, 'state directory')):
+        if path.exists() or path.is_symlink():
+            raise ValueError('The ' + name + ' ' + what + ' already exists; inspect it before installing: ' + str(path))
+    base = instance.base
+    if base.is_symlink() or (base.exists() and (not base.is_dir() or any(base.iterdir()))):
+        raise ValueError(str(base) + ' already exists and is not an empty folder; inspect it before installing')
+    try:
+        pwd.getpwnam(instance.account)
+    except KeyError:
+        pass
+    else:
+        raise ValueError('The ' + instance.account + ' account already exists; inspect its files and access before '
+                         'installing')
+    config = release_manager.new_instance_config(name, production['image'], production['reviewed_versions'],
+                                                 enable_fleet_update)
+    subprocess.run(['useradd', '--system', '--user-group', '--no-create-home', '--home-dir', '/nonexistent',
+                    '--shell', '/usr/sbin/nologin', instance.account], check=True)
+    account = pwd.getpwnam(instance.account)
+    base.mkdir(mode=0o755, exist_ok=True)
+    os.chown(base, 0, 0)
+    base.chmod(0o755)
+    for folder in release_manager.MOUNTED_FOLDERS:
+        directory = base / folder
+        directory.mkdir(mode=0o750)
+        os.chown(directory, account.pw_uid, account.pw_gid)
+        directory.chmod(0o750)
+    write_private_json(instance.config, config)
+    print('Installed the ' + name + ' instance: account ' + instance.account + ', folders under ' + str(base) +
+          ', configuration ' + str(instance.config) + '. Production was not changed.')
+    print('Reviewed MeshCentral versions (from ' + str(CONFIG) + '): ' + ', '.join(config['reviewed_versions']))
+    print('Before the first deploy, write ' + str(base / 'meshcentral-data/config.json') + ' from '
+          'tools/deployment/meshcentral-preview-config.template.json (owner ' + instance.account + ', mode 0600).')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--upgrade', action='store_true',
                         help='upgrade the controller code and configuration of an existing installation')
+    parser.add_argument('--instance', choices=sorted(release_manager.INSTANCES), default='production',
+                        help='install another server instance beside production (default: production)')
     parser.add_argument('--public-key', type=Path)
     parser.add_argument('--image')
     parser.add_argument('--health-url')
@@ -186,7 +287,15 @@ def main():
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise SystemExit('Administrator installation is required')
-    if args.upgrade:
+    if args.instance != 'production':
+        if args.upgrade:
+            parser.error('--upgrade replaces the controller code every instance shares and migrates the production '
+                         'configuration; run it without --instance')
+        if args.public_key or args.image or args.health_url:
+            parser.error('the ' + args.instance + ' instance uses the installed CI key, the production image repository '
+                         'and its fixed health URL; only --enable-fleet-update applies')
+        install_instance(args.instance, args.enable_fleet_update)
+    elif args.upgrade:
         if args.public_key or args.image or args.health_url or args.enable_fleet_update:
             parser.error('--upgrade keeps the installed policy; edit it in place instead of passing installation options')
         upgrade()

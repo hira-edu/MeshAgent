@@ -1,0 +1,62 @@
+# preview.high.support: the preview MeshCentral instance (container meshcentral-preview,
+# MeshCentral settings.port 4440 on 127.0.0.1; release_manager.INSTANCES['preview']).
+#
+# It mirrors how agents.high.support serves the console and the agents (the live
+# /etc/caddy/Caddyfile site "agents.high.support" with its highsupport_frontdoor snippet, and
+# "agents.high.support:4445, agents.high.support:4446"), and proxies only to the preview instance.
+# Not mirrored: relay.high.support (the preview relays through preview.high.support) and the static
+# certificate copy on 4445/4446 (Caddy's own certificate for preview.high.support is used instead).
+#
+# Install (operator, see PREVIEW-RUNBOOK): copy to /etc/caddy/sites/preview.high.support.caddy and add
+#     import /etc/caddy/sites/preview.high.support.caddy
+# as the last line of /etc/caddy/Caddyfile, after the highsupport_common snippet it imports.
+# Checked by test/ci_release_preview_instance_test.py.
+
+(highsupport_preview_frontdoor) {
+	# Agent telemetry path rewritten to the MeshCentral agent endpoint
+	@agentpath path /api/v2/telemetry
+	handle @agentpath {
+		uri replace /api/v2/telemetry /agent.ashx
+		reverse_proxy 127.0.0.1:4440
+	}
+
+	# Authenticated users (MeshCentral cookie)
+	@authenticated header_regexp cookie Cookie xid
+	handle @authenticated {
+		reverse_proxy 127.0.0.1:4440
+	}
+
+	# Non-GET requests (login POST, WebSocket upgrades, agents)
+	@nonget not method GET HEAD
+	handle @nonget {
+		reverse_proxy 127.0.0.1:4440
+	}
+
+	# Any path other than the bare root (scripts, styles, health.ashx, sub-pages)
+	@notroot not path /
+	handle @notroot {
+		reverse_proxy 127.0.0.1:4440
+	}
+
+	# Login links with query parameters
+	@hasquery query mc=* login=* user=* key=* viewmode=* node=* meshaction=*
+	handle @hasquery {
+		reverse_proxy 127.0.0.1:4440
+	}
+
+	# Bare GET / without a cookie or query: cover page
+	handle {
+		root * /var/www/cover
+		file_server
+	}
+}
+
+preview.high.support {
+	import highsupport_common
+	import highsupport_preview_frontdoor
+}
+
+preview.high.support:4445, preview.high.support:4446 {
+	import highsupport_common
+	reverse_proxy 127.0.0.1:4440
+}

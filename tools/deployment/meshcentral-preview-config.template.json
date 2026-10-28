@@ -1,0 +1,70 @@
+{
+  "__comment__": [
+    "Template of /opt/meshcentral-preview/meshcentral-data/config.json, the preview instance's MeshCentral config (preview.high.support). Never a real config: it holds no secret.",
+    "Settings are production's non-secret settings (tools/duplicate_server/production_flags.json) with the preview substitutions: cert, agentAliasDNS and certUrl preview.high.support; port 4440 and mpsPort 4441 bound to 127.0.0.1 (production: 4430, 4433); mongoDbName meshcentral_preview; fresh keys; title. Left out: dataPath (the container passes --datapath), url, agentWebCertHashes and agentWebCertUrls (production identifiers), customFiles (the r0 canary entry is dropped after the cutover, D16).",
+    "Paths are the container's: the container mounts /opt/meshcentral-preview/meshcentral-{data,files,web,recordings,backups} at /opt/meshcentral/meshcentral-*, so backupPath /opt/meshcentral/meshcentral-backups is the host folder /opt/meshcentral-preview/meshcentral-backups.",
+    "Replace every REPLACE_ value before the first deploy; the release controller refuses the file while one is left. sessionKey, dbEncryptKey and dbRecordsEncryptKey: each a fresh value (for example openssl rand -hex 32), never production's. mongoDb: mongodb://meshcentral_preview:<password>@127.0.0.1:27017/meshcentral_preview?authSource=meshcentral_preview for a MongoDB user with readWrite on meshcentral_preview only.",
+    "Checked by test/ci_release_preview_instance_test.py against release_manager.INSTANCES['preview'] and production_flags.json."
+  ],
+  "settings": {
+    "cert": "preview.high.support",
+    "WANonly": true,
+    "port": 4440,
+    "portBind": "127.0.0.1",
+    "aliasPort": 443,
+    "redirPort": 0,
+    "mpsPort": 4441,
+    "mpsPortBind": "127.0.0.1",
+    "tlsOffload": "127.0.0.1,::1",
+    "agentAliasDNS": "preview.high.support",
+    "mongoDb": "REPLACE_WITH_THE_PREVIEW_MONGODB_URI",
+    "mongoDbName": "meshcentral_preview",
+    "sessionKey": "REPLACE_WITH_A_FRESH_SESSION_KEY",
+    "dbEncryptKey": "REPLACE_WITH_A_FRESH_DB_ENCRYPT_KEY",
+    "dbRecordsEncryptKey": "REPLACE_WITH_A_FRESH_DB_RECORDS_ENCRYPT_KEY",
+    "autoBackup": {
+      "backupPath": "/opt/meshcentral/meshcentral-backups",
+      "backupIntervalHours": 24,
+      "keepLastDaysBackup": 14,
+      "backupSkipFoldersGlob": ["**/apparmor/**", "**/cache/**", "**/tmp/**", "backups", "meshcores", "staging", "umh-backups", "node_modules", "bin", "meshcentral-backups", "@(!(meshcentral-data))", "meshcentral-data/certificate-history-backups"]
+    },
+    "agentCoreDump": true,
+    "agentIdleTimeout": 180,
+    "agentLogDump": true,
+    "agentPing": 60,
+    "agentPong": 60,
+    "agentPortTls": false,
+    "agentSignLock": true,
+    "agentUpdateSystem": 1,
+    "ciphers": "HIGH:!aNULL:!MD5",
+    "cookieIpCheck": "none",
+    "desktopMultiplex": true,
+    "ignoreAgentHashCheck": false,
+    "keepCerts": true,
+    "lockAgentDownload": false,
+    "noAgentUpdate": false,
+    "plugins": {"enabled": true, "list": ["nativeruntime"]},
+    "selfUpdate": false,
+    "temporaryAgentUpdate": false,
+    "threads": 4,
+    "webRTC": false
+  },
+  "domains": {
+    "": {
+      "title": "High Support Preview",
+      "title2": "Remote Management",
+      "certUrl": "https://preview.high.support:443/",
+      "allowedOrigin": ["preview.high.support"],
+      "agentConfig": ["coreDumpEnabled=1", "connectionTimeout=60", "retryAttempts=10", "retryDelay=20", "agentPing=60", "agentPong=60", "ignoreProxyFile=1"],
+      "auth": "default",
+      "geoLocation": true,
+      "ipLocation": true,
+      "meshMessenger": true,
+      "minify": false,
+      "newAccounts": false,
+      "showModernUIToggle": true,
+      "umhControls": true,
+      "myServer": {"backup": true, "restore": true, "upgrade": false, "errorlog": true, "console": true, "trace": true, "config": true}
+    }
+  }
+}
