@@ -91,7 +91,7 @@ async function connect(page) {
         const hex = p => Array.from(p, c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
         desktop = { m: CreateAgentRemoteDesktop('Desk'), State: 3 };
         const m = desktop.m;
-        m.parent = { State: 2, send: p => { if (((p.charCodeAt(0) << 8) | p.charCodeAt(1)) === 2) packets.push(hex(p)); }, xxStateChange: function (s) { this.State = s; m.xxStateChange(s); } };
+        m.parent = { State: 2, send: p => { if (((p.charCodeAt(0) << 8) | p.charCodeAt(1)) === 2) packets.push(hex(p)); }, xxStateChange: function (s) { this.State = s; m.xxStateChange(s); }, connected: function () { if (this.State == 2) this.xxStateChange(3); } };
         m.Start();
         m.ProcessBinaryCommand(7, 8, new Uint8Array([0, 7, 0, 8, 3, 32, 2, 88]));
         m.Canvas.canvas.width = 800; m.Canvas.canvas.height = 600;
