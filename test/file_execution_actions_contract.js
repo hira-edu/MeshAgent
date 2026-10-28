@@ -155,8 +155,9 @@ function main() {
     exerciseRecoveryCommandError(recoverySource);
 
     for (const core of cores) {
-        const calls = [], replies = [];
+        const calls = [], replies = [], audit = [];
         const sandbox = { process: { platform: 'win32' }, Buffer, sendConsoleText() { },
+            MeshServerLog(msg) { audit.push([null, msg]); }, MeshServerLogEx(msgid, args, msg) { audit.push([msgid, msg]); },
             require(name) { assert(name === 'MeshAgent', 'native handler must not load helpers'); return { fileAction(...args) { calls.push(args); return { ok: true, pid: 42 }; } }; } };
         vm.runInNewContext(extractFunction(core.source, 'function nativeFileAction('), sandbox);
         const invoke = (rights, action, extra) => sandbox.nativeFileAction({ httprequest: { rights }, write(data) { replies.push(JSON.parse(data)); } }, Object.assign({ action, path: 'C:\\literal & name.exe', reqid: 'owned' }, extra));
@@ -172,6 +173,9 @@ function main() {
         assert(calls.length === 4 && calls[0][2] === false && calls[1][2] === true && calls[2][2] === false && calls[3][2] === true, `${core.relativePath}: native identity and delete mode must be explicit`);
         assert(calls.every((c) => c[1] === 'C:\\literal & name.exe'), 'paths must remain literal');
         assert(replies.every((r) => r.reqid === 'owned' && r.action === 'fileaction'), 'every outcome must retain correlation');
+        // Every request is audited as its own action: execute never reuses 20 ("Opening: {0}").
+        assert(audit.length === 8 && audit.slice(0, 6).every(([msgid, msg]) => msgid === null && msg.startsWith('Execute')) &&
+            audit[6][0] === 20 && audit[7][0] === 45, `${core.relativePath}: file actions must be audited as themselves`);
         sandbox.require = () => ({});
         const missing = invoke(8 | 131072, 'execute', { privileged: false });
         assert(!missing.ok && missing.error.includes('Update the agent'), 'old agents must fail visibly without a helper fallback');
