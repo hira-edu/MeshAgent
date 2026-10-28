@@ -129,7 +129,9 @@ function main() {
         xxStateChange(nextState) {
             this.State = nextState;
             parentStateTransitions.push(nextState);
-        }
+        },
+        // What agent-redir-ws's connected() does: the module declares the connection on its first SCREEN.
+        connected() { if (this.State == 2) { this.xxStateChange(3); } }
     };
 
     desktop.ProcessScreenMsg(800, 600);

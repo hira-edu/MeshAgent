@@ -89,7 +89,8 @@ function loadViewer(asset, clock, canvas) {
     viewer.parent = {
         State: 2,
         send(packet) { sink.packets.push(Array.from(packet, c => c.charCodeAt(0))); },
-        xxStateChange(state) { this.State = state; viewer.xxStateChange(state); }
+        xxStateChange(state) { this.State = state; viewer.xxStateChange(state); },
+        connected() { if (this.State == 2) { this.xxStateChange(3); } }
     };
     viewer.Start();
     viewer.ProcessBinaryCommand(7, 8, new Uint8Array([0, 7, 0, 8, 800 >> 8, 800 & 255, 600 >> 8, 600 & 255]));
