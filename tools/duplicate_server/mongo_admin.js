@@ -5,6 +5,7 @@
 // node mongo_admin.js <driverDir> <secretsFile> <command> [args...]
 //   init <db>...   create the admin user (localhost exception) and the app user
 //   dropdb <db>    drop one duplicate database
+//   grant <db>     give the app user readWrite and dbAdmin on one duplicate database (the dbcompat scratch database)
 //   ping           authenticate as admin and print the server version
 //   shutdown       shut mongod down cleanly
 'use strict';
@@ -27,7 +28,7 @@ for (const key of ['host', 'port', 'adminUser', 'adminPassword', 'appUser', 'app
 const base = 'mongodb://' + secrets.host + ':' + secrets.port + '/';
 const adminUrl = 'mongodb://' + encodeURIComponent(secrets.adminUser) + ':' + encodeURIComponent(secrets.adminPassword) +
     '@' + secrets.host + ':' + secrets.port + '/?authSource=admin&directConnection=true';
-const allowedDb = /^meshcentral_dup[AB]$/;
+const allowedDb = /^meshcentral_dup(A|B|compat)$/;
 
 async function withClient(url, fn) {
     const client = new MongoClient(url, { serverSelectionTimeoutMS: 15000, directConnection: true });
@@ -64,6 +65,13 @@ async function main() {
         return withClient(adminUrl, async (client) => {
             const dropped = await client.db(rest[0]).dropDatabase();
             console.log('dropped ' + rest[0] + ': ' + dropped);
+        });
+    }
+    if (command === 'grant') {
+        if (rest.length !== 1 || !allowedDb.test(rest[0])) { fail('grant needs one duplicate database name'); }
+        return withClient(adminUrl, async (client) => {
+            await client.db('admin').command({ grantRolesToUser: secrets.appUser, roles: [{ role: 'readWrite', db: rest[0] }, { role: 'dbAdmin', db: rest[0] }] });
+            console.log('granted ' + secrets.appUser + ' readWrite, dbAdmin on ' + rest[0]);
         });
     }
     if (command === 'shutdown') {

@@ -3,8 +3,8 @@ import secrets as pysecrets
 from urllib.parse import quote
 
 from dup_common import (
-    DUP_ROOT, LAYOUTS, MONGO_DATA, MONGO_DIR, MONGO_HOST, MONGO_PORT, MONGOD_EXE, NODE_EXE, SECRETS, TOOL_DIR,
-    DupError, log, layout_root, node_env, read_json, run, write_json,
+    DUP_ROOT, LAYOUTS, MONGO_DATA, MONGO_DIR, MONGO_HOST, MONGO_PORT, MONGOD_EXE, SECRETS, TOOL_DIR,
+    DupError, log, layout_node, layout_root, node_env, read_json, run, write_json,
 )
 import dup_process
 
@@ -35,17 +35,18 @@ def connection_uri(layout):
 
 
 def driver_dir():
-    """The wrapper's own mongodb driver (4.17.2), from whichever layout is installed."""
+    """The wrapper's own mongodb driver (4.17.2) and the Node it runs on, from whichever layout is installed."""
     for name in ("A", "B"):
         candidate = layout_root(name) / "node_modules"
-        if (candidate / "mongodb" / "package.json").is_file():
-            return candidate
-    raise DupError("No layout has node_modules/mongodb yet; install layout A first")
+        if (candidate / "mongodb" / "package.json").is_file() and layout_node(name).exe.is_file():
+            return candidate, layout_node(name)
+    raise DupError("No layout has node_modules/mongodb yet; install a layout first")
 
 
 def admin(*args, timeout=120, capture=True):
-    return run([NODE_EXE, TOOL_DIR / "mongo_admin.js", driver_dir(), SECRETS_FILE, *args],
-               env=node_env(), timeout=timeout, capture=capture)
+    driver, runtime = driver_dir()
+    return run([runtime.exe, TOOL_DIR / "mongo_admin.js", driver, SECRETS_FILE, *args],
+               env=node_env(runtime), timeout=timeout, capture=capture)
 
 
 def running():

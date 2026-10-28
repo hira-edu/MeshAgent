@@ -645,6 +645,119 @@ class StartShadowCheckTests(FixtureCase):
             MANAGER.validate_manifest(directory / 'release', self.config['reviewed_versions'])
 
 
+class ServerConfigPathTests(FixtureCase):
+    """The container mounts only /opt/meshcentral/meshcentral-*: a config path elsewhere would make the server
+    fail to back up, record or serve there (the read-only root has no such folder)."""
+
+    SECRET = 'fixture-session-key-never-printed'
+
+    def setUp(self):
+        super().setUp()
+        self.run_calls = []
+        for name, value in {'run': mock.Mock(side_effect=lambda *args, **kw: self.run_calls.append(args)),
+                            'remove_container': mock.Mock(), 'healthy': mock.Mock(return_value=True),
+                            'prepare': mock.Mock(return_value=make_release(self.release_dir(DIGEST)))}.items():
+            patch = mock.patch.object(MANAGER, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    @staticmethod
+    def server_config(settings=None, domains=None):
+        config = {'settings': dict({'sessionKey': ServerConfigPathTests.SECRET}, **(settings or {}))}
+        if domains is not None:
+            config['domains'] = domains
+        return config
+
+    def use(self, settings=None, domains=None):
+        self.config_path.write_text(json.dumps(self.server_config(settings, domains)))
+
+    def refused(self, server_config, *texts):
+        """Checked as the VPS controller sees it: install root /opt/meshcentral, the container's working directory."""
+        with self.assertRaises(ValueError) as raised:
+            MANAGER.check_server_config_paths(server_config, '/opt/meshcentral')
+        message = str(raised.exception)
+        for text in texts:
+            self.assertIn(text, message)
+        self.assertNotIn(self.SECRET, message)
+        return message
+
+    def accepted(self, server_config):
+        MANAGER.check_server_config_paths(server_config, '/opt/meshcentral')
+
+    def test_paths_inside_the_mounted_folders_are_accepted(self):
+        for backup in ('/opt/meshcentral/meshcentral-backups', 'meshcentral-backups', './meshcentral-backups/daily',
+                       '/opt/meshcentral/meshcentral-files/../meshcentral-backups'):
+            with self.subTest(backup=backup):
+                self.accepted(self.server_config({'autoBackup': {'backupPath': backup}}, {'': {
+                    'sessionRecording': {'filepath': 'meshcentral-recordings'},
+                    'webPublicPath': '/opt/meshcentral/meshcentral-web/public-default'}}))
+
+    def test_a_missing_key_uses_the_mounted_default(self):
+        # MeshCentral 1.3.1 installed as node_modules/meshcentral defaults backuppath to
+        # <install root>/meshcentral-backups (meshcentral.js:90, applied at :2232) and recordings to
+        # <install root>/meshcentral-recordings (:91); both are mounted read-write.
+        config = self.server_config({'autoBackup': {'backupIntervalHours': 24, 'keepLastDaysBackup': 14}},
+                                    {'': {'sessionRecording': {}}})
+        self.accepted(config)
+        self.assertEqual(MANAGER.server_config_paths(config), [])
+        self.assertIn('meshcentral-backups', MANAGER.WRITABLE_MOUNTS)
+        self.assertIn('meshcentral-recordings', MANAGER.WRITABLE_MOUNTS)
+
+    def test_the_production_backup_folder_is_refused(self):
+        self.refused(self.server_config({'autobackup': {'backuppath': '/var/meshcentral-backups', 'intervalhours': 24}}),
+                     'settings.autobackup.backuppath = /var/meshcentral-backups: the release container does not '
+                     'mount it, so the server cannot write it there',
+                     'written paths must be under /opt/meshcentral/meshcentral-data, /opt/meshcentral/meshcentral-files, '
+                     '/opt/meshcentral/meshcentral-recordings, /opt/meshcentral/meshcentral-backups)')
+
+    def test_relative_and_escaping_paths_resolve_from_the_working_directory(self):
+        self.refused(self.server_config({'autobackup': {'backuppath': '../meshcentral-backups'}}),
+                     'settings.autobackup.backuppath = /opt/meshcentral-backups:')
+        self.refused(self.server_config({'autobackup': {'backuppath': 'meshcentral-backups/../../../var/backups'}}),
+                     'settings.autobackup.backuppath = /var/backups:')
+
+    def test_a_backup_path_inside_the_data_folder_is_refused(self):
+        self.refused(self.server_config({'autobackup': {'backuppath': 'meshcentral-data/backups'}}),
+                     'settings.autobackup.backuppath = /opt/meshcentral/meshcentral-data/backups: MeshCentral refuses '
+                     'a backup path inside meshcentral-data')
+
+    def test_disabled_autobackup_and_disabled_domains_are_not_checked(self):
+        for disabled in (False, 'false'):
+            with self.subTest(autobackup=disabled):
+                self.accepted(self.server_config({'autobackup': disabled},
+                                                 {'_old': {'sessionrecording': {'filepath': '/var/recordings'}}}))
+
+    def test_recording_web_and_error_log_paths_outside_the_mounts_are_refused(self):
+        message = self.refused(self.server_config(
+            {'meshErrorLogPath': '/var/log/meshcentral'},
+            {'': {'sessionRecording': {'filePath': '/srv/recordings'}},
+             'customer': {'webViewsPath': '/srv/views', 'webPublicPath': 'meshcentral-files/public'}}),
+            'settings.mesherrorlogpath = /var/log/meshcentral: ', 'domains[""].sessionrecording.filepath = /srv/recordings: ',
+            'domains["customer"].webviewspath = /srv/views: the release container does not mount it, so the server '
+            'cannot read it there')
+        self.assertNotIn('webpublicpath', message)  # meshcentral-files is mounted, so it can be read
+
+    def test_web_folders_are_read_only_so_nothing_may_be_written_there(self):
+        self.refused(self.server_config({'autobackup': {'backuppath': 'meshcentral-web/backups'}}),
+                     'settings.autobackup.backuppath = /opt/meshcentral/meshcentral-web/backups:')
+
+    def test_promotion_refuses_before_stopping_anything_and_start_refuses_too(self):
+        self.use({'autobackup': {'backuppath': '/var/meshcentral-backups'}})
+        with self.assertRaisesRegex(ValueError, 'backuppath = /var/meshcentral-backups'):
+            MANAGER.promote(self.config, DIGEST)
+        self.assertEqual(self.run_calls, [])
+        self.assertFalse((self.state / 'transaction.json').exists())
+        with self.assertRaisesRegex(ValueError, 'backuppath = /var/meshcentral-backups'):
+            MANAGER.start(self.config, self.release(PREVIOUS))
+        self.assertEqual(self.run_calls, [])
+
+    def test_an_unreadable_config_is_refused_without_its_content(self):
+        self.config_path.write_text('{"settings": {"sessionKey": "' + self.SECRET + '"')
+        with self.assertRaisesRegex(ValueError, 'config.json is not valid JSON') as raised:
+            MANAGER.check_server_config()
+        self.assertNotIn(self.SECRET, str(raised.exception))
+
+
 class RetiredPreloadTests(FixtureCase):
     """D4/DEP-21: no image-size preload is tracked, installed, mounted or required by a release start."""
 
