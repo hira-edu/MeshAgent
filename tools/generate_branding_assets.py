@@ -3,12 +3,122 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import json
 import os
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
+
+
+# Build channels. "production" is the default and must leave every generated
+# value exactly as it was before channels existed (byte-identical output).
+# "preview" derives a distinct, visibly-labelled identity from the SAME config so
+# a preview agent can be installed beside the production agent on one Windows
+# machine without the two sharing any machine-wide name or path. See
+# evidence/stage6/preview-agent-map.md and preview-agent-interface.md.
+CHANNELS = ("production", "preview")
+PREVIEW_IDENTITY_SUFFIX = "2"
+PREVIEW_VISIBLE_SUFFIX = " (Preview)"
+PREVIEW_PRODUCT_SUFFIX = " Preview"
+
+
+def resolve_channel(explicit: str | None) -> str:
+    channel = explicit if explicit else os.environ.get("MESHAGENT_CHANNEL")
+    channel = (channel or "production").strip().lower()
+    if channel not in CHANNELS:
+        raise ValueError(
+            f"unknown build channel {channel!r}; expected one of {', '.join(CHANNELS)}"
+        )
+    return channel
+
+
+def _insert_before_ext(name: str, token: str) -> str:
+    """meshagent.exe -> meshagent2.exe; meshagent -> meshagent2."""
+    text = str(name)
+    dot = text.rfind(".")
+    if dot <= 0:
+        return text + token
+    return text[:dot] + token + text[dot:]
+
+
+def _suffix_path_leaf(path_value: str, token: str) -> str:
+    """C:/ProgramData/MeshAgent -> C:/ProgramData/MeshAgent2 (either separator)."""
+    text = str(path_value).rstrip("/\\")
+    return text + token
+
+
+def _reparent(child: str, old_root: str, new_root: str, token: str) -> str:
+    """Keep a path that lives under old_root under new_root; otherwise suffix its leaf."""
+    text = str(child)
+    old = str(old_root)
+    for sep in ("", "/", "\\"):
+        prefix = old + sep
+        if text == old or text.startswith(prefix):
+            return new_root + text[len(old):]
+    return _suffix_path_leaf(text, token)
+
+
+def _suffix(value, suffix: str):
+    if value is None or str(value).strip() == "":
+        return value
+    return str(value) + suffix
+
+
+def apply_channel(config: dict, channel: str) -> dict:
+    """Return the config for the requested channel.
+
+    production: unchanged (byte-identical generated header).
+    preview: a deep copy whose every machine-wide identity differs from
+    production by the identity suffix, and whose user-visible names clearly read
+    as the preview agent.
+    """
+    if channel != "preview":
+        return config
+
+    cfg = copy.deepcopy(config)
+    branding = cfg.get("branding")
+    if isinstance(branding, dict):
+        if branding.get("serviceName"):
+            branding["serviceName"] = str(branding["serviceName"]) + PREVIEW_IDENTITY_SUFFIX
+        branding["displayName"] = _suffix(branding.get("displayName"), PREVIEW_VISIBLE_SUFFIX)
+        branding["productName"] = _suffix(branding.get("productName"), PREVIEW_PRODUCT_SUFFIX)
+        branding["description"] = _suffix(branding.get("description"), PREVIEW_VISIBLE_SUFFIX)
+        if branding.get("binaryName"):
+            branding["binaryName"] = _insert_before_ext(branding["binaryName"], PREVIEW_IDENTITY_SUFFIX)
+        if branding.get("serviceDllName"):
+            branding["serviceDllName"] = _insert_before_ext(branding["serviceDllName"], PREVIEW_IDENTITY_SUFFIX)
+
+        old_root = branding.get("installRoot")
+        if old_root:
+            new_root = _suffix_path_leaf(old_root, PREVIEW_IDENTITY_SUFFIX)
+            branding["installRoot"] = new_root
+            if branding.get("logPath"):
+                branding["logPath"] = _reparent(branding["logPath"], old_root, new_root, PREVIEW_IDENTITY_SUFFIX)
+
+        version_info = branding.get("versionInfo")
+        if isinstance(version_info, dict):
+            version_info["fileDescription"] = _suffix(version_info.get("fileDescription"), PREVIEW_VISIBLE_SUFFIX)
+            if version_info.get("internalName"):
+                version_info["internalName"] = _insert_before_ext(version_info["internalName"], PREVIEW_IDENTITY_SUFFIX)
+            if version_info.get("originalFilename"):
+                version_info["originalFilename"] = _insert_before_ext(version_info["originalFilename"], PREVIEW_IDENTITY_SUFFIX)
+
+    artifacts = cfg.get("artifacts")
+    if isinstance(artifacts, dict):
+        for key in ("databaseName", "configFileName", "logFileName"):
+            if artifacts.get(key):
+                artifacts[key] = _insert_before_ext(artifacts[key], PREVIEW_IDENTITY_SUFFIX)
+
+    persistence = cfg.get("persistence")
+    if isinstance(persistence, dict):
+        for task_key in ("scheduledTask", "serviceRecoveryTask"):
+            task = persistence.get(task_key)
+            if isinstance(task, dict) and task.get("taskName"):
+                task["taskName"] = str(task["taskName"]) + PREVIEW_PRODUCT_SUFFIX
+
+    return cfg
 
 
 def repo_root_from(path_value: str | None) -> Path:
@@ -374,9 +484,11 @@ def build_header(config: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_outputs(config_path: Path, output_header: Path) -> None:
+def write_outputs(config_path: Path, output_header: Path, channel: str = "production") -> None:
     with config_path.open("r", encoding="utf-8") as handle:
         config = json.load(handle)
+
+    config = apply_channel(config, channel)
 
     branding = get_value(config, "branding", {}) or {}
     if not get_value(branding, "serviceName") or not get_value(branding, "displayName"):
@@ -394,6 +506,12 @@ def main() -> int:
     parser.add_argument("--repo-root", dest="repo_root")
     parser.add_argument("--config", dest="config_path")
     parser.add_argument("--output-header", dest="output_header")
+    parser.add_argument(
+        "--channel",
+        dest="channel",
+        help="build channel: production (default) or preview; "
+        "falls back to the MESHAGENT_CHANNEL environment variable",
+    )
     args = parser.parse_args()
 
     repo_root = repo_root_from(args.repo_root)
@@ -401,7 +519,8 @@ def main() -> int:
     output_header = Path(args.output_header).resolve() if args.output_header else (repo_root / "meshcore" / "generated" / "meshagent_branding.h")
 
     try:
-        write_outputs(config_path, output_header)
+        channel = resolve_channel(args.channel)
+        write_outputs(config_path, output_header, channel)
     except Exception as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1

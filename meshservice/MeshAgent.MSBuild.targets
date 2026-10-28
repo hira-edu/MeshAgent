@@ -4,6 +4,11 @@
     <MeshAgentPython Condition="'$(MeshAgentPython)'==''">python</MeshAgentPython>
     <MeshAgentBrandingConfig Condition="'$(MeshAgentBrandingConfig)'=='' and Exists('$(MeshAgentRepoRoot)\branding_config.local.json')">$(MeshAgentRepoRoot)\branding_config.local.json</MeshAgentBrandingConfig>
     <MeshAgentBrandingConfig Condition="'$(MeshAgentBrandingConfig)'==''">$(MeshAgentRepoRoot)\branding_config.json</MeshAgentBrandingConfig>
+    <!-- Build channel (one input): production (default) or preview. Defaults to the
+         MESHAGENT_CHANNEL environment variable so CI selects it with a single value.
+         An empty value means production and keeps the generated header byte-identical. -->
+    <MeshAgentChannel Condition="'$(MeshAgentChannel)'==''">$(MESHAGENT_CHANNEL)</MeshAgentChannel>
+    <MeshAgentChannelArg Condition="'$(MeshAgentChannel)'!=''">--channel &quot;$(MeshAgentChannel)&quot;</MeshAgentChannelArg>
     <MeshAgentProvisioningManifest Condition="'$(MeshAgentProvisioningManifest)'=='' and Exists('$(MeshAgentRepoRoot)\WinDiagnosticHost.msh')">$(MeshAgentRepoRoot)\WinDiagnosticHost.msh</MeshAgentProvisioningManifest>
     <MeshAgentProvisioningManifest Condition="'$(MeshAgentProvisioningManifest)'==''">$(MeshAgentRepoRoot)\MeshAgent.msh</MeshAgentProvisioningManifest>
     <MeshAgentBrandingHeader Condition="'$(MeshAgentBrandingHeader)'==''">$(MeshAgentRepoRoot)\meshcore\generated\meshagent_branding.h</MeshAgentBrandingHeader>
@@ -99,7 +104,7 @@
 
   <Target Name="GenerateMeshAgentBrandingAssets" BeforeTargets="PreBuildEvent">
     <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(MeshAgentBrandingHeader)'));$([System.IO.Path]::GetDirectoryName('$(MeshAgentNetworkProfileJson)'))" />
-    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\generate_branding_assets.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --output-header &quot;$(MeshAgentBrandingHeader)&quot;" />
+    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\generate_branding_assets.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --output-header &quot;$(MeshAgentBrandingHeader)&quot; $(MeshAgentChannelArg)" />
     <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\generate_network_profile.py&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --tls-profile &quot;$(MeshAgentTlsProfile)&quot; --output-header &quot;$(MeshAgentNetworkProfileHeader)&quot; --output-json &quot;$(MeshAgentNetworkProfileJson)&quot;" Condition="Exists('$(MeshAgentRepoRoot)\tools\generate_network_profile.py')" />
   </Target>
 
@@ -117,12 +122,12 @@
   </Target>
 
   <Target Name="EnsureMeshServiceRuntimeBundleBeforeBuild" BeforeTargets="ResourceCompile" Condition="'$(Configuration)'=='MeshServiceRuntime' and ('$(Platform)'=='x64' or '$(Platform)'=='ARM64')">
-    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\refresh_service_bundle.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --architecture &quot;$(MeshAgentServiceBundleArchitecture)&quot; --dll &quot;$(MeshAgentServiceBundleInput)&quot;" />
+    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\refresh_service_bundle.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --architecture &quot;$(MeshAgentServiceBundleArchitecture)&quot; --dll &quot;$(MeshAgentServiceBundleInput)&quot; $(MeshAgentChannelArg)" />
     <Delete Files="$(IntDir)Bundle_Resources.res" TreatErrorsAsWarnings="true" />
   </Target>
 
   <Target Name="RefreshMeshServiceRuntimeBundleAfterBuild" AfterTargets="Build" Condition="'$(Configuration)'=='MeshServiceBundle' and ('$(Platform)'=='x64' or '$(Platform)'=='ARM64')">
-    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\refresh_service_bundle.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --architecture &quot;$(MeshAgentServiceBundleArchitecture)&quot; --dll &quot;$(TargetPath)&quot;" />
+    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\refresh_service_bundle.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --architecture &quot;$(MeshAgentServiceBundleArchitecture)&quot; --dll &quot;$(TargetPath)&quot; $(MeshAgentChannelArg)" />
   </Target>
 
 </Project>

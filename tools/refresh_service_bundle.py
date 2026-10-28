@@ -8,6 +8,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from generate_branding_assets import apply_channel, resolve_channel  # noqa: E402
+
 
 def repo_root_from(path_value: str | None) -> Path:
     if path_value:
@@ -30,9 +33,10 @@ def choose_config_path(repo_root: Path, explicit: str | None) -> Path:
     raise FileNotFoundError(f"Branding configuration not found under {repo_root}")
 
 
-def load_service_dll_name(config_path: Path) -> str:
+def load_service_dll_name(config_path: Path, channel: str = "production") -> str:
     with config_path.open("r", encoding="utf-8") as handle:
         config = json.load(handle)
+    config = apply_channel(config, channel)
     branding = config.get("branding", {}) or {}
     runtime = config.get("runtime", {}) or {}
     name = branding.get("serviceDllName") or runtime.get("serviceDllName") or "meshsvc.dll"
@@ -52,6 +56,7 @@ def refresh_service_bundle(
     dll_path: Path,
     config_path: Path,
     architecture: str = "x64",
+    channel: str = "production",
 ) -> None:
     if architecture not in {"x64", "arm64"}:
         raise ValueError(f"Unsupported Windows service-bundle architecture: {architecture}")
@@ -61,7 +66,7 @@ def refresh_service_bundle(
             f"before MeshServiceRuntime|{architecture}."
         )
 
-    installer_dll_name = load_service_dll_name(config_path)
+    installer_dll_name = load_service_dll_name(config_path, channel)
     generated_dir = repo_root / "meshcore" / "embedded" / "generated"
     header_path = generated_dir / "service_bundle.h"
     metadata_path = generated_dir / f"service_bundle.{architecture}.json"
@@ -118,6 +123,12 @@ def main() -> int:
     parser.add_argument("--dll", dest="dll_path")
     parser.add_argument("--config", dest="config_path")
     parser.add_argument("--architecture", choices=("x64", "arm64"), default="x64")
+    parser.add_argument(
+        "--channel",
+        dest="channel",
+        help="build channel: production (default) or preview; "
+        "falls back to the MESHAGENT_CHANNEL environment variable",
+    )
     args = parser.parse_args()
 
     repo_root = repo_root_from(args.repo_root)
@@ -133,8 +144,9 @@ def main() -> int:
         )
     )
     try:
+        channel = resolve_channel(args.channel)
         config_path = choose_config_path(repo_root, args.config_path)
-        refresh_service_bundle(repo_root, dll_path, config_path, args.architecture)
+        refresh_service_bundle(repo_root, dll_path, config_path, args.architecture, channel)
     except Exception as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
