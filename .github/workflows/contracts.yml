@@ -38,9 +38,11 @@ env:
   MESHCENTRAL_UPSTREAM_TAGS: >-
     1.2.5=b09b1d60328de8e2d2f7387561ed51c64011c82a
     1.3.1=f436143527458d56da0336ea3047c006703fb4e4
-  # Node matches the duplicate server and production (SSOT D20). Python matches the
-  # release workflow.
-  NODE_VERSION: '20.20.2'
+  # Node 24 LTS, the version of upstream 1.3.1's node:24.22.1 image, which the fork adopts
+  # for its 1.3.1 base (the release image and duplicate layout B). Production keeps 1.2.5 on
+  # Node 20 until the cutover; nothing here runs that layout. Python matches the release
+  # workflow.
+  NODE_VERSION: '24.22.1'
   PYTHON_VERSION: '3.12'
   # Private repository whose releases hold the pinned Windows agent builds, one release per
   # pinned build (tools/deployment/agent_build_release.py names it from the pins).
