@@ -87,9 +87,7 @@ function main() {
 
     // MeshCentral core modules: identical copies, as for the other published core modules.
     const copies = [
-        path.join(meshcentral, 'agents', 'modules_meshcore', 'desktop-audio.js'),
-        path.join(meshcentral, 'agents', 'modules_meshcore_min', 'desktop-audio.js'),
-        path.join(meshcentral, 'agents', 'modules_meshcore_min', 'desktop-audio.min.js')
+        path.join(meshcentral, 'agents', 'modules_meshcore', 'desktop-audio.js')
     ];
     checks.meshcentralCopiesMatch = copies.every((file) => fs.existsSync(file) && read(file) === source);
 

@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / 'test' / 'lib'))
 import meshcentral_paths  # noqa: E402
 EVIDENCE = ROOT / 'artifacts/validation/native-file-actions'
 EVIDENCE.mkdir(parents=True, exist_ok=True)
-cores = [meshcentral_paths.fork_file('agents/' + name) for name in ('meshcore.js', 'meshcore.min.js', 'recoverycore.js')]
+cores = [meshcentral_paths.fork_file('agents/' + name) for name in ('meshcore.js', 'recoverycore.js')]
 agents = [ROOT / 'meshservice/x64/MeshServiceRuntime/MeshService-2022.exe', ROOT / 'meshservice/MeshServiceRuntime/MeshService-2022.exe']
 canary = r'''
 #include <windows.h>

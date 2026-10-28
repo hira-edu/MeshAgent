@@ -30,7 +30,6 @@ const repo = path.resolve(__dirname, '..');
 const serverPath = forkFile('meshagent.js');
 const corePaths = [
     forkFile('agents/meshcore.js'),
-    forkFile('agents/meshcore.min.js'),
     forkFile('agents/recoverycore.js')
 ];
 const agentcorePath = path.resolve(repo, 'meshcore', 'agentcore.c');

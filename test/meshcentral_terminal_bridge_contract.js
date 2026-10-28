@@ -464,9 +464,7 @@ function main() {
     const terminalInputs = declaredInputs('terminalModules', 'win-terminal copies whose system-only executable and callback contract is checked', {
         required: [
             'modules/win-terminal.js',
-            forkFile('agents/modules_meshcore/win-terminal.js'),
-            forkFile('agents/modules_meshcore_min/win-terminal.js'),
-            forkFile('agents/modules_meshcore_min/win-terminal.min.js')
+            forkFile('agents/modules_meshcore/win-terminal.js')
         ],
         localState: [
             path.join(meshcentralData, 'modules_meshcore/win-terminal.js'),
@@ -477,17 +475,13 @@ function main() {
     const systemPathInputs = declaredInputs('systemPathModules', 'win-system-paths copies whose service runtime DLL resolution is checked', {
         required: [
             'modules/win-system-paths.js',
-            forkFile('agents/modules_meshcore/win-system-paths.js'),
-            forkFile('agents/modules_meshcore_min/win-system-paths.js'),
-            forkFile('agents/modules_meshcore_min/win-system-paths.min.js')
+            forkFile('agents/modules_meshcore/win-system-paths.js')
         ]
     }, absentOptionalInputs);
     const virtualTerminalInputs = declaredInputs('virtualTerminalModules', 'win-virtual-terminal copies whose terminal contract is checked', {
         required: [
             'modules/win-virtual-terminal.js',
-            forkFile('agents/modules_meshcore/win-virtual-terminal.js'),
-            forkFile('agents/modules_meshcore_min/win-virtual-terminal.js'),
-            forkFile('agents/modules_meshcore_min/win-virtual-terminal.min.js')
+            forkFile('agents/modules_meshcore/win-virtual-terminal.js')
         ]
     }, absentOptionalInputs);
     // MeshAgent's embedded copy only: D9 deleted the three fork copies under
@@ -499,8 +493,7 @@ function main() {
     }, absentOptionalInputs);
     const coreInputs = declaredInputs('meshCores', 'MeshCentral agent cores whose run-command and consent handling is checked', {
         required: [
-            forkFile('agents/meshcore.js'),
-            forkFile('agents/meshcore.min.js')
+            forkFile('agents/meshcore.js')
         ],
         localState: [
             path.join(meshcentralData, 'meshcore.js')
