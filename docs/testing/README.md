@@ -194,9 +194,8 @@ minified MeshCentral file under `agents/` or `public/` (`*.min.js` and `*-min.js
 to be listed in `test/fixtures/meshcentral-fork-hunks/generated-assets.json`.
 Each listed file is in one of these sections or states:
 
-- `builders`: each reproducible builder in `deploy/scripts/`
-  (`build-viewer-min.js` and `build-desktop-audio-control.js`) runs with
-  `--check` and must report no drift.
+- `builders`: each `deploy/scripts/regenerate.js --check --only <group>` run
+  (`viewer`, and `translations,views`) must report no drift.
 - `built`: the file is produced entirely by one of those builders.
 - `no-builder-yet`: nothing regenerates the file. It is reported as `PENDING`
   with its size and line count next to its source and the `workPackage` that adds
@@ -205,8 +204,8 @@ Each listed file is in one of these sections or states:
   under `generated-assets/` and reported as `DRIFT`.
 - `vendored`: third-party build output with no source in the repository.
 - `upstreamPublished`: npm build output the fork ships unchanged (for example
-  `agents/meshcmd.min.js` and `agents/modules_meshcmd_min/*`). It must stay
-  byte-equal to the pinned upstream reference.
+  `public/scripts/amt-0.2.0-min.js`). It must stay byte-equal to the pinned
+  upstream reference.
 
 An unlisted generated file, a listed file that is not tracked, a file listed
 twice, or an unrecorded drift fails. When a known drift disappears, the contract
@@ -615,13 +614,16 @@ python test/deploy_meshctrl_runtime.py
 backup call signature in `deploy.py`. The contract also requires each
 MeshCentral publish refusal to come before any remote call.
 
-`python test/meshcentral_module_versions_runtime.py` asserts that `deploy.py`
-refuses the MeshCentral files and still publishes the agent binaries. It also runs
-the two loader patch helpers that `tools/prepare_release_image.py` and the
-duplicate server's layout A still use (module versions and proxy SNI) on the
-pinned upstream `meshcentral.js`. `python test/deploy_proxy_certificate_sni_runtime.py`
-checks that the fork's `meshcentral.js` already carries the SNI change, and the
-helper on upstream's.
+`python test/meshcentral_module_versions_runtime.py` runs the fork's own
+`obj.updateMeshCore` from `meshcentral.js` over a fake package tree: each module
+keeps its source text and its `agents/module-versions.json` date, and exactly one
+of a module's `.js`/`.min.js` pair is served in each minification mode. It also
+asserts that `deploy.py` refuses every MeshCentral publish role before any SSH and
+still publishes the agent binaries. `python test/deploy_proxy_certificate_sni_runtime.py`
+runs the fork's `obj.updateProxyCertificates` with a fake certificate loader and
+checks which hostname each certificate load uses. `python test/deploy_update_online_runtime.py`
+checks that `update-online` exits 1 and names the agents still pending, and that
+`--native-activate` is off unless requested.
 
 ### Duplicate MeshCentral server
 

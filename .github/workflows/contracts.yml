@@ -290,7 +290,8 @@ jobs:
             test/deploy_meshctrl_runtime.py \
             test/deploy_artifact_selection_runtime.py \
             test/deploy_transport_health_runtime.py \
-            test/deploy_proxy_certificate_sni_runtime.py
+            test/deploy_proxy_certificate_sni_runtime.py \
+            test/deploy_update_online_runtime.py
           do
             test -f "$t" || { echo "::error::Deploy suite $t is missing"; FAILED=$((FAILED + 1)); continue; }
             run_test deploy "$t" . python "$t"
