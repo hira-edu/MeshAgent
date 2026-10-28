@@ -9,7 +9,11 @@
 //                   adds a builder. A copy-of-source file must still equal its source,
 //                   except for a recorded known drift, which is reported as DRIFT.
 //   vendored        third-party build output with no source here.
-// An unlisted generated file, or a listed file that is not tracked, fails.
+//   upstreamPublished  npm build output the fork ships unchanged; it must stay byte-equal to the
+//                   pinned upstream package (test/lib/meshcentral_upstream_reference.json), so a
+//                   later edit cannot slip through.
+// An unlisted generated file, a listed file that is not tracked, or a file listed twice fails.
+// Builder scripts live in the deployment wrapper (deploy/scripts) since Stage 1.
 //
 // MeshCentral is located by test/lib/meshcentral_paths.js (MESHCENTRAL_ROOT, or the sibling
 // ../MeshCentral checkout).
@@ -22,16 +26,17 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { meshcentralRoot, readWorkingFile, normalisedDiff, parseDiff, git } = require('./meshcentral_upstream_base_contract');
+const meshcentralPaths = require('./lib/meshcentral_paths');
 
 const fixtureDir = path.join(__dirname, 'fixtures', 'meshcentral-fork-hunks');
 const manifestPath = path.join(fixtureDir, 'generated-assets.json');
-// Served trees only: scripts/ holds the builders themselves (build-viewer-min.js).
+// Served trees only: deploy/scripts holds the builders themselves (build-viewer-min.js).
 const GENERATED = /^(agents|public)\/(.+\/)?[^/]+[.-]min\.js$/;
 const MODULES_MIN = 'agents/modules_meshcore_min/';
 
 function loadManifest() {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    for (const key of ['builders', 'pending', 'files', 'vendored']) {
+    for (const key of ['builders', 'pending', 'files', 'vendored', 'upstreamPublished']) {
         assert(manifest[key] && typeof manifest[key] === 'object', 'generated-assets.json needs ' + key);
     }
     for (const [id, builder] of Object.entries(manifest.builders)) {
@@ -54,6 +59,10 @@ function loadManifest() {
     for (const [file, reason] of Object.entries(manifest.vendored)) {
         assert(typeof reason === 'string' && reason, file + ': vendored needs a reason');
         assert(!manifest.files[file], file + ' is both generated and vendored');
+    }
+    for (const [file, producedBy] of Object.entries(manifest.upstreamPublished)) {
+        assert(typeof producedBy === 'string' && producedBy, file + ': upstreamPublished needs how upstream produced it');
+        assert(!manifest.files[file] && !manifest.vendored[file], file + ' is listed as upstreamPublished and in another section');
     }
     return manifest;
 }
@@ -93,10 +102,10 @@ function main() {
     const generated = tracked.filter((file) => GENERATED.test(file) || file.startsWith(MODULES_MIN)).sort();
     assert(generated.length > 0, 'No generated file is tracked in ' + root + '; the checkout layout changed');
     for (const file of generated) {
-        if (!manifest.files[file] && !manifest.vendored[file]) { failures.push('unlisted ' + file + ': generated file with no generated-assets.json entry'); }
+        if (!manifest.files[file] && !manifest.vendored[file] && !manifest.upstreamPublished[file]) { failures.push('unlisted ' + file + ': generated file with no generated-assets.json entry'); }
     }
     const trackedSet = new Set(tracked);
-    for (const file of Object.keys(manifest.files).concat(Object.keys(manifest.vendored))) {
+    for (const file of Object.keys(manifest.files).concat(Object.keys(manifest.vendored), Object.keys(manifest.upstreamPublished))) {
         if (!trackedSet.has(file)) { failures.push('stale ' + file + ': listed in generated-assets.json but not tracked in MeshCentral'); }
     }
 
@@ -155,6 +164,23 @@ function main() {
     for (const file of Object.keys(manifest.vendored).sort()) {
         console.log('VENDORED ' + file + ': ' + manifest.vendored[file]);
     }
+    const upstreamFiles = Object.keys(manifest.upstreamPublished).filter((file) => trackedSet.has(file)).sort();
+    if (upstreamFiles.length) {
+        const reference = meshcentralPaths.upstreamPackageDir();
+        const pin = meshcentralPaths.loadReferencePin();
+        let equalCount = 0;
+        for (const file of upstreamFiles) {
+            const upstreamPath = path.join(reference, file);
+            if (!fs.existsSync(upstreamPath)) { failures.push(file + ': upstream-published but not in the ' + pin.name + '@' + pin.version + ' package'); continue; }
+            if (!fs.readFileSync(path.join(root, file)).equals(fs.readFileSync(upstreamPath))) {
+                failures.push(file + ': upstream-published but not byte-equal to ' + pin.name + '@' + pin.version + '; review the change and list it under files');
+                continue;
+            }
+            equalCount++;
+        }
+        report.upstreamPublished = { reference: pin.name + '@' + pin.version, files: upstreamFiles.length, byteEqual: equalCount };
+        console.log('UPSTREAM ' + equalCount + ' of ' + upstreamFiles.length + ' npm-published generated files byte-equal to ' + pin.name + '@' + pin.version);
+    }
     for (const [id, pending] of Object.entries(manifest.pending)) {
         console.log('PENDING [' + id + '] flips at ' + pending.workPackage + ': ' + pending.reason);
     }
@@ -168,7 +194,8 @@ function main() {
     }
     const states = Object.values(report.files);
     const summary = Object.keys(report.builders).length + ' builders, ' + states.filter((entry) => entry.state === 'built').length + ' built, ' +
-        states.filter((entry) => entry.state === 'no-builder-yet').length + ' no-builder-yet, ' + knownDrifts + ' known drift, ' + Object.keys(manifest.vendored).length + ' vendored';
+        states.filter((entry) => entry.state === 'no-builder-yet').length + ' no-builder-yet, ' + knownDrifts + ' known drift, ' + Object.keys(manifest.vendored).length + ' vendored, ' +
+        Object.keys(manifest.upstreamPublished).length + ' upstream-published';
     for (const failure of failures) { console.log('FAIL ' + failure); }
     console.log((failures.length ? 'FAIL' : 'PASS') + ' MeshCentral generated assets (' + summary + ')');
     if (failures.length) { process.exitCode = 1; }

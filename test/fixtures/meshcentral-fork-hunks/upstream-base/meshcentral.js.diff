@@ -1,0 +1,24 @@
+--- a/meshcentral.js
++++ b/meshcentral.js
+@@ -2301,7 +2301,7 @@
+                 obj.pendingProxyCertificatesRequests++;
+                 var dnsname = obj.config.domains[i].dns;
+                 if ((dnsname == null) && (obj.config.settings.cert != null)) { dnsname = obj.config.settings.cert; }
+-                obj.certificateOperations.loadCertificate(obj.config.domains[i].certurl, dnsname, obj.config.domains[i], function (url, cert, xhostname, xdomain) {
++                obj.certificateOperations.loadCertificate(obj.config.domains[i].certurl, (obj.config.domains[i].certurl.startsWith('https:') ? new URL(obj.config.domains[i].certurl).hostname : dnsname), obj.config.domains[i], function (url, cert, xhostname, xdomain) {
+                     obj.pendingProxyCertificatesRequests--;
+                     if (cert != null) {
+                         // Hash the entire cert
+@@ -2999,7 +2999,11 @@
+                         // We are adding a JS file to the meshcores
+                         var moduleName = modulesDir[i].substring(0, modulesDir[i].length - 3);
+                         if (moduleName.endsWith('.min')) { moduleName = moduleName.substring(0, moduleName.length - 4); } // Remove the ".min" for ".min.js" files.
+-                        const moduleData = ['try { addModule("', moduleName, '", "', obj.escapeCodeString(obj.fs.readFileSync(obj.path.join(moduleDirPath, modulesDir[i])).toString('binary')), '"); addedModules.push("', moduleName, '"); } catch (ex) { }\r\n'];
++                        const preferredModule = moduleName + (obj.args.minifycore === false ? '.js' : '.min.js');
++                        if (modulesDir[i] !== preferredModule && modulesDir.indexOf(preferredModule) >= 0) { continue; }
++                        const modulePath = obj.path.join(moduleDirPath, modulesDir[i]);
++                        const moduleVersion = obj.fs.statSync(modulePath).mtime.toISOString();
++                        const moduleData = ['try { addModule("', moduleName, '", "', obj.escapeCodeString(obj.fs.readFileSync(modulePath).toString('binary')), '", "', moduleVersion, '"); addedModules.push("', moduleName, '"); } catch (ex) { }\r\n'];
+ 
+                         // Merge this module
+                         // NOTE: "smbios" module makes some non-AI Linux segfault, only include for IA platforms.
