@@ -61,8 +61,8 @@ function main() {
     // Tracked sources only, so this contract passes on a clean clone. The checks on the lab's
     // branding_config.local.json and generated meshagent_branding.h are in power_action_policy_lab_runtime.js.
     const meshCentralRoot = meshcentralPaths.meshcentralRoot();
-    // Stage 3 of the MeshCentral fork drops the meshctrl.js override for upstream's file (plan S5, G6);
-    // retarget this read to the package's meshctrl.js then.
+    // The fork's meshctrl.js is meshcentral@1.2.5's file byte for byte since Stage 3 (plan S5, G6), so this
+    // reads the package's own device power mapping; meshcentral_upstream_base_contract keeps it unmodified.
     const meshCtrl = readRepoFile(meshCentralRoot, 'meshctrl.js', 'MeshCentral meshctrl device power mapping');
     // Tracked MeshCentral agent core. The untracked meshcentral-data/meshcore.js copy is no longer read:
     // it is local deploy state that Stage 1 removes (SSOT D16, D18; plan G6).
