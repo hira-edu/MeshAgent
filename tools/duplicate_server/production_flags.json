@@ -11,7 +11,7 @@
     "agentSignLock": {"value": true},
     "agentUpdateSystem": {"value": 1},
     "aliasPort": {"dup": "port", "production": 443, "reason": "production answers through Caddy on 443; the duplicate is reached directly on its own port"},
-    "autobackup": {"dup": "autobackup", "known": {"intervalhours": 24, "keeplastdaysbackup": 14}, "evidence_keys": ["backupskipfoldersglob"], "reason": "backuppath points into the layout"},
+    "autobackup": {"dup": "autobackup", "known": {"intervalhours": 24, "keeplastdaysbackup": 14}, "evidence_keys": ["backupskipfoldersglob"], "reason": "backuppath points into the layout; mongodumppath names the pinned mongodump (production finds it on PATH)"},
     "cert": {"dup": "cert", "reason": "production hostname"},
     "ciphers": {"evidence": "ciphers"},
     "dataPath": {"dup": "datapath", "reason": "production absolute path"},
@@ -56,6 +56,12 @@
     "url": {"omit": "production identifier; MeshCentral derives the local url"},
     "agentwebcerthashes": {"omit": "production certificate hashes"},
     "agentwebcerturls": {"omit": "production URLs"}
+  },
+  "after_inventory": {
+    "domain": {
+      "myServer": {"value": {"backup": true, "restore": true, "upgrade": false, "errorlog": true, "console": true, "trace": true, "config": true},
+                   "source": "D6 safeguard I2 applied 2026-10-28 after the inventory (SSOT status log): domains[''].myServer with upgrade false and every other feature true"}
+    }
   },
   "duplicate_only_settings": {
     "mongoDbName": "separate databases meshcentral_dupA and meshcentral_dupB on one mongod",

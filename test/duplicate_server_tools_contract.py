@@ -2,8 +2,8 @@
 
 Runs without the duplicate running and without network. It uses a temporary MC_DUP_ROOT, synthetic
 denylists and fixtures, and these read-only inputs, which must exist (missing ones fail loudly):
-  - the MeshCentral checkout with the Stage 1 layout (MESHCENTRAL_ROOT or the sibling): the
-    deploy/ wrapper's config template,
+  - the MeshCentral checkout (MESHCENTRAL_ROOT or the sibling): the deploy/ wrapper's config template
+    and lockfile, and its git history, which holds production's MeshCentral files (layout A),
   - the production meshcentral 1.2.5 reference (python test/lib/fetch_upstream_reference.py --pin
     test/lib/meshcentral_production_reference.json),
   - the SSOT evidence folder (summary.txt for the production key set).
@@ -29,6 +29,7 @@ import meshcentral_paths  # noqa: E402
 import dup_common  # noqa: E402
 import dup_config  # noqa: E402
 import dup_checklist  # noqa: E402
+import dup_install  # noqa: E402
 import dup_layout  # noqa: E402
 import preflight_agent  # noqa: E402
 
@@ -153,41 +154,208 @@ def test_shadow_cores_and_release_versions():
     assert dup_checklist.compare_versions_to_release_manifest(probe, manifest)[0] == "FAIL"
 
 
-def test_stage1_sources_and_package_roles(deploy):
-    repo = TEMP_ROOT / "resolve-repo"
-    root = dup_layout.meshcentral_repo()
-    assert root == meshcentral_paths.meshcentral_root()
-    assert dup_layout.resolve_source(repo, "../MeshCentral/deploy/meshcentral-web/public/scripts/custom.js") == \
-        root / "deploy" / "meshcentral-web" / "public" / "scripts" / "custom.js"
-    assert dup_layout.resolve_source(repo, "meshservice/x.exe") == (repo / "meshservice" / "x.exe").resolve()
-    assert dup_layout.wrapper_dir() == meshcentral_paths.wrapper_dir()
-    assert dup_layout.wrapper_tarball_spec(dup_layout.wrapper_dir()) is not None, "Stage 1 installs the fork from a packed tarball"
-    package_root = deploy.CORE_PUBLISH_ROLE_DIRS["module-root"]
-    assert dup_layout.is_package_path(deploy, package_root + "/meshcentral.js")
-    assert dup_layout.is_package_path(deploy, deploy.get_publish_path("module", "MeshService64.exe"))
-    for role in ("data-core", "data-plugin", "web-public"):
-        assert not dup_layout.is_package_path(deploy, deploy.CORE_PUBLISH_ROLE_DIRS[role] + "/x.js"), role
-    assert not dup_layout.is_package_path(deploy, deploy.get_publish_path("data", "MeshService64.exe"))
-    wrapper = TEMP_ROOT / "spec-wrapper"
-    wrapper.mkdir()
-    for spec, expected in (("file:dist/m.tgz", "dist/m.tgz"), ("1.2.5", None)):
-        (wrapper / "package.json").write_text(json.dumps({"dependencies": {"meshcentral": spec}}), encoding="utf-8")
-        found = dup_layout.wrapper_tarball_spec(wrapper)
-        assert (found.as_posix() if found else None) == expected, spec
-    (wrapper / "package.json").write_text(json.dumps({"dependencies": {"meshcentral": "file:../x.tgz"}}), encoding="utf-8")
-    expect_error(lambda: dup_layout.wrapper_tarball_spec(wrapper), "inside the wrapper")
-    expect_error(lambda: dup_layout.build_layout_b(), "exactly one")
-    expect_error(lambda: dup_layout.build_layout_b(TEMP_ROOT / "x.tgz", stage1=True), "exactly one")
-    expect_error(lambda: dup_layout.build_layout_b(TEMP_ROOT / "x.tgz", retire_overrides=True), "B-stage1 only")
-    # B-stage2 (D16 web cutover): exactly the 62 default3 overrides and the 2 r0 canary scripts retire.
+def test_layout_runtimes():
+    # Layout A models production until the cutover (Node 20.20.2); layout B is the 1.3.1 fork on Node 24.22.1.
+    assert dup_common.LAYOUTS["A"]["node"] == "20.20.2" and dup_common.LAYOUTS["B"]["node"] == "24.22.1"
+    assert dup_common.NODE_RUNTIMES == {
+        "20.20.2": "dc3700fdd57a63eedb8fd7e3c7baaa32e6a740a1b904167ff4204bc68ed8bf77",
+        "24.22.1": "d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5"}
+    b = dup_common.layout_node("B")
+    assert b.url == "https://nodejs.org/dist/v24.22.1/node-v24.22.1-win-x64.zip"
+    assert b.shasums_url == "https://nodejs.org/dist/v24.22.1/SHASUMS256.txt"
+    assert b.exe == dup_common.TOOLS / "node-v24.22.1-win-x64" / "node.exe"
+    assert b.npm_cli == b.home / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    assert dup_common.layout_node("A").exe == dup_common.TOOLS / "node-v20.20.2-win-x64" / "node.exe"
+    assert [r.version for r in dup_common.node_runtimes()] == ["20.20.2", "24.22.1"]
+    expect_error(lambda: dup_common.NodeRuntime("22.0.0"), "not a pinned runtime")
+    expect_error(lambda: dup_common.layout_node("C"), "Unknown layout")
+    env = dup_common.node_env(b, {"NODE_OPTIONS": "--require x"})
+    assert env["PATH"].startswith(str(b.home)) and env["NODE_OPTIONS"] == "--require x"
+    assert "NODE_OPTIONS" not in dup_common.node_env(b), "a layout gets a preload only when it asks for one"
+    # The zip must be listed in that release's SHASUMS256.txt and match the pin.
+    shasums = ("aaaa  node-v24.22.1-win-x86.zip\n" + b.zip_sha256 + "  node-v24.22.1-win-x64.zip\n")
+    assert dup_install.published_node_sha256(b, shasums) == b.zip_sha256
+    expect_error(lambda: dup_install.published_node_sha256(dup_common.layout_node("A"), shasums), "not listed")
+    zip_path = TEMP_ROOT / "node.zip"
+    zip_path.write_bytes(b"not node")
+    expect_error(lambda: dup_install.verify(zip_path, b.zip_sha256, b.zip_sha256), "Checksum mismatch")
+    expect_error(lambda: dup_install.verify(zip_path, "0" * 64, b.zip_sha256), "differs from the pin")
+
+
+def test_mongo_tools_feed():
+    entry = {"name": "windows", "arch": "x86_64", "archive": {"url": dup_common.MONGO_TOOLS_URL, "sha256": dup_common.MONGO_TOOLS_ZIP_SHA256.upper()}}
+    feed = {"versions": [{"version": dup_common.MONGO_TOOLS_VERSION, "downloads": [entry]}]}
+    assert dup_install.published_mongo_tools_sha256(json.dumps(feed)) == dup_common.MONGO_TOOLS_ZIP_SHA256
+    feed["versions"][0]["version"] = "1.0.0"
+    expect_error(lambda: dup_install.published_mongo_tools_sha256(json.dumps(feed)), "without a sha256")
+    expect_error(lambda: dup_install.published_mongo_tools_sha256(json.dumps({"versions": []})), "not listed")
+    assert dup_common.MONGODUMP_EXE.name == "mongodump.exe" and dup_common.MONGODUMP_EXE.is_relative_to(dup_common.TOOLS)
+
+
+def test_layout_a_sources_are_production_bytes(deploy):
+    # Since Stage 6 the MeshCentral checkout is the 1.3.1 fork, so layout A must not read its files: every
+    # MeshCentral file deploy.py publishes is taken from the checkout's history at production's sha256.
+    production = dup_layout.load_production_hashes()
+    blobs = dup_layout.ProductionBlobs(dup_layout.meshcentral_repo())
+    data, blob = blobs.find("meshagent.js", production["node_modules/meshcentral/meshagent.js"]["sha256"])
+    assert hashlib.sha256(data).hexdigest() == production["node_modules/meshcentral/meshagent.js"]["sha256"] and len(blob) == 40
+    current = meshcentral_paths.fork_file("meshagent.js").read_bytes()
+    assert hashlib.sha256(current).hexdigest() != production["node_modules/meshcentral/meshagent.js"]["sha256"], \
+        "the 1.3.1 checkout's meshagent.js is not production's; layout A must not use it"
+    expect_error(lambda: blobs.find("meshagent.js", "0" * 64), "No version of meshagent.js")
+    root = TEMP_ROOT / "layout-a-sources"
+    loader = meshcentral_paths.upstream_package_dir(pin_path=meshcentral_paths.PRODUCTION_REFERENCE_PIN_PATH) / "meshcentral.js"
+    (root / "node_modules" / "meshcentral").mkdir(parents=True)
+    (root / "node_modules" / "meshcentral" / "meshcentral.js").write_bytes(loader.read_bytes())
+    entries, absent = dup_layout.collect_core_artifacts(deploy, root)
+    for entry in entries:
+        assert hashlib.sha256(entry["bytes"]).hexdigest() == production[entry["target"]]["sha256"], entry["target"]
+    assert {e["target"] for e in entries} | {a["target"] for a in absent} == {
+        dup_layout.remote_to_local(deploy, deploy.get_core_publish_path(role, config["remote_relative_path"]), root).relative_to(root).as_posix()
+        for config in deploy.CORE_ARTIFACTS.values() for role in deploy.get_artifact_publish_targets(config)}
+    assert all(a["target"] not in production for a in absent)
+    assert dup_layout.meshcentral_repo_path("../MeshCentral/deploy/meshcentral-web/public/scripts/custom.js") == \
+        "deploy/meshcentral-web/public/scripts/custom.js"
+    assert dup_layout.meshcentral_repo_path("meshservice/x.exe") is None
+
+
+def test_image_size_preload_per_layout():
+    # DEP-39: layout A runs production's preload, the path-portable copy the release tooling tracked until it
+    # retired it (d28ab4a4); it now comes from MeshAgent history, pinned by commit and sha256 (no expected-FAIL).
+    # DEP-35: refresh-signed-hashagents.py (retired by D16) is not reproduced. Layout B has no preload.
+    assert not (ROOT / dup_layout.HARDEN_IMAGE_SIZE).exists(), "the release tooling retired the preload"
+    assert hashlib.sha256(dup_layout.harden_image_size_bytes()).hexdigest() == dup_layout.HARDEN_IMAGE_SIZE_SHA256
+    real_sha = dup_layout.HARDEN_IMAGE_SIZE_SHA256
+    try:
+        dup_layout.HARDEN_IMAGE_SIZE_SHA256 = "0" * 64
+        expect_error(lambda: dup_layout.harden_image_size_bytes(), "pinned " + "0" * 64)
+    finally:
+        dup_layout.HARDEN_IMAGE_SIZE_SHA256 = real_sha
+    assert "HARDEN_PENDING" not in dup_checklist.__dict__
+    expect_error(lambda: dup_layout.preload_path("A"), "no image-size preload")
+    record = dup_layout.install_bin("A")
+    assert list(record) == ["harden-image-size.js"]
+    assert sorted(p.name for p in (dup_common.layout_root("A") / "bin").iterdir()) == ["harden-image-size.js"]
+    assert dup_layout.preload_path("A") == dup_common.layout_root("A") / "bin" / "harden-image-size.js"
+    assert dup_layout.preload_path("B") is None
+    good = "harden-image-size: disabled unpatched parsers: icns, jxl, jxl-stream, heif\nMeshCentral v1.2.5\n"
+    assert dup_checklist.check_image_size_preload("A", {"preload": "x"}, good)[1] == "PASS"
+    old_copy = "harden-image-size: WARNING - could not harden image-size: Cannot find module '/opt/meshcentral/node_modules/image-size'\n"
+    assert dup_checklist.check_image_size_preload("A", {"preload": "x"}, old_copy)[1] == "FAIL"
+    assert dup_checklist.check_image_size_preload("A", {"preload": None}, good)[1] == "FAIL"
+    assert dup_checklist.check_image_size_preload("B", {"preload": None}, "MeshCentral v1.3.1\n")[1] == "PASS"
+    assert dup_checklist.check_image_size_preload("B", {"preload": None}, good)[1] == "FAIL"
+    assert dup_checklist.check_image_size_preload("B", {"preload": "x"}, "")[1] == "FAIL"
+
+
+def test_self_update_check():
+    # TST-31: all three D6 settings, including the daemon marker that a fresh tarball install drops.
+    on = {"backup": True, "restore": True, "upgrade": False, "errorlog": True, "console": True, "trace": True, "config": True}
+    probe = {"args": {"selfupdate": False}, "selfUpdate": {"daemonMarker": True, "myserver": on}}
+    assert dup_checklist.check_self_update(probe, "")[0] == "PASS"
+    assert dup_checklist.check_self_update(probe, "Checking for update...")[0] == "FAIL"
+    for broken in ({"daemonMarker": False, "myserver": on}, {"daemonMarker": True, "myserver": None},
+                   {"daemonMarker": True, "myserver": dict(on, upgrade=True)}):
+        assert dup_checklist.check_self_update(dict(probe, selfUpdate=broken), "")[0] == "FAIL", broken
+    assert dup_checklist.check_self_update(dict(probe, args={"selfupdate": True}), "")[0] == "FAIL"
+    root = dup_common.layout_root("B")
+    (root / "node_modules" / "meshcentral").mkdir(parents=True, exist_ok=True)
+    marker = dup_layout.write_daemon_marker("B")
+    assert marker["path"] == "node_modules/meshcentral/daemon" and (root / marker["path"]).is_file()
+
+
+def write_pins(agents, files):
+    agents.mkdir(parents=True, exist_ok=True)
+    pins = []
+    for name, data in files.items():
+        (agents / name).write_bytes(data)
+        pins.append({"filename": name, "size": len(data), "sha384": hashlib.sha384(data).hexdigest()})
+    manifest = {"schema": "meshcentral-fork-agents/1", "build": {"repository": "o/r", "commit": "a" * 40}, "files": pins}
+    (agents / "agent-defaults.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest
+
+
+def test_fork_layout_agents():
+    root = TEMP_ROOT / "fork-agents"
+    agents = root / "node_modules" / "meshcentral" / "agents"
+    files = {"MeshService.exe": b"x86", "MeshService64.exe": b"x64 build", "MeshServiceARM64.exe": b"arm64 build"}
+    manifest = write_pins(agents, files)
+    assert [f["filename"] for f in dup_layout.verify_agent_pins(root)["files"]] == sorted(files)
+    (agents / "MeshService64.exe").write_bytes(b"x64 bUild")
+    expect_error(lambda: dup_layout.verify_agent_pins(root), "MeshService64.exe: 9 bytes SHA384")
+    (agents / "MeshService64.exe").unlink()
+    expect_error(lambda: dup_layout.verify_agent_pins(root), "MeshService64.exe: missing")
+    expect_error(lambda: dup_layout.parse_agent_pins(dict(manifest, files=[])), "pins no agent binary")
+    expect_error(lambda: dup_layout.parse_agent_pins(dict(manifest, schema="x")), "not a fork agent manifest")
+    (agents / "MeshService64.exe").write_bytes(files["MeshService64.exe"])
+    probe = {"agentDefaults": {"errors": [], "build": manifest["build"]}, "agentBinaries": {}}
+    for archid, name in (("3", "MeshService.exe"), ("4", "MeshService64.exe"), ("43", "MeshServiceARM64.exe")):
+        probe["agentBinaries"][archid] = {"localname": name, "relativePath": f"node_modules/meshcentral/agents/{name}",
+                                          "size": len(files[name]), "sha384": hashlib.sha384(files[name]).hexdigest(), "unsigned": True}
+    assert dup_checklist.check_fork_agents(root, probe)[0] == "PASS"
+    probe["agentBinaries"]["4"] = dict(probe["agentBinaries"]["4"], relativePath="meshcentral-data/agents/MeshService64.exe")
+    assert dup_checklist.check_fork_agents(root, probe)[0] == "FAIL"
+    probe["agentBinaries"]["4"] = dict(probe["agentBinaries"]["4"], relativePath="node_modules/meshcentral/agents/MeshService64.exe", unsigned=False)
+    assert dup_checklist.check_fork_agents(root, probe)[0] == "FAIL"
+    probe["agentBinaries"]["4"]["unsigned"] = True
+    probe["agentDefaults"]["errors"] = ["MeshService.exe: does not match its pin"]
+    assert dup_checklist.check_fork_agents(root, probe)[0] == "FAIL"
+    assert dup_checklist.check_fork_agents(root, dict(probe, agentDefaults=None))[0] == "FAIL"
+
+
+def test_fork_layout_rules(deploy):
+    # Layout B is the fork as Stage 6 landed it: npm ci against the lock, nothing of production's data or web
+    # folders but the fork release's own files, and none of the folders the fork serves from the package.
+    for relative in ("meshcentral-data/agentbuilds", "meshcentral-data/agents", "meshcentral-data/signedagents",
+                     "meshcentral-data/meshcore.js", "meshcentral-data/modules_meshcore", "meshcentral-web/views", "bin"):
+        assert relative in dup_layout.FORK_ABSENT, relative
+    assert dup_layout.FORK_RELEASE_FILES == (("deploy/meshcentral-web/", "meshcentral-web/"),
+                                             ("plugins/nativeruntime/", "meshcentral-data/plugins/nativeruntime/"))
+    expect_error(lambda: dup_layout.build_layout_b(tarball=TEMP_ROOT / "x.tgz", agents_dir=TEMP_ROOT), "not both")
+    for retired in ("standin", "stage1", "retire_overrides"):
+        assert retired not in dup_layout.build_layout_b.__code__.co_varnames, retired
+    import contextlib
+    import dupserver
+    for option in ("--standin", "--stage1", "--retire-overrides"):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                dupserver.main(["layout-b", option])
+        except SystemExit as error:
+            assert error.code == 2, option
+        else:
+            raise AssertionError(f"layout-b {option} must be refused")
+    wrapper = dup_layout.wrapper_dir()
+    locked = dup_layout.locked_meshcentral(wrapper)
+    assert locked["integrity"].startswith("sha512-") and dup_layout.wrapper_tarball_spec(wrapper) is not None
+    bogus = TEMP_ROOT / "bogus.tgz"
+    bogus.write_bytes(b"not the locked fork tarball")
+    expect_error(lambda: dup_layout.install_wrapper("B", tarball=bogus), "but the wrapper lock pins")
+    # The D16 helpers stay for layout B's check: 62 default3 overrides and 2 canary scripts in the capture.
     with tarfile.open(dup_layout.LAYOUT_A_TAR) as archive:
         web = [m.name for m in archive.getmembers() if m.isfile() and m.name.startswith("meshcentral-web/")]
-    retired = [name for name in web if dup_layout.is_d16_retired(name)]
-    assert len(retired) == dup_layout.D16_RETIRED_WEB_COUNT == 64, len(retired)
-    assert sum(1 for n in retired if "/views/" in n) == 62 and sum(1 for n in retired if "r0-umair-reconnect-canary" in n) == 2
-    for kept in ("meshcentral-web/public/scripts/custom.js", "meshcentral-web/views/default.handlebars",
-                 "meshcentral-web/views/translations/default_de.handlebars", "meshcentral-web/public/scripts/r0-other.js"):
+    assert sum(1 for name in web if dup_layout.is_d16_retired(name)) == 64
+    for kept in ("meshcentral-web/public/scripts/custom.js", "meshcentral-web/views/default.handlebars"):
         assert not dup_layout.is_d16_retired(kept), kept
+    package_root = deploy.CORE_PUBLISH_ROLE_DIRS["module-root"]
+    assert dup_layout.is_package_path(deploy, package_root + "/meshcentral.js")
+    assert not dup_layout.is_package_path(deploy, deploy.get_publish_path("data", "MeshService64.exe"))
+
+
+def test_dbcompat_expectations():
+    import dup_dbcompat
+    full = dup_dbcompat.expected_set(True)
+    assert full["meshcentral"] == sorted(dup_dbcompat.SET_125["meshcentral"] + dup_dbcompat.ADDED_131["meshcentral"])
+    assert full["plugins"] == ["TypeAndName1", "_id_"]
+    assert "plugins" not in dup_dbcompat.expected_set(False)
+    assert dup_dbcompat.expected_set(False, ["_id_"])["plugins"] == ["_id_"]
+    # The drop list in dbcompat.js must be exactly what 1.3.1 adds (docs/DEPLOYMENT.md, s6-c review).
+    text = (ROOT / "tools" / "duplicate_server" / "dbcompat.js").read_text(encoding="utf-8")
+    for col, names in dup_dbcompat.ADDED_131.items():
+        for name in names:
+            if name != "_id_":
+                assert f"'{name.split('(')[0]}'" in text, name
+    assert dup_dbcompat.problems_in(["ERR (node:1) [MONGODB DRIVER] Warning: cursor.count is deprecated", "Resetting main indexes..."]) == []
+    assert dup_dbcompat.problems_in(["UNHANDLED REJECTION x", "ERR boom"]) == ["UNHANDLED REJECTION x", "ERR boom"]
 
 
 def test_tarball_manifest_applies_only_npm_bin_rewrite():
@@ -244,19 +412,15 @@ def test_generated_config(denylist_path):
         assert settings["autobackup"]["backuppath"].startswith(str(dup_common.layout_root(layout)))
     assert configs["A"]["domains"][""]["customFiles"] == extra["customFiles"]
     assert "customFiles" not in configs["B"]["domains"][""], "layout B drops the canary entry (D16)"
-    # B-stage1 runs production's config (profile A), including customFiles, on layout B's own ports and DB.
-    stage1, stage1_record = dup_config.generate("B", "mongodb://x", profile="A")
-    assert stage1["domains"][""]["customFiles"] == extra["customFiles"] and stage1_record["profile"] == "A"
-    assert stage1["settings"]["port"] == dup_common.LAYOUTS["B"]["port"]
-    assert stage1["settings"]["mongoDbName"] == dup_common.LAYOUTS["B"]["db"]
-    expect_error(lambda: dup_config.generate("B", "mongodb://x", profile="C"), "profile")
-    # B-stage2 is B-stage1's config minus the keys the D16 cutover retires (only customFiles).
-    stage2, stage2_record = dup_config.generate("B", "mongodb://x", profile="A", retire_d16=True)
-    assert "customFiles" not in stage2["domains"][""] and stage2_record["retire_d16"] is True
-    assert {"key": "domains[''].customFiles", "reason": dup_config.D16_RETIRED_KEYS[("domain", "customFiles")]} in stage2_record["omitted"]
-    without = {k: v for k, v in stage1["domains"][""].items() if k != "customFiles"}
-    assert {k: v for k, v in stage2["domains"][""].items()}.keys() == without.keys()
-    assert stage2["settings"].keys() == stage1["settings"].keys()
+    # D6 safeguard I2 (after the inventory): both layouts carry production's myServer with upgrade off (TST-31).
+    for layout, config in configs.items():
+        assert config["domains"][""]["myServer"]["upgrade"] is False, layout
+        assert all(value is True for key, value in config["domains"][""]["myServer"].items() if key != "upgrade"), layout
+        # Autobackup runs the pinned mongodump (production finds mongodump on PATH; the duplicate changes no PATH).
+        assert config["settings"]["autobackup"]["mongodumppath"] == str(dup_common.MONGODUMP_EXE)
+    _, record = dup_config.generate("B", "mongodb://x")
+    assert any(entry["key"] == "domains[''].myServer" for entry in record["after_inventory"])
+    assert any(entry["key"] == "domains[''].customFiles" for entry in record["omitted"])
     assert "mpsPort" not in configs["A"]["settings"] and configs["B"]["settings"]["mpsPort"] == 4434
     assert configs["A"]["settings"]["mpsPortBind"] == "127.0.0.1", "loopback is the default bind"
     hostonly, _ = dup_config.generate("A", "mongodb://x", bind="192.168.56.1")
@@ -405,7 +569,14 @@ def main():
     test_reset_selects_only_its_own_reports()
     test_production_loader_rebuild(deploy)
     test_shadow_cores_and_release_versions()
-    test_stage1_sources_and_package_roles(deploy)
+    test_layout_runtimes()
+    test_mongo_tools_feed()
+    test_layout_a_sources_are_production_bytes(deploy)
+    test_image_size_preload_per_layout()
+    test_self_update_check()
+    test_fork_layout_agents()
+    test_fork_layout_rules(deploy)
+    test_dbcompat_expectations()
     test_tarball_manifest_applies_only_npm_bin_rewrite()
     test_summary_key_parsing_and_flag_coverage()
     production_server_id = secrets.token_hex(48)

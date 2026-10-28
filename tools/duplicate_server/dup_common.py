@@ -37,15 +37,32 @@ def layout_reports(layout):
     return sorted(path for path in REPORTS.glob("*.json") if pattern.search(path.name))
 DENYLIST_PATH = DUP_ROOT / "denylist.json"
 
-# Pinned runtimes (production 2026-10-27: Node 20.20.2, MongoDB 7.0.31).
-NODE_VERSION = "20.20.2"
-NODE_ZIP = f"node-v{NODE_VERSION}-win-x64.zip"
-NODE_URL = f"https://nodejs.org/dist/v{NODE_VERSION}/{NODE_ZIP}"
-NODE_SHASUMS_URL = f"https://nodejs.org/dist/v{NODE_VERSION}/SHASUMS256.txt"
-NODE_ZIP_SHA256 = "dc3700fdd57a63eedb8fd7e3c7baaa32e6a740a1b904167ff4204bc68ed8bf77"
-NODE_HOME = TOOLS / f"node-v{NODE_VERSION}-win-x64"
-NODE_EXE = NODE_HOME / "node.exe"
-NPM_CLI = NODE_HOME / "node_modules" / "npm" / "bin" / "npm-cli.js"
+# Pinned Node runtimes, one per layout (LAYOUTS[...]["node"]). Each win-x64 zip must match both
+# nodejs.org's SHASUMS256.txt for that release and the sha256 recorded here.
+#   20.20.2: production until the Stage 4 cutover (2026-10-27 inventory); layout A.
+#   24.22.1: the fork at MeshCentral 1.3.1 (operator, 2026-10-29: upstream's own image is node:24.22.1,
+#            and 1.3.1's autobackup needs Node 22+ for fs.promises.glob); layout B.
+NODE_RUNTIMES = {
+    "20.20.2": "dc3700fdd57a63eedb8fd7e3c7baaa32e6a740a1b904167ff4204bc68ed8bf77",
+    "24.22.1": "d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5",
+}
+
+
+class NodeRuntime:
+    """Paths and download facts of one pinned portable Node under the runtime root."""
+
+    def __init__(self, version):
+        if version not in NODE_RUNTIMES:
+            raise DupError(f"Node {version} is not a pinned runtime; pinned: {sorted(NODE_RUNTIMES)}")
+        self.version = version
+        self.zip = f"node-v{version}-win-x64.zip"
+        self.url = f"https://nodejs.org/dist/v{version}/{self.zip}"
+        self.shasums_url = f"https://nodejs.org/dist/v{version}/SHASUMS256.txt"
+        self.zip_sha256 = NODE_RUNTIMES[version]
+        self.home = TOOLS / f"node-v{version}-win-x64"
+        self.exe = self.home / "node.exe"
+        self.npm_cli = self.home / "node_modules" / "npm" / "bin" / "npm-cli.js"
+
 
 MONGO_VERSION = "7.0.31"
 MONGO_ZIP = f"mongodb-windows-x86_64-{MONGO_VERSION}.zip"
@@ -54,9 +71,19 @@ MONGO_SHA_URL = MONGO_URL + ".sha256"
 MONGO_ZIP_SHA256 = "3b19606c87d20ab2ef8d5dc802b455088d8408624fcb7d45de140af6d753e09a"
 MONGO_HOME = TOOLS / f"mongodb-win32-x86_64-windows-{MONGO_VERSION}"
 MONGOD_EXE = MONGO_HOME / "bin" / "mongod.exe"
+# MongoDB Database Tools (mongodump) for MeshCentral's autobackup. The publisher's checksum is the sha256
+# in its release feed (downloads.mongodb.org/tools/db/release.json); the zip must match it and the pin.
+MONGO_TOOLS_VERSION = "100.20.0"
+MONGO_TOOLS_ZIP = f"mongodb-database-tools-windows-x86_64-{MONGO_TOOLS_VERSION}.zip"
+MONGO_TOOLS_URL = f"https://fastdl.mongodb.org/tools/db/{MONGO_TOOLS_ZIP}"
+MONGO_TOOLS_FEED_URL = "https://downloads.mongodb.org/tools/db/release.json"
+MONGO_TOOLS_ZIP_SHA256 = "b65a32595db38cdf0f413d53cac440c4a6ddac0d224405b550e4100535bdd5ca"
+MONGO_TOOLS_HOME = TOOLS / f"mongodb-database-tools-windows-x86_64-{MONGO_TOOLS_VERSION}"
+MONGODUMP_EXE = MONGO_TOOLS_HOME / "bin" / "mongodump.exe"
 MONGO_HOST = "127.0.0.1"
 MONGO_PORT = 27018
 
+# The stock npm MeshCentral production runs until the Stage 4 cutover (layout A).
 MESHCENTRAL_VERSION = "1.2.5"
 
 # Sibling inputs (read-only).
@@ -69,14 +96,28 @@ EXTRA_VALUES_PATH = EVIDENCE / "live" / "config-extra-values.json"
 LAYOUT_A_MODULES_TAR = EVIDENCE / "production-layout-a" / "layout-a-modules-posix.tar"
 PRODUCTION_UNTRACKED = EVIDENCE / "production-untracked"
 
+# A: production as it runs until the Stage 4 cutover (stock 1.2.5 on Node 20).
+# B: the fork package as Stage 6 landed it (MeshCentral 1.3.1 plus the fork, on Node 24).
 LAYOUTS = {
-    "A": {"port": 4431, "mpsport": None, "db": "meshcentral_dupA", "cert": "mc-dup-a.localhost"},
-    "B": {"port": 4432, "mpsport": 4434, "db": "meshcentral_dupB", "cert": "mc-dup-b.localhost"},
+    "A": {"port": 4431, "mpsport": None, "db": "meshcentral_dupA", "cert": "mc-dup-a.localhost", "node": "20.20.2"},
+    "B": {"port": 4432, "mpsport": 4434, "db": "meshcentral_dupB", "cert": "mc-dup-b.localhost", "node": "24.22.1"},
 }
 
 
 class DupError(RuntimeError):
     """A duplicate-server step failed; the message says which and why."""
+
+
+def layout_node(name):
+    """The pinned Node runtime a layout runs on (LAYOUTS[name]["node"])."""
+    if name not in LAYOUTS:
+        raise DupError(f"Unknown layout {name!r}; expected one of {sorted(LAYOUTS)}")
+    return NodeRuntime(LAYOUTS[name]["node"])
+
+
+def node_runtimes():
+    """Every pinned runtime some layout uses, in version order."""
+    return [NodeRuntime(version) for version in sorted({cfg["node"] for cfg in LAYOUTS.values()})]
 
 
 def layout_root(name):
@@ -138,10 +179,10 @@ def run(command, cwd=None, env=None, timeout=1800, capture=False):
     return result
 
 
-def node_env(extra=None):
-    """Environment for the pinned Node; PATH is changed for the child only."""
+def node_env(runtime, extra=None):
+    """Environment for a pinned Node runtime; PATH is changed for the child only."""
     env = dict(os.environ)
-    env["PATH"] = str(NODE_HOME) + os.pathsep + env.get("PATH", "")
+    env["PATH"] = str(runtime.home) + os.pathsep + env.get("PATH", "")
     env.pop("NODE_OPTIONS", None)
     # Keep npm's cache inside the runtime root so teardown removes it.
     env["npm_config_cache"] = str(DUP_ROOT / "npm-cache")
@@ -157,10 +198,11 @@ def node_env(extra=None):
     return env
 
 
-def npm(args, cwd, timeout=1800):
-    if not NPM_CLI.is_file():
-        raise DupError(f"Pinned npm is missing at {NPM_CLI}; run setup first")
-    return run([NODE_EXE, NPM_CLI] + list(args), cwd=cwd, env=node_env(), timeout=timeout)
+def npm(runtime, args, cwd, timeout=1800):
+    """npm as shipped with a pinned Node runtime (each layout installs with its own Node and npm)."""
+    if not runtime.npm_cli.is_file():
+        raise DupError(f"Pinned npm is missing at {runtime.npm_cli}; run setup first")
+    return run([runtime.exe, runtime.npm_cli] + list(args), cwd=cwd, env=node_env(runtime), timeout=timeout)
 
 
 def require_root_marker():
