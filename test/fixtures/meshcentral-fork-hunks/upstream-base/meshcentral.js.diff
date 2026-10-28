@@ -117,3 +117,37 @@
  
              // If this is a windows binary, pull binary information
              if (obj.meshAgentsArchitectureNumbers[archid].platform == 'win32') {
+@@ -4426,7 +4448,6 @@
+         var allsspi = true;
+         var yubikey = false;
+         var ssh = false;
+-        var sessionRecording = false;
+         var domainCount = 0;
+         var wildleek = false;
+         var nodemailer = false;
+@@ -4451,7 +4472,6 @@
+                 if (typeof config.domains[i].authstrategies.oidc == 'object') { passport.push('openid-client@5.7.1'); }
+                 if ((typeof config.domains[i].authstrategies.saml == 'object') || (typeof config.domains[i].authstrategies.jumpcloud == 'object')) { passport.push('passport-saml@3.2.4'); }
+             }
+-            if (config.domains[i].sessionrecording != null) { sessionRecording = true; }
+             if ((config.domains[i].passwordrequirements != null) && (config.domains[i].passwordrequirements.bancommonpasswords == true)) { wildleek = true; }
+             if ((config.domains[i].newaccountscaptcha != null) && (config.domains[i].newaccountscaptcha !== false)) { captcha = true; }
+             if ((typeof config.domains[i].duo2factor == 'object') && (passport.indexOf('@duosecurity/duo_universal') == -1)) { passport.push('@duosecurity/duo_universal@2.1.0'); }
+@@ -4466,7 +4486,6 @@
+         if (passport != null) { passport = passport.filter((value, index, self) => self.indexOf(value) === index); modules.push(...passport); }
+         if (captcha == true) { modules.push('svg-captcha@1.4.0'); }
+ 
+-        if (sessionRecording == true) { modules.push('image-size@2.0.2'); } // Need to get the remote desktop JPEG sizes to index the recording file.
+         if (config.letsencrypt != null) { modules.push('acme-client@4.2.5'); } // Add acme-client module. We need to force v4.2.4 or higher since olver versions using SHA-1 which is no longer supported by Let's Encrypt.
+         if (config.settings.mqtt != null) { modules.push('aedes@0.51.3'); } // Add MQTT Modules
+         if (config.settings.mysql != null) { modules.push('mysql2@3.15.1'); } // Add MySQL.
+@@ -4507,9 +4526,6 @@
+             if (allsspi == false) { modules.push('otplib@13.4.1'); } // Google Authenticator support (v10 supports older NodeJS versions).
+         }
+ 
+-        // Desktop multiplexor support
+-        if (config.settings.desktopmultiplex === true) { modules.push('image-size@2.0.2'); }
+-
+         // SMS support
+         if (config.sms != null) {
+             if (config.sms.provider == 'twilio') { modules.push('twilio@4.23.0'); }
