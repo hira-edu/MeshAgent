@@ -60,7 +60,14 @@ function listSources() {
             else if (exts.has(path.extname(entry.name))) { out.push(rel); }
         }
     }
-    for (const root of roots) { if (fs.existsSync(root)) { walk(root); } }
+    // A missing root would shrink the scan without notice, so stop instead of skipping it.
+    for (const root of roots) {
+        if (!fs.statSync(root, { throwIfNoEntry: false })?.isDirectory()) {
+            throw new Error('Service host path SSOT contract: source folder "' + root + '" not found under ' +
+                path.resolve('.') + '. Run this contract from the MeshAgent repository root.');
+        }
+        walk(root);
+    }
     return out;
 }
 

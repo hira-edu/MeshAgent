@@ -146,27 +146,45 @@ assert(runtimeHarness.includes('Assert-NativeArchitecture -RequestedArchitecture
 assert(runtimeHarness.includes('RuntimeInformation]::OSArchitecture'), 'runtime wrapper does not inspect native OS architecture');
 assert(testHarness.includes('grouped lifecycle validation was not started'), 'lower-level runtime validation does not fail closed on a mismatched host');
 
-for (const required of [
-    'arch: [x64, x86, arm64]',
-    'output_name: MeshServiceARM64.exe',
-    'msh_output_name: MeshServiceARM64.msh',
-    'MeshServiceRuntime-MeshServiceARM64.dll',
-    'runs-on: windows-2022',
-    'runner: windows-2022',
-    'windows-11-arm',
-    'architecture: ARM64',
-    'Architecture          = $architecture',
-    'cp /tmp/MeshServiceARM64.exe',
-    'cp /tmp/MeshServiceARM64.dll'
-]) {
-    assert(releaseWorkflow.includes(required), `release workflow omits ARM64 parity marker: ${required}`);
-}
+// The Windows release matrix (x64, x86, arm64), DLL signing, embedded-DLL parity and ARM64
+// runtime validation live in hook's private .github/workflows/coordinated-release.yml, and
+// hook's tests/ci/test_windows_arm64_release_matrix.py checks them there. MeshAgent's release
+// workflow only validates and asks hook to release this exact commit; check that hand-off here.
+assert(!/runs-on:\s*windows/.test(releaseWorkflow), 'MeshAgent release workflow must not build Windows itself; the coordinated release in hook owns the matrix');
+assert(!/\bmsbuild\b/i.test(releaseWorkflow), 'MeshAgent release workflow must not run msbuild; the coordinated release in hook owns the native build');
 assert(!releaseWorkflow.includes('windows-latest'), 'v143 Windows jobs must not float to a newer Visual Studio runner image');
-const signDllIndex = releaseWorkflow.indexOf('Sign native 64-bit MeshServiceRuntime DLL before embedding');
-const buildRuntimeIndex = releaseWorkflow.indexOf('Build MeshService MeshServiceRuntime (${{ matrix.arch }})');
-const validateEmbeddedIndex = releaseWorkflow.indexOf('Validate embedded service DLL parity');
-assert(signDllIndex >= 0 && signDllIndex < buildRuntimeIndex, 'service DLL must be signed before the runtime embeds it');
-assert(buildRuntimeIndex < validateEmbeddedIndex, 'embedded DLL parity must be checked after runtime linking');
+const dispatchJobStart = releaseWorkflow.indexOf('\n  dispatch:\n');
+assert(dispatchJobStart >= 0, 'release workflow has no dispatch job for the coordinated release');
+const dispatchJob = releaseWorkflow.slice(dispatchJobStart);
+for (const required of [
+    'needs: validate',
+    "github.event_name != 'pull_request'",
+    "github.ref == 'refs/heads/main'",
+    "github.event.repository.default_branch == 'main'",
+    'repositories: hook',
+    'permission-contents: write',
+    'COORDINATOR: ${{ github.repository_owner }}/hook',
+    "'event_type': 'sibling-source-updated'",
+    "'repository': os.environ['GITHUB_REPOSITORY'], 'sha': os.environ['GITHUB_SHA']",
+    'gh api --method POST "repos/$COORDINATOR/dispatches" --input request.json'
+]) {
+    assert(dispatchJob.includes(required), `release dispatch to hook's coordinated release is missing: ${required}`);
+}
+
+// hook's release legs hand their outputs to MeshAgent's tools/prepare_release_image.py, which
+// replaced the old SSH copy of MeshServiceARM64.exe/.dll into agents-custom. The ARM64 agent,
+// manifest and service DLL must stay required inputs of that image.
+const releaseImage = read('tools/prepare_release_image.py');
+for (const required of [
+    "for name in ('MeshService64.exe', 'MeshServiceARM64.exe', 'MeshService.exe'):",
+    "sources[name.replace('.exe', '.msh')]",
+    "dllarm = artifacts / 'MeshServiceRuntime-MeshServiceARM64.dll/MeshServiceARM64.dll'",
+    "'MeshServiceARM64.dll': dllarm",
+    "'service_bundle_arm64.dll': dllarm",
+    "raise ValueError('Required CI artifact missing: ' + name)"
+]) {
+    assert(releaseImage.includes(required), `release image omits ARM64 parity marker: ${required}`);
+}
 
 console.log(JSON.stringify({
     success: true,
