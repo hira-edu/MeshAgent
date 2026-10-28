@@ -1,0 +1,392 @@
+--- a/public/scripts/agent-desktop-0.0.2.js
++++ b/public/scripts/agent-desktop-0.0.2.js
+@@ -41,6 +41,8 @@
+     obj.localKeyMap = true;
+     obj.remoteKeyMap = false; // If false, the remote keyboard mapping is not used.
+     obj.pressedKeys = [];
++    obj.browserPressedKeys = Object.create(null);
++    obj.browserPressedButtons = Object.create(null);
+     obj._altGrArmed = false;       // Windows AltGr detection
+     obj._altGrTimeout = 0;
+     obj._altGrDeferredDown = false; // a ControlLeft keydown is held back pending AltGr detection
+@@ -56,6 +58,7 @@
+     obj.SwapMouse = false;
+     obj.UseExtendedKeyFlag = true;
+     obj.FirstDraw = false;
++    obj.drawGeneration = 0;
+ 
+     // Remote user mouse and keyboard lock
+     obj.onRemoteInputLockChanged = null;
+@@ -86,9 +89,44 @@
+     obj.mouseCursorActive = function (x) { if (xMouseCursorActive == x) return; xMouseCursorActive = x; obj.CanvasId.style.cursor = ((x == true) ? xMouseCursorCurrent : 'default'); }
+     var mouseCursors = ['default', 'progress', 'crosshair', 'pointer', 'help', 'text', 'no-drop', 'move', 'nesw-resize', 'ns-resize', 'nwse-resize', 'w-resize', 'alias', 'wait', 'none', 'not-allowed', 'col-resize', 'row-resize', 'copy', 'zoom-in', 'zoom-out'];
+ 
++    obj.trace = function (msg) {
++        if ((obj.debugmode > 0) || ((typeof urlargs != 'undefined') && (urlargs.kvmtrace != null))) { console.log('KVMTRACE', msg); }
++    }
++
++    obj.resetDrawState = function (reason) {
++        obj.drawGeneration++;
++        obj.PendingOperations = [];
++        obj.tilesReceived = 0;
++        obj.TilesDrawn = 0;
++        obj.KillDraw = 0;
++        if (reason != null) { obj.trace('draw-reset reason=' + reason + ' generation=' + obj.drawGeneration); }
++    }
++
++    obj.resetStreamState = function (reason) {
++        obj.cancelPendingAltGr();
++        obj.browserPressedKeys = Object.create(null);
++        obj.resetDrawState(reason);
++        obj.firstUpKeys = [];
++        obj.pressedKeys = [];
++        obj.RemoteInputLock = null;
++        obj.KeyboardState = 0;
++        obj.displays = null;
++        obj.selectedDisplay = null;
++        obj.TouchArray = {};
++    }
++
++    obj.resetSessionState = function (reason) {
++        obj.resetStreamState(reason);
++        obj.browserPressedButtons = Object.create(null);
++        obj.remotePointerLast = null;
++        obj.remoteScreenKnown = false;
++        obj.FirstDraw = false;
++    }
++
+     obj.Start = function () {
+         obj.State = 0;
+         obj.accumulator = null;
++        obj.resetSessionState('start');
+     }
+ 
+     obj.Stop = function () {
+@@ -98,8 +136,15 @@
+         obj.touchenabled = 0;
+         if (obj.onScreenSizeChange != null) { obj.onScreenSizeChange(obj, obj.ScreenWidth, obj.ScreenHeight, obj.CanvasId); }
+         obj.Canvas.clearRect(0, 0, obj.CanvasId.width, obj.CanvasId.height);
++        obj.resetSessionState('stop');
+     }
+ 
++    // Observers of this module's connection state (for example the trackpad controller). They run
++    // after the module has handled the change; the page's own handlers are left alone.
++    obj.stateListeners = [];
++    obj.addStateListener = function (fn) { if ((typeof fn == 'function') && (obj.stateListeners.indexOf(fn) < 0)) { obj.stateListeners.push(fn); } }
++    obj.removeStateListener = function (fn) { var i = obj.stateListeners.indexOf(fn); if (i >= 0) { obj.stateListeners.splice(i, 1); } }
++
+     obj.xxStateChange = function (newstate) {
+         if (obj.State == newstate) return;
+         obj.State = newstate;
+@@ -117,6 +162,8 @@
+                 break;
+             }
+         }
++        var listeners = obj.stateListeners.slice();
++        for (var i = 0; i < listeners.length; i++) { try { listeners[i](obj, newstate); } catch (ex) { } }
+     }
+ 
+     obj.send = function (x) {
+@@ -129,15 +176,18 @@
+     obj.ProcessPictureMsg = function (data, X, Y) {
+         //if (obj.targetnode != null) obj.Debug("ProcessPictureMsg " + X + "," + Y + " - " + obj.targetnode.substring(0, 8));
+         var tile = new Image();
+-        tile.xcount = obj.tilesReceived++;
++        var generation = obj.drawGeneration;
++        obj.tilesReceived++;
++        tile.xcount = obj.tilesReceived;
+         var r = obj.tilesReceived, tdata = data.slice(4), ptr = 0, strs = [];
+         // String.fromCharCode.apply() can't handle very large argument count, so we have to split like this.
+         while ((tdata.byteLength - ptr) > 50000) { strs.push(String.fromCharCode.apply(null, tdata.slice(ptr, ptr + 50000))); ptr += 50000; }
+         if (ptr > 0) { strs.push(String.fromCharCode.apply(null, tdata.slice(ptr))); } else { strs.push(String.fromCharCode.apply(null, tdata)); }
+         tile.src = 'data:image/jpeg;base64,' + btoa(strs.join(''));
+         tile.onload = function () {
++            if (generation != obj.drawGeneration) { return; }
+             //console.log('DecodeTile #' + this.xcount);
+-            if ((obj.Canvas != null) && (obj.KillDraw < r) && (obj.State != 0)) {
++            if ((obj.Canvas != null) && (obj.State != 0)) {
+                 obj.PendingOperations.push([r, 2, tile, X, Y]);
+                 while (obj.DoPendingOperations()) { }
+             } else {
+@@ -200,15 +250,17 @@
+     }
+ 
+     obj.ProcessScreenMsg = function (width, height) {
++        var sameSize = ((obj.ScreenWidth == width) && (obj.ScreenHeight == height));
+         if (obj.debugmode > 0) { console.log('ScreenSize: ' + width + ' x ' + height); }
+-        if ((obj.ScreenWidth == width) && (obj.ScreenHeight == height)) return; // Ignore change if screen is same size.
++        obj.trace('screen-reset width=' + width + ' height=' + height + ' sameSize=' + (sameSize ? 1 : 0));
+         obj.Canvas.setTransform(1, 0, 0, 1, 0, 0);
+         obj.rotation = 0;
+-        obj.FirstDraw = true;
+         obj.ScreenWidth = obj.width = width;
+         obj.ScreenHeight = obj.height = height;
+-        obj.KillDraw = obj.tilesReceived;
+-        while (obj.PendingOperations.length > 0) { obj.PendingOperations.shift(); }
++        obj.resetStreamState('screen:' + width + 'x' + height + ':same=' + (sameSize ? 1 : 0));
++        obj.FirstDraw = true;
++        obj.remoteScreenKnown = true;
++        if (obj.parent != null && obj.parent.State < 3) { obj.parent.xxStateChange(3); }
+         obj.SendCompressionLevel(obj.ImageType);
+         obj.SendUnPause();
+         obj.SendRemoteInputLock(2); // Query input lock state
+@@ -241,13 +293,11 @@
+                 obj.ProcessPictureMsg(view.slice(4), X, Y);
+                 break;
+             case 7: // Screen size
++                // Release only keys this viewer pressed, before ProcessScreenMsg
++                // clears their tracking. Unsolicited modifier releases on connect
++                // are real OS input and can dismiss the lock screen or change focus.
++                obj.handleReleaseKeys();
+                 obj.ProcessScreenMsg(X, Y);
+-                obj.SendKeyMsgKC(obj.KeyAction.UP, 16); // Shift
+-                obj.SendKeyMsgKC(obj.KeyAction.UP, 17); // Ctrl
+-                obj.SendKeyMsgKC(obj.KeyAction.UP, 18); // Alt
+-                obj.SendKeyMsgKC(obj.KeyAction.UP, 91); // Left-Windows
+-                obj.SendKeyMsgKC(obj.KeyAction.UP, 92); // Right-Windows
+-                obj.SendKeyMsgKC(obj.KeyAction.UP, 16); // Shift
+                 obj.send(String.fromCharCode(0x00, 0x0E, 0x00, 0x04));
+                 break;
+             case 11: // GetDisplays (TODO)
+@@ -488,12 +538,23 @@
+     }
+ 
+     obj._handleAltGrTimeout = function () { //Windows and no Ctrl+Alt -> send only Ctrl.
++        if (!obj._altGrArmed) return;
+         obj._altGrArmed = false;
+         obj._altGrDeferredDown = false;
+         clearTimeout(obj._altGrTimeout);
+         obj.SendKeyMsgKC( 1, ControlLeftKc, false); // (KeyDown, "ControlLeft", false)
+     }
+ 
++    obj.cancelPendingAltGr = function () {
++        if (obj._altGrTimeout) { clearTimeout(obj._altGrTimeout); }
++        obj._altGrTimeout = 0;
++        obj._altGrArmed = false;
++        // Clear, never flush, the held ControlLeft keydown: the remote has not seen it, and both
++        // callers (stream reset, key release) also forget the browser press, so its keyup is not
++        // forwarded either. Flushing here would leave Ctrl held down on the remote.
++        obj._altGrDeferredDown = false;
++    }
++
+     // Send remote input lock. 0 = Unlock, 1 = Lock, 2 = Query
+     obj.SendRemoteInputLock = function (code) { obj.send(String.fromCharCode(0x00, 87, 0x00, 0x05, code)); }
+ 
+@@ -650,24 +711,38 @@
+     obj.xxMouseInputGrab = false;
+     obj.xxKeyInputGrab = false;
+     obj.xxMouseMove = function (e) { if (obj.State == 3) obj.SendMouseMsg(obj.KeyAction.NONE, e); if (e.preventDefault) e.preventDefault(); if (e.stopPropagation) e.stopPropagation(); return false; }
+-    obj.xxMouseUp = function (e) { if (obj.State == 3) obj.SendMouseMsg(obj.KeyAction.UP, e); if (e.preventDefault) e.preventDefault(); if (e.stopPropagation) e.stopPropagation(); return false; }
+-    obj.xxMouseDown = function (e) { if (obj.State == 3) obj.SendMouseMsg(obj.KeyAction.DOWN, e); if (e.preventDefault) e.preventDefault(); if (e.stopPropagation) e.stopPropagation(); return false; }
++    function browserButton(e) { return e.which || (e.button + 1); }
++    obj.xxMouseUp = function (e) {
++        var button = browserButton(e);
++        if ((obj.State == 3) && obj.browserPressedButtons[button]) { obj.SendMouseMsg(obj.KeyAction.UP, e); }
++        delete obj.browserPressedButtons[button];
++        if (e.preventDefault) e.preventDefault(); if (e.stopPropagation) e.stopPropagation(); return false;
++    }
++    obj.xxMouseDown = function (e) {
++        if (obj.State == 3) { obj.browserPressedButtons[browserButton(e)] = true; obj.SendMouseMsg(obj.KeyAction.DOWN, e); }
++        if (e.preventDefault) e.preventDefault(); if (e.stopPropagation) e.stopPropagation(); return false;
++    }
+     obj.xxMouseDblClick = function (e) { if (obj.State == 3) obj.SendMouseMsg(obj.KeyAction.DBLCLICK, e); if (e.preventDefault) e.preventDefault(); if (e.stopPropagation) e.stopPropagation(); return false; }
+     obj.xxDOMMouseScroll = function (e) { if (obj.State == 3) { obj.SendMouseMsg(obj.KeyAction.SCROLL, e); return false; } return true; }
+     obj.xxMouseWheel = function (e) { if (obj.State == 3) { obj.SendMouseMsg(obj.KeyAction.SCROLL, e); return false; } return true; }
+     obj.xxKeyUp = function (e) {
+-        if ((e.key != 'Dead') && (obj.State == 3)) {
+-            if ((typeof e.key == 'string') && (e.key.length == 1) && (e.ctrlKey != true) && (e.altKey != true) && (obj.remoteKeyMap == false)) {
+-                obj.SendKeyUnicode(obj.KeyAction.UP, e.key.charCodeAt(0));
++        // A browser can deliver releases from before connection/focus transfer.
++        // Only forward releases whose press this viewer actually handled.
++        var key = e.code || e.keyCode;
++        if ((e.key != 'Dead') && (obj.State == 3) && obj.browserPressedKeys[key]) {
++            if (obj.browserPressedKeys[key].unicode != null) {
++                obj.SendKeyUnicode(obj.KeyAction.UP, obj.browserPressedKeys[key].unicode);
+             } else {
+                 obj.SendKeyMsg(obj.KeyAction.UP, e);
+             }
+         }
++        delete obj.browserPressedKeys[key];
+         if (e.preventDefault) e.preventDefault(); if (e.stopPropagation) e.stopPropagation(); return false;
+     }
+     obj.xxKeyDown = function (e) {
+         if ((e.key != 'Dead') && (obj.State == 3)) {
+             if (!((typeof e.key == 'string') && (e.key.length == 1) && (e.ctrlKey != true) && (e.altKey != true) && (obj.remoteKeyMap == false))) {
++                obj.browserPressedKeys[e.code || e.keyCode] = true;
+                 obj.SendKeyMsg(obj.KeyAction.DOWN, e);
+                 if (e.preventDefault) e.preventDefault(); if (e.stopPropagation) e.stopPropagation(); return false;
+             }
+@@ -676,6 +751,7 @@
+     obj.xxKeyPress = function (e) {
+         if ((e.key != 'Dead') && (obj.State == 3)) {
+             if ((typeof e.key == 'string') && (e.key.length == 1) && (e.ctrlKey != true) && (e.altKey != true) && (obj.remoteKeyMap == false)) {
++                obj.browserPressedKeys[e.code || e.keyCode] = { unicode: e.key.charCodeAt(0) };
+                 obj.SendKeyUnicode(obj.KeyAction.DOWN, e.key.charCodeAt(0));
+             } // else { obj.SendKeyMsg(obj.KeyAction.DOWN, e); }
+         }
+@@ -691,10 +767,8 @@
+     obj.handleKeyUp = function (e) {
+         //console.log('keyup', e.code, e.key, e.keyCode, (e.key.length == 1)?e.key.charCodeAt(0):0);
+         if (obj.stopInput == true || desktop.State != 3) return false;
+-        if (obj.firstUpKeys.length < 5) {
+-            obj.firstUpKeys.push(e.keyCode);
+-            if ((obj.firstUpKeys.length == 5)) { var j = obj.firstUpKeys.join(','); if ((j == '16,17,91,91,16') || (j == '16,17,18,91,92')) { obj.stopInput = true; } }
+-        }
++        // xxKeyUp filters unowned releases; do not disable the whole session
++        // when a browser supplies a modifier-release sequence on focus transfer.
+         return obj.xxKeyUp(e);
+     }
+     obj.handleKeyDown = function (e) {
+@@ -705,6 +779,11 @@
+ 
+     // Release the CTRL, ALT, SHIFT keys if they are pressed.
+     obj.handleReleaseKeys = function () {
++        obj.cancelPendingAltGr();
++        for (var key in obj.browserPressedKeys) {
++            if (obj.browserPressedKeys[key].unicode != null) { obj.SendKeyUnicode(obj.KeyAction.UP, obj.browserPressedKeys[key].unicode); }
++        }
++        obj.browserPressedKeys = Object.create(null);
+         var p = JSON.parse(JSON.stringify(obj.pressedKeys)); // Clone the pressed array
+         for (var i in p) { obj.SendKeyMsgKC(obj.KeyAction.UP, p[i]); } // Release all keys
+     }
+@@ -716,6 +795,127 @@
+     obj.mousemove = function (e) { if (obj.stopInput == true) return false; return obj.xxMouseMove(e); }
+     obj.mousewheel = function (e) { if (obj.stopInput == true) return false; return obj.xxMouseWheel(e); }
+ 
++    // Pointer input in remote screen pixels (the SCREEN message's size), for touch gesture engines
++    // (trackpad mode). These take coordinates the remote already uses, so they never go through
++    // SendMouseMsg and leave the browser mouse path above unchanged. Pressed buttons share
++    // browserPressedButtons with that path, keyed the same way (browser which: 1 left, 2 middle,
++    // 3 right), and the button mask passed in is the whole truth: a button another path left pressed
++    // is released, including one a physical mouse holds on a device that has both. A caller that
++    // switches viewer instances (the WebRTC soft desktop draws on the same canvas) must release on
++    // the outgoing instance first; each instance has its own bookkeeping.
++    // A press made here stores the wire byte it sent (the browser path stores true), so a later
++    // SwapMouse change still releases the button that was pressed.
++    var remotePointerButtons = [[1, 1, obj.MouseButton.LEFT], [2, 3, obj.MouseButton.RIGHT], [4, 2, obj.MouseButton.MIDDLE]]; // mask bit, which, down byte
++    obj.remotePointerLast = null;
++
++    function remoteCoordinate(v, size) { v = Math.round(v); return (v < 0) ? 0 : ((v > size - 1) ? size - 1 : v); }
++
++    function sendRemoteMouse(button, x, y) {
++        obj.send(String.fromCharCode(0x00, obj.InputType.MOUSE, 0x00, 0x0A, 0x00, button, (x >> 8) & 0xFF, x & 0xFF, (y >> 8) & 0xFF, y & 0xFF));
++    }
++
++    function remoteButtonByte(down) {
++        if (obj.SwapMouse === true) {
++            if (down == obj.MouseButton.LEFT) return obj.MouseButton.RIGHT;
++            if (down == obj.MouseButton.RIGHT) return obj.MouseButton.LEFT;
++        }
++        return down;
++    }
++
++    function remoteReleaseByte(b) {
++        var pressed = obj.browserPressedButtons[b[1]];
++        return (((typeof pressed == 'number') ? pressed : remoteButtonByte(b[2])) * 2) & 0xFF;
++    }
++
++    // A module learns the remote screen from its first SCREEN message; until then (for example a
++    // WebRTC soft desktop that has just started) its size is a placeholder and nothing is sent.
++    obj.remoteScreenKnown = false;
++    function remoteInputAllowed() { return (obj.State == 3) && (obj.stopInput != true) && obj.remoteScreenKnown && (obj.width > 0) && (obj.height > 0); }
++
++    // The remote screen and how the canvas shows it. width/height are the remote (unrotated) size;
++    // remotePerCssX/Y are remote pixels per CSS pixel along the remote X and Y axes (they differ
++    // when the page stretches the canvas, and swap with the displayed axes at 90/270 degrees);
++    // remotePerCss is the displayed-X scale; the converters take CSS pixels relative to the
++    // canvas's top-left corner. Between a SCREEN message and the first frame the
++    // canvas still has the old size, so the scale lags until it is redrawn.
++    obj.GetRemoteGeometry = function () {
++        var canvas = obj.Canvas.canvas, cssW = obj.CanvasId.clientWidth, cssH = obj.CanvasId.clientHeight;
++        var sx = (cssW > 0) ? (canvas.width / cssW) : 0, sy = (cssH > 0) ? (canvas.height / cssH) : 0;
++        return {
++            width: obj.remoteScreenKnown ? obj.width : 0, height: obj.remoteScreenKnown ? obj.height : 0, rotation: obj.rotation, remotePerCss: sx,
++            remotePerCssX: (obj.rotation % 2) ? sy : sx, remotePerCssY: (obj.rotation % 2) ? sx : sy,
++            cssToRemote: function (cx, cy) { var px = cx * sx, py = cy * sy; return { x: obj.crotX(px, py), y: obj.crotY(px, py) }; },
++            remoteToCss: function (x, y) {
++                var px = x, py = y;
++                if (obj.rotation == 1) { px = canvas.width - y; py = x; }
++                else if (obj.rotation == 2) { px = canvas.width - x; py = canvas.height - y; }
++                else if (obj.rotation == 3) { px = y; py = canvas.height - x; }
++                return { x: (sx > 0) ? (px / sx) : 0, y: (sy > 0) ? (py / sy) : 0 };
++            }
++        };
++    }
++
++    // Move the remote pointer to (x, y) with exactly the buttons in the integer mask (1 left,
++    // 2 right, 4 middle) held: releases first, then presses, each carrying the position; a plain move
++    // only when no button changed. Non-finite coordinates or mask send nothing.
++    obj.SendRemotePointer = function (x, y, buttons) {
++        if (!remoteInputAllowed()) return false;
++        x = Number(x); y = Number(y); buttons = Number(buttons);
++        if (!isFinite(x) || !isFinite(y) || !isFinite(buttons)) return false;
++        x = remoteCoordinate(x, obj.width); y = remoteCoordinate(y, obj.height);
++        var changed = false, i, b, down;
++        for (i = 0; i < remotePointerButtons.length; i++) {
++            b = remotePointerButtons[i];
++            if (obj.browserPressedButtons[b[1]] && !(buttons & b[0])) { down = remoteReleaseByte(b); delete obj.browserPressedButtons[b[1]]; sendRemoteMouse(down, x, y); changed = true; }
++        }
++        for (i = 0; i < remotePointerButtons.length; i++) {
++            b = remotePointerButtons[i];
++            if (!obj.browserPressedButtons[b[1]] && (buttons & b[0])) { down = remoteButtonByte(b[2]); obj.browserPressedButtons[b[1]] = down; sendRemoteMouse(down, x, y); changed = true; }
++        }
++        if (!changed && ((obj.remotePointerLast == null) || (obj.remotePointerLast.x != x) || (obj.remotePointerLast.y != y))) { sendRemoteMouse(0, x, y); }
++        obj.remotePointerLast = { x: x, y: y };
++        return true;
++    }
++
++    // One wheel packet of +/-120 per notch, so agents that apply one notch per packet scroll the
++    // same distance as those that apply the delta.
++    obj.SendRemoteWheel = function (x, y, notches) {
++        if (!remoteInputAllowed()) return false;
++        x = Number(x); y = Number(y); notches = Math.round(Number(notches));
++        if (!isFinite(x) || !isFinite(y) || !isFinite(notches) || (notches == 0)) return false;
++        if (obj.ReverseMouseWheel) { notches = -notches; }
++        x = remoteCoordinate(x, obj.width); y = remoteCoordinate(y, obj.height);
++        var delta = (notches > 0) ? 120 : -120, count = Math.min(Math.abs(notches), 100);
++        for (var i = 0; i < count; i++) {
++            obj.send(String.fromCharCode(0x00, obj.InputType.MOUSE, 0x00, 0x0C, 0x00, 0x00, (x >> 8) & 0xFF, x & 0xFF, (y >> 8) & 0xFF, y & 0xFF, (delta >> 8) & 0xFF, delta & 0xFF));
++        }
++        obj.remotePointerLast = { x: x, y: y };
++        return true;
++    }
++
++    // Release every button this viewer holds, whichever path pressed it, at the last remote pointer
++    // position (the screen centre if none is known). Used when a gesture engine tears down. When
++    // the session is down nothing can be sent and the bookkeeping is dropped (the agent releases on
++    // disconnect); when only input is blocked it is kept, so a later call can still release.
++    obj.ReleaseAllPointerButtons = function () {
++        var sendable = remoteInputAllowed();
++        if (!sendable && (obj.State == 3)) return false;
++        var x = 0, y = 0;
++        if (sendable) {
++            var last = obj.remotePointerLast;
++            x = remoteCoordinate(last ? last.x : (obj.width / 2), obj.width); y = remoteCoordinate(last ? last.y : (obj.height / 2), obj.height);
++        }
++        for (var i = 0; i < remotePointerButtons.length; i++) {
++            var b = remotePointerButtons[i];
++            if (obj.browserPressedButtons[b[1]]) {
++                var up = remoteReleaseByte(b);
++                delete obj.browserPressedButtons[b[1]];
++                if (sendable) { sendRemoteMouse(up, x, y); }
++            }
++        }
++        return sendable;
++    }
++
+     obj.xxMsTouchEvent = function (evt) {
+         if (evt.originalEvent.pointerType == 4) return; // If this is a mouse pointer, ignore this event. Touch & pen are ok.
+         if (evt.preventDefault) evt.preventDefault();
+@@ -977,5 +1177,12 @@
+     obj.getIEVersion = function () { var r = -1; if (navigator.appName == 'Microsoft Internet Explorer') { var ua = navigator.userAgent; var re = new RegExp("MSIE ([0-9]{1,}[.0-9]{0,})"); if (re.exec(ua) != null) r = parseFloat(RegExp.$1); } return r; }
+     obj.haltEvent = function (e) { if (e.preventDefault) e.preventDefault(); if (e.stopPropagation) e.stopPropagation(); return false; }
+ 
++    // Fork scripts observe new viewer modules here instead of wrapping this factory: each function
++    // in window.MeshDesktopModuleObservers is called with every module created.
++    if ((typeof window != 'undefined') && window.MeshDesktopModuleObservers && window.MeshDesktopModuleObservers.length) {
++        var observers = window.MeshDesktopModuleObservers.slice();
++        for (var oi = 0; oi < observers.length; oi++) { try { observers[oi](obj); } catch (ex) { } }
++    }
++
+     return obj;
+ }

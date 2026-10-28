@@ -1,0 +1,837 @@
+--- a/meshdesktopmultiplex.js
++++ b/meshdesktopmultiplex.js
+@@ -79,6 +79,7 @@
+     obj.lastScreenSizeCmd = null;       // Pointer to the last screen size command from the agent.
+     obj.lastScreenSizeCounter = 0;      // Index into the image table of the screen size command, this is generally also the first command.
+     obj.lastConsoleMessage = null;      // Last agent console message.
++    obj.lastAudioMessage = null;        // Last agent desktop audio availability message.
+     obj.firstData = null;               // Index in the image table of the first image in the table, generally this points to the display resolution command.
+     obj.lastData = null;                // Index in the images table of the last image in the table.
+     obj.lastDisplayInfoData = null;     // Pointer to the last display information command from the agent (Number of displays).
+@@ -93,7 +94,13 @@
+     obj.viewerConnected = false;        // Set to true if one viewer attempted to connect to the agent.
+     obj.recordingFile = null;           // Present if we are recording to file.
+     obj.recordingFileSize = 0;          // Current size of the recording file.
+-    obj.recordingFileWriting = false;   // Set to true is we are in the process if writing to the recording file.
++    obj.recordingFileWriting = false;   // Set to true when the recording write queue is backed up and the agent must be paused.
++    obj.recordingQueue = [];            // FIFO of recording blocks waiting to be written, written one at a time.
++    obj.recordingEntryWriting = false;  // Set to true while the recording block at the head of the queue is being written.
++    obj.agentLastRx = 0;                // Time we last received data from the agent.
++    obj.agentLastPing = null;           // Time we last sent a liveness ping to the agent.
++    obj.aloneSince = null;              // Time since the agent or viewers have been waiting without the other side.
++    obj.watchdogTimer = null;           // Agent liveness and session watchdog timer.
+     obj.startTime = null;               // Starting time of the multiplex session.
+     obj.userIds = [];                   // List of userid's that have intertracted with this session.
+     //obj.autoLock = false;               // Automatically lock the remote device once disconnected
+@@ -111,6 +118,7 @@
+             // Setup the viewer
+             if (obj.viewers.indexOf(peer) >= 0) return true;
+             obj.viewers.push(peer);
++            if (obj.agent != null) { delete obj.agent.closeWhenDrained; } // A viewer joining keeps the agent connected
+             peer.desktopPaused = true;
+             peer.imageType = 1;
+             peer.imageCompression = 30;
+@@ -173,6 +181,9 @@
+             }
+ 
+             startRecording(domain, startRecord, function () {
++                // The viewer or the session may have gone away while the recording file was opening
++                if ((obj.viewers == null) || (obj.viewers.indexOf(peer) == -1)) return;
++
+                 // Indicated we are connected
+                 obj.sendToViewer(peer, obj.recordingFile ? 'cr' : 'c');
+ 
+@@ -180,27 +191,51 @@
+                 if (obj.lastDisplayInfoData != null) { obj.sendToViewer(peer, obj.lastDisplayInfoData); }
+                 if (obj.lastDisplayLocationData != null) { obj.sendToViewer(peer, obj.lastDisplayLocationData); }
+                 if (obj.lastConsoleMessage != null) { obj.sendToViewer(peer, obj.lastConsoleMessage); }
++                if (obj.lastAudioMessage != null) { obj.sendToViewer(peer, obj.lastAudioMessage); }
+                 if (obj.lastKeyState != null) { obj.sendToViewer(peer, obj.lastKeyState); }
+                 
+                 // Log joining the multiplex session
+                 if (obj.startTime != null) {
+-                    var event = { etype: 'relay', action: 'relaylog', domain: domain.id, nodeid: obj.nodeid, userid: peer.user ? peer.user._id : null, username: peer.user.name, msgid: 143, msgArgs: [obj.id], msg: "Joined desktop multiplex session \"" + obj.id + "\"", protocol: 2 };
+-                    parent.parent.DispatchEvent(['*', obj.nodeid, peer.user._id, obj.meshid], obj, event);
++                    var event = { etype: 'relay', action: 'relaylog', domain: domain.id, nodeid: obj.nodeid, userid: peer.user ? peer.user._id : null, username: peer.user ? peer.user.name : null, msgid: 143, msgArgs: [obj.id], msg: "Joined desktop multiplex session \"" + obj.id + "\"", protocol: 2 };
++                    const targets = ['*', obj.nodeid, obj.meshid];
++                    if (peer.user != null) { targets.push(peer.user._id); }
++                    parent.parent.DispatchEvent(targets, obj, event);
+                 }
+ 
+                 // Send an updated list of all peers to all viewers
+                 obj.sendSessionMetadata();
++
++                // Membership changed: a new healthy viewer can release a stream
++                // paused while every previous viewer was in overflow.
++                updateAgentFlowControl();
+             });
+         } else {
+             //console.log('addPeer-agent', obj.nodeid);
+-            if (obj.agent != null) { parent.parent.debug('relay', 'DesktopRelay: Error, duplicate agent connection'); return false; }
+-            
++            var replacingAgent = false;
++            if (obj.agent != null) {
++                // A hung or half-open agent tunnel can't recover by itself. If the current agent has gone silent
++                // or has a write that is not completing, replace it with this new agent connection.
++                const now = Date.now();
++                const agentSilent = ((obj.agent.paused == false) && ((now - obj.agentLastRx) > 20000));
++                const agentStalled = ((obj.agent.sending == true) && ((now - obj.agent.sendStart) > 15000));
++                if ((agentSilent == false) && (agentStalled == false)) { parent.parent.debug('relay', 'DesktopRelay: Error, duplicate agent connection'); return false; }
++                parent.parent.debug('relay', 'DesktopRelay: Replacing unresponsive agent, silent=' + (now - obj.agentLastRx) + 'ms, stalled=' + agentStalled + ' node=' + obj.nodeid);
++                const oldAgent = obj.agent;
++                obj.agent = null;
++                delete oldAgent.deskMultiplexor; // Closing the old agent must not tear down this session.
++                hardClosePeer(oldAgent);
++                resetDisplayState();
++                replacingAgent = true;
++            }
++
+             // Setup the agent
+             obj.agent = peer;
+             peer.sending = false;
+             peer.overflow = false;
+             peer.sendQueue = [];
+             peer.paused = false;
++            obj.agentLastRx = Date.now();
++            obj.agentLastPing = null;
+ 
+             // Indicated we are connected and send connection options and protocol if needed
+             obj.sendToAgent(obj.recordingFile?'cr':'c');
+@@ -208,6 +243,12 @@
+                 if (obj.protocolOptions != null) { obj.sendToAgent(JSON.stringify(obj.protocolOptions)); } // Send connection options
+                 obj.sendToAgent('2'); // Send remote desktop connect
+             }
++
++            // A replacement agent starts fresh, send it the current aggregate viewer settings.
++            if (replacingAgent == true) {
++                sendAgentCompression();
++                sendAgentPause();
++            }
+         }
+ 
+         // Log multiplex session start
+@@ -222,6 +263,39 @@
+         return true;
+     }
+ 
++    // Mouse buttons each viewer has pressed on the remote, so that a viewer that goes away while
++    // holding one (closed tab, network loss) does not leave it held for the others. Button bytes are
++    // the agent's: down 0x02/0x08/0x20, up 0x04/0x10/0x40; 0x88 is a double-click indication.
++    const MOUSE_BUTTONS = [[0x02, 0x04], [0x08, 0x10], [0x20, 0x40]];
++
++    function trackViewerMouse(viewer, data) {
++        if (data.length < 10) return;
++        const b = data[5];
++        if (b == 0x88) return;
++        viewer.mouseX = data.readUInt16BE(6);
++        viewer.mouseY = data.readUInt16BE(8);
++        if (viewer.heldButtons == null) { viewer.heldButtons = {}; }
++        for (const [down, up] of MOUSE_BUTTONS) {
++            if (b & down) { viewer.heldButtons[down] = true; }
++            if (b & up) { delete viewer.heldButtons[down]; }
++        }
++    }
++
++    // Release, at the viewer's last pointer position, each button the departing viewer held that no
++    // remaining viewer holds.
++    function releaseViewerButtons(viewer) {
++        const held = viewer.heldButtons;
++        viewer.heldButtons = null;
++        if ((held == null) || (obj.agent == null) || (obj.agentClosing === true)) return;
++        for (const [down, up] of MOUSE_BUTTONS) {
++            if (held[down] !== true) continue;
++            if (obj.viewers.some(function (v) { return (v !== viewer) && (v.heldButtons != null) && (v.heldButtons[down] === true); })) continue;
++            const x = viewer.mouseX || 0, y = viewer.mouseY || 0;
++            obj.sendToAgent(Buffer.from([0x00, 0x02, 0x00, 0x0A, 0x00, up, (x >> 8) & 0xFF, x & 0xFF, (y >> 8) & 0xFF, y & 0xFF]));
++            parent.parent.debug('relay', 'DesktopRelay: Released mouse button ' + up + ' held by a departing viewer, node=' + obj.nodeid);
++        }
++    }
++
+     // Remove an agent or viewer
+     // Return true if this multiplexor is no longer needed.
+     obj.removePeer = function (peer) {
+@@ -229,7 +303,10 @@
+         if (peer == obj.agent) {
+             //console.log('removePeer-agent', obj.nodeid);
+             // Agent has disconnected, disconnect everyone.
+-            if (obj.viewers != null) { for (var i in obj.viewers) { obj.viewers[i].close(); } }
++            // close() synchronously removes the viewer from obj.viewers.
++            // The agent is gone, so nothing may be sent to it for the departing viewers.
++            obj.agentClosing = true;
++            if (obj.viewers != null) { for (const viewer of obj.viewers.slice()) { viewer.close(); } }
+ 
+             // Clean up the agent
+             obj.agent = null;
+@@ -243,14 +320,16 @@
+                 var i = obj.viewers.indexOf(peer);
+                 if (i == -1) return false;
+                 obj.viewers.splice(i, 1);
++                releaseViewerButtons(peer);
+             }
+ 
+-            // Resume flow control if this was the peer that was limiting traffic (because it was the fastest one).
++            // Reevaluate both directions after membership changes. Removing the
++            // only healthy viewer must pause the producer for the remaining viewers.
+             if (peer.overflow == true) {
+                 obj.viewersOverflowCount--;
+                 peer.overflow = false;
+-                if ((obj.viewersOverflowCount < obj.viewers.length) && (obj.recordingFileWriting == false) && obj.agent && (obj.agent.paused == true)) { obj.agent.paused = false; obj.agent.ws._socket.resume(); }
+             }
++            updateAgentFlowControl();
+ 
+             // Log leaving the multiplex session
+             if (obj.startTime != null) { // Used to check if the agent has connected. If not, don't log this event since the session never really started.
+@@ -264,7 +343,7 @@
+ 
+                 // Add any previous agent traffic accounting
+                 if (peer.agentInTraffic) { inTraffc += peer.agentInTraffic; }
+-                if (peer.outTraffc) { inTraffc += peer.agentOutTraffic; }
++                if (peer.agentOutTraffic) { outTraffc += peer.agentOutTraffic; }
+ 
+                 // Compute traffic to and from the agent
+                 if (obj.agent != null) {
+@@ -313,8 +392,22 @@
+             delete peer.sendQueue;
+             delete peer.startTime;
+ 
+-            // If this is the last viewer, disconnect the agent
+-            if ((obj.viewers != null) && (obj.viewers.length == 0) && (obj.agent != null)) { obj.agent.close(); dispose(); return true; }
++            // If this is the last viewer, disconnect the agent if present and dispose of this multiplexor.
++            // Input still queued for the agent (such as a button release for the viewer that just left)
++            // is delivered first; the agent is closed once its queue drains, and a viewer joining in the
++            // meantime keeps the session.
++            if ((obj.viewers != null) && (obj.viewers.length == 0)) {
++                if ((obj.agent != null) && (obj.agent.sending == true) && (obj.agent.sendQueue.length > 0)) { obj.agent.closeWhenDrained = true; return false; }
++                if (obj.agent != null) { obj.agent.close(); }
++                dispose();
++                return true;
++            }
++
++            // A leaving viewer may have been holding the aggregate stream at a higher scale or frame rate.
++            obj.recomputeViewerImageSettings();
++
++            // A leaving viewer may have been the only unpaused one.
++            updateAggregateDesktopPause();
+ 
+             // Send an updated list of all peers to all viewers
+             obj.sendSessionMetadata();
+@@ -326,6 +419,7 @@
+     function dispose() {
+         if (obj.viewers == null) return;
+         //console.log('dispose', obj.nodeid);
++        if (obj.watchdogTimer != null) { clearInterval(obj.watchdogTimer); obj.watchdogTimer = null; }
+         delete obj.viewers;
+         delete obj.imagesCounters;
+         delete obj.images;
+@@ -369,6 +463,81 @@
+         parent.parent.debug('relay', 'DesktopRelay: Disposing desktop multiplexor');
+     }
+ 
++    // Dispose of this multiplexor if it has no agent and no viewers. Return true if disposed.
++    obj.disposeIfEmpty = function () {
++        if ((obj.viewers == null) || (obj.agent != null) || (obj.viewers.length > 0)) return false;
++        dispose();
++        return true;
++    }
++
++    // Hard close a peer. Run the normal close for cleanup, then destroy the socket since a graceful
++    // close can't complete on a half-open connection with a full send buffer.
++    function hardClosePeer(peer) {
++        const ws = peer.ws;
++        try { peer.close(); } catch (ex) { }
++        try { if ((ws != null) && (ws._socket != null)) { ws._socket.destroy(); } } catch (ex) { }
++    }
++
++    // Clear all display state so a replacement agent can start a new display stream.
++    function resetDisplayState() {
++        obj.width = 0;
++        obj.height = 0;
++        obj.swidth = 0;
++        obj.sheight = 0;
++        obj.screen = null;
++        obj.imagesCount = 0;
++        obj.imagesCounters = {};
++        obj.images = {};
++        obj.lastScreenSizeCmd = null;
++        obj.lastScreenSizeCounter = 0;
++        obj.firstData = null;
++        obj.lastData = null;
++        obj.lastAudioMessage = null; // A replacement agent tunnel advertises audio again once it is consented
++        obj.viewersOverflowCount = 0;
++        for (var i in obj.viewers) {
++            const v = obj.viewers[i];
++            v.overflow = false;
++            v.dataPtr = null;
++            if (v.paused == true) { v.paused = false; try { v.ws._socket.resume(); } catch (ex) { } }
++        }
++    }
++
++    // Watchdog: hard close a hung agent, keep idle agents answering and close sessions where one side never arrived.
++    function sessionWatchdog() {
++        if (obj.viewers == null) return;
++        const now = Date.now();
++        const agent = obj.agent;
++
++        // An agent write that has not completed in 15 seconds means the tunnel is hung or half-open.
++        if ((agent != null) && (agent.sending == true) && ((now - agent.sendStart) > 15000)) {
++            parent.parent.debug('relay', 'DesktopRelay: Agent write stalled for ' + (now - agent.sendStart) + 'ms, hard closing agent node=' + obj.nodeid);
++            hardClosePeer(agent);
++            return;
++        }
++
++        // Ping a quiet agent so a healthy idle agent keeps answering and only a dead agent goes silent.
++        if ((agent != null) && (agent.sending == false) && (agent.paused == false) && ((now - obj.agentLastRx) > 10000) && ((obj.agentLastPing == null) || ((now - obj.agentLastPing) > 10000))) {
++            obj.agentLastPing = now;
++            obj.sendToAgent('{"ctrlChannel":"102938","type":"ping"}');
++        }
++
++        // Close the session if the agent or the viewers have been waiting alone for 60 seconds.
++        const alone = (((agent == null) && (obj.viewers.length > 0)) || ((agent != null) && (obj.viewers.length == 0)));
++        if (alone == false) { obj.aloneSince = null; }
++        else if (obj.aloneSince == null) { obj.aloneSince = now; }
++        else if ((now - obj.aloneSince) > 60000) {
++            parent.parent.debug('relay', 'DesktopRelay: ' + ((agent == null) ? 'Agent never connected' : 'No viewers') + ', closing session node=' + obj.nodeid);
++            if (agent != null) { agent.close(); } else { for (const viewer of obj.viewers.slice()) { viewer.close(); } }
++            return;
++        }
++
++        // A multiplexor with no peers at all is no longer needed.
++        if ((agent == null) && (obj.viewers.length == 0)) {
++            if (parent.desktoprelays[obj.nodeid] === obj) { delete parent.desktoprelays[obj.nodeid]; }
++            dispose();
++        }
++    }
++
+     // Send data to the agent or queue it up for sending
+     obj.sendToAgent = function (data) {
+         if ((obj.viewers == null) || (obj.agent == null)) return;
+@@ -376,29 +545,94 @@
+         if (obj.agent.sending) {
+             obj.agent.sendQueue.push(data);
+ 
+-            // Flow control, pause all viewers is the queue is backing up
+-            if (obj.agent.sendQueue > 10) {
++            // Flow control, pause all viewers if the queue is backing up.
++            if (obj.agent.sendQueue.length > 10) {
+                 obj.agent.overflow = true;
++                parent.parent.debug('relay', 'DesktopRelay: Pausing viewers, agent send backlog=' + obj.agent.sendQueue.length + ' node=' + obj.nodeid);
+                 for (var i in obj.viewers) {
+                     var v = obj.viewers[i];
+                     if (v.paused == false) { v.paused = true; v.ws._socket.pause(); }
+                 }
+             }
+         } else {
+-            obj.agent.ws.send(data, sendAgentNext);
++            const agent = obj.agent;
++            agent.sending = true;
++            agent.sendStart = Date.now();
++            agent.ws.send(data, function () { sendAgentNext(agent); });
++        }
++    }
++
++    // Recompute the single set of image settings the agent can stream from all active viewers.
++    obj.recomputeViewerImageSettings = function () {
++        if ((obj.viewers == null) || (obj.viewers.length == 0)) return;
++
++        var viewersimageType = null;
++        var viewersimageCompression = null;
++        var viewersimageScaling = null;
++        var viewersimageFrameRate = null;
++        for (var i in obj.viewers) {
++            if (viewersimageType == null) { viewersimageType = obj.viewers[i].imageType; } else if (obj.viewers[i].imageType != viewersimageType) { viewersimageType = 1; }; // Default to JPEG if viewers has different image formats
++            if ((viewersimageCompression == null) || (obj.viewers[i].imageCompression > viewersimageCompression)) { viewersimageCompression = obj.viewers[i].imageCompression; };
++            if ((viewersimageScaling == null) || (obj.viewers[i].imageScaling > viewersimageScaling)) { viewersimageScaling = obj.viewers[i].imageScaling; };
++            if ((viewersimageFrameRate == null) || (obj.viewers[i].imageFrameRate < viewersimageFrameRate)) { viewersimageFrameRate = obj.viewers[i].imageFrameRate; };
++        }
++        if ((obj.imageType != viewersimageType) || (obj.imageCompression != viewersimageCompression) || (obj.imageScaling != viewersimageScaling) || (obj.imageFrameRate != viewersimageFrameRate)) {
++            obj.imageType = viewersimageType;
++            obj.imageCompression = viewersimageCompression;
++            obj.imageScaling = viewersimageScaling;
++            obj.imageFrameRate = viewersimageFrameRate;
++            //console.log('Send-Agent-Compression', obj.imageType, obj.imageCompression, obj.imageScaling, obj.imageFrameRate);
++            sendAgentCompression();
++        }
++    }
++
++    // Send the current aggregate image settings to the agent
++    function sendAgentCompression() {
++        var cmd = Buffer.alloc(10);
++        cmd.writeUInt16BE(5, 0); // Command 5, compression
++        cmd.writeUInt16BE(10, 2); // Command size, 10 bytes long
++        cmd[4] = obj.imageType; // Image type: 1 = JPEG, 2 = PNG, 3 = TIFF, 4 = WebP
++        cmd[5] = obj.imageCompression; // Image compression level
++        cmd.writeUInt16BE(obj.imageScaling, 6); // Scaling level
++        cmd.writeUInt16BE(obj.imageFrameRate, 8); // Frame rate timer
++        obj.sendToAgent(cmd);
++    }
++
++    // Send the current aggregate desktop pause state to the agent
++    function sendAgentPause() {
++        var cmd = Buffer.alloc(5);
++        cmd.writeUInt16BE(8, 0); // Command 8, pause
++        cmd.writeUInt16BE(5, 2); // Command size, 5 bytes long
++        cmd[4] = (obj.desktopPaused == true) ? 1 : 0; // 0 = Unpause, 1 = Pause
++        obj.sendToAgent(cmd);
++    }
++
++    // The agent is paused only if all viewers are paused. Recompute after any viewer pause or membership change.
++    function updateAggregateDesktopPause() {
++        if ((obj.viewers == null) || (obj.viewers.length == 0)) return;
++        var viewersPaused = true;
++        for (var i in obj.viewers) { if (obj.viewers[i].desktopPaused == false) { viewersPaused = false; }; }
++        if (viewersPaused != obj.desktopPaused) {
++            obj.desktopPaused = viewersPaused;
++            //console.log('Send-Agent-' + ((viewersPaused == true) ? 'Pause' : 'UnPause'));
++            sendAgentPause();
+         }
+     }
+ 
+     // Send more data to the agent
+-    function sendAgentNext() {
+-        if ((obj.viewers == null) || (obj.agent == null)) return;
++    function sendAgentNext(agent) {
++        if ((obj.viewers == null) || (obj.agent == null) || (obj.agent !== agent)) return; // Ignore write completions from a replaced agent
+         if (obj.agent.sendQueue.length > 0) {
+             // Send from the pending send queue
+-            obj.agent.ws.send(obj.agent.sendQueue.shift(), sendAgentNext);
++            obj.agent.sendStart = Date.now();
++            obj.agent.ws.send(obj.agent.sendQueue.shift(), function () { sendAgentNext(agent); });
+         } else {
+             // Nothing to send
+             obj.agent.sending = false;
+ 
++            // The last viewer left while input was still queued: now it is delivered, close the agent.
++            if (obj.agent.closeWhenDrained === true) { obj.agent.close(); return; }
++
+             // Flow control, resume all viewers
+             if (obj.agent.overflow == true) {
+                 obj.agent.overflow = false;
+@@ -450,9 +684,18 @@
+ 
+     // Send data to the viewer or queue it up for sending
+     obj.sendToViewer = function (viewer, data) {
+-        if ((viewer == null) || (obj.viewers == null)) return;
++        if ((viewer == null) || (obj.viewers == null) || (viewer.sendQueue == null)) return;
+         //console.log('SendToViewer', data.length);
+         if (viewer.sending) {
++            if (viewer.sendQueue.length >= 1000) {
++                // This viewer is not draining its queue, drop it. Close later since callers may be iterating the viewers.
++                if (viewer.sendQueueClosing != true) {
++                    viewer.sendQueueClosing = true;
++                    parent.parent.debug('relay', 'DesktopRelay: Closing viewer, send backlog=' + viewer.sendQueue.length + ' node=' + obj.nodeid);
++                    setImmediate(function () { try { viewer.close(); } catch (ex) { } });
++                }
++                return;
++            }
+             viewer.sendQueue.push(data);
+         } else {
+             viewer.sending = true;
+@@ -467,23 +710,36 @@
+         }
+     }
+ 
++    // The producer follows the fastest remaining viewer. A backed up recording
++    // write queue also pauses the agent until the queue is drained.
++    function updateAgentFlowControl() {
++        if ((obj.viewers == null) || (obj.viewers.length == 0) || (obj.agent == null)) return;
++        if ((obj.viewersOverflowCount >= obj.viewers.length) || (obj.recordingFileWriting == true)) {
++            if (obj.agent.paused == false) { obj.agent.paused = true; obj.agent.ws._socket.pause(); }
++        } else if (obj.agent.paused == true) {
++            obj.agent.paused = false;
++            obj.agent.ws._socket.resume();
++            obj.agentLastRx = Date.now(); // The agent could not be heard while paused, restart the silence timer.
++        }
++    }
++
+     // Check if a viewer is in overflow situation
+     function checkViewerOverflow(viewer) {
+-        if ((viewer.overflow == true) || (obj.viewers == null)) return;
++        if ((viewer.overflow == true) || (obj.viewers == null) || (viewer.sendQueue == null)) return;
+         if ((viewer.sendQueue.length > 5) || ((viewer.dataPtr != null) && (viewer.dataPtr != obj.lastData))) {
+             viewer.overflow = true;
+             obj.viewersOverflowCount++;
+-            if ((obj.viewersOverflowCount >= obj.viewers.length) && obj.agent && (obj.agent.paused == false)) { obj.agent.paused = true; obj.agent.ws._socket.pause(); }
++            updateAgentFlowControl();
+         }
+     }
+ 
+     // Check if a viewer is in underflow situation
+     function checkViewerUnderflow(viewer) {
+-        if ((viewer.overflow == false) || (obj.viewers == null)) return;
++        if ((viewer.overflow == false) || (obj.viewers == null) || (viewer.sendQueue == null)) return;
+         if ((viewer.sendQueue.length <= 5) && ((viewer.dataPtr == null) || (viewer.dataPtr == obj.lastData))) {
+             viewer.overflow = false;
+             obj.viewersOverflowCount--;
+-            if ((obj.viewersOverflowCount < obj.viewers.length) && (obj.recordingFileWriting == false) && obj.agent && (obj.agent.paused == true)) { obj.agent.paused = false; obj.agent.ws._socket.resume(); }
++            updateAgentFlowControl();
+         }
+     }
+ 
+@@ -504,6 +760,7 @@
+                 // Send the next image
+                 //if ((viewer.lastImageNumberSent != null) && ((viewer.lastImageNumberSent + 1) != (viewer.dataPtr))) { console.log('SVIEW-S1', viewer.lastImageNumberSent, viewer.dataPtr); } // DEBUG
+                 var image = obj.images[viewer.dataPtr];
++                if (image == null) { viewer.dataPtr = null; viewer.sending = false; checkViewerUnderflow(viewer); return; } // Image is gone, wait for new data.
+                 viewer.lastImageNumberSent = viewer.dataPtr;
+                 //if ((image.next != null) && ((viewer.dataPtr + 1) != image.next)) { console.log('SVIEW-S2', viewer.dataPtr, image.next); } // DEBUG
+                 viewer.dataPtr = image.next;
+@@ -530,13 +787,9 @@
+     obj.processData = function (peer, data) {
+         if (obj.viewers == null) return;
+         if (peer == obj.agent) {
+-            obj.recordingFileWriting = true;
+-            recordData(true, data, function () {
+-                if (obj.viewers == null) return;
+-                obj.recordingFileWriting = false;
+-                if ((obj.viewersOverflowCount < obj.viewers.length) && obj.agent && (obj.agent.paused == true)) { obj.agent.paused = false; obj.agent.ws._socket.resume(); }
+-                obj.processAgentData(data);
+-            });
++            obj.agentLastRx = Date.now();
++            recordData(true, data); // Queued in order, the agent is paused if the recording queue backs up
++            obj.processAgentData(data);
+         } else {
+             obj.processViewerData(peer, data);
+         }
+@@ -578,7 +831,7 @@
+                 if (viewer.viewOnly == false) { obj.sendToAgent(data); }
+                 break;
+             case 2: // Mouse events, forward to agent
+-                if (viewer.viewOnly == false) { obj.sendToAgent(data); }
++                if (viewer.viewOnly == false) { if (obj.agent != null) { trackViewerMouse(viewer, data); } obj.sendToAgent(data); }
+                 break;
+             case 5: // Compression
+                 if (data.length < 10) return;
+@@ -587,39 +840,15 @@
+                 viewer.imageScaling = data.readUInt16BE(6);
+                 viewer.imageFrameRate = data.readUInt16BE(8);
+                 //console.log('Viewer-Compression', viewer.imageType, viewer.imageCompression, viewer.imageScaling, viewer.imageFrameRate);
+-                
+-                // See if this changes anything
+-                var viewersimageType = null;
+-                var viewersimageCompression = null;
+-                var viewersimageScaling = null;
+-                var viewersimageFrameRate = null;
+-                for (var i in obj.viewers) {
+-                    if (viewersimageType == null) { viewersimageType = obj.viewers[i].imageType; } else if (obj.viewers[i].imageType != viewersimageType) { viewersimageType = 1; }; // Default to JPEG if viewers has different image formats
+-                    if ((viewersimageCompression == null) || (obj.viewers[i].imageCompression > viewersimageCompression)) { viewersimageCompression = obj.viewers[i].imageCompression; };
+-                    if ((viewersimageScaling == null) || (obj.viewers[i].imageScaling > viewersimageScaling)) { viewersimageScaling = obj.viewers[i].imageScaling; };
+-                    if ((viewersimageFrameRate == null) || (obj.viewers[i].imageFrameRate < viewersimageFrameRate)) { viewersimageFrameRate = obj.viewers[i].imageFrameRate; };
+-                }
+-                if ((obj.imageCompression != viewersimageCompression) || (obj.imageScaling != viewersimageScaling) || (obj.imageFrameRate != viewersimageFrameRate)) {
+-                    // Update and send to agent new compression settings
+-                    obj.imageType = viewersimageType;
+-                    obj.imageCompression = viewersimageCompression;
+-                    obj.imageScaling = viewersimageScaling;
+-                    obj.imageFrameRate = viewersimageFrameRate
+-                    //console.log('Send-Agent-Compression', obj.imageType, obj.imageCompression, obj.imageScaling, obj.imageFrameRate);
+-                    var cmd = Buffer.alloc(10);
+-                    cmd.writeUInt16BE(5, 0); // Command 5, compression
+-                    cmd.writeUInt16BE(10, 2); // Command size, 10 bytes long
+-                    cmd[4] = obj.imageType; // Image type: 1 = JPEG, 2 = PNG, 3 = TIFF, 4 = WebP
+-                    cmd[5] = obj.imageCompression; // Image compression level
+-                    cmd.writeUInt16BE(obj.imageScaling, 6); // Scaling level
+-                    cmd.writeUInt16BE(obj.imageFrameRate, 8); // Frame rate timer
+-                    obj.sendToAgent(cmd);
+-                }
++                obj.recomputeViewerImageSettings();
+                 break;
+             case 6: // Refresh, handle this on the server
+                 //console.log('Viewer-Refresh');
++                // Replay the cache to this viewer, and also ask the live agent: a refresh is how a user repairs a
++                // stale or corrupted screen, which the server cache alone cannot fix.
+                 viewer.dataPtr = obj.firstData; // Start over
+                 if (viewer.sending == false) { sendViewerNext(viewer); }
++                if (obj.agent != null) { obj.sendToAgent(data); }
+                 break;
+             case 8: // Pause and unpause
+                 if (data.length != 5) break;
+@@ -627,14 +856,7 @@
+                 if (viewer.desktopPaused == (pause == 1)) break;
+                 viewer.desktopPaused = (pause == 1);
+                 //console.log('Viewer-' + ((pause == 1)?'Pause':'UnPause'));
+-                var viewersPaused = true;
+-                for (var i in obj.viewers) { if (obj.viewers[i].desktopPaused == false) { viewersPaused = false; }; }
+-                if (viewersPaused != obj.desktopPaused) {
+-                    obj.desktopPaused = viewersPaused;
+-                    //console.log('Send-Agent-' + ((viewersPaused == true) ? 'Pause' : 'UnPause'));
+-                    data[4] = (viewersPaused == true) ? 1 : 0;
+-                    obj.sendToAgent(data);
+-                }
++                updateAggregateDesktopPause();
+                 break;
+             case 10: // CTRL-ALT-DEL, forward to agent
+                 if (viewer.viewOnly == false) { obj.sendToAgent(data); }
+@@ -645,7 +867,7 @@
+             case 14: // Touch setup
+                 break;
+             case 82: // Request display information
+-                if (obj.lastDisplayLocationData != null) { obj.sendToAgent(obj.lastDisplayLocationData); }
++                if (obj.lastDisplayLocationData != null) { obj.sendToViewer(viewer, obj.lastDisplayLocationData); }
+                 break;
+             case 85: // Unicode Key Events, forward to agent
+                 if (viewer.viewOnly == false) { obj.sendToAgent(data); }
+@@ -670,6 +892,10 @@
+                     // This is a console message, store it and forward this to all viewers
+                     if (json.msg != null) { obj.lastConsoleMessage = data; } else { obj.lastConsoleMessage = null; }
+                     obj.sendToAllViewers(data);
++                } else if ((json.ctrlChannel == '102938') && (json.type == 'audio') && (json.state == 'available')) {
++                    // Desktop audio is offered once per consented agent desktop session; keep it for viewers that join later
++                    obj.lastAudioMessage = data;
++                    obj.sendToAllViewers(data);
+                 }
+                 // All other control messages (notably WebRTC), are ignored for now.
+             }
+@@ -697,23 +923,30 @@
+             case 3: // Tile, check dimentions and store
+                 if ((data.length < 10) || (obj.lastData == null)) break;
+                 var x = data.readUInt16BE(4), y = data.readUInt16BE(6);
+-                var dimensions = require('image-size').imageSize(data.slice(8));
++                var dimensions = null;
++                try { dimensions = require('image-size').imageSize(data.slice(8)); } catch (ex) { }
++                if ((dimensions == null) || (typeof dimensions.width != 'number') || (typeof dimensions.height != 'number')) { parent.parent.debug('relay', 'DesktopRelay: Dropping unreadable tile node=' + obj.nodeid); break; }
+                 var sx = (x / 16), sy = (y / 16), sw = (dimensions.width / 16), sh = (dimensions.height / 16);
++
++                // Count only the tile slots that are inside the screen, slots past the edge would wrap to the next row.
++                var slotCount = 0;
++                for (var i = 0; (i < sw) && ((i + sx) < obj.swidth); i++) { for (var j = 0; (j < sh) && ((j + sy) < obj.sheight); j++) { slotCount++; } }
++                if (slotCount == 0) break; // This tile is entirely outside the screen
+                 obj.counter++;
+-                
++
+                 // Keep a reference to this image & how many tiles it covers
+                 obj.images[obj.counter] = { next: null, prev: obj.lastData, data: jumboData };
+                 obj.images[obj.lastData].next = obj.counter;
+                 obj.lastData = obj.counter;
+-                obj.imagesCounters[obj.counter] = (sw * sh);
++                obj.imagesCounters[obj.counter] = slotCount;
+                 obj.imagesCount++;
+                 if (obj.imagesCount == 2000000000) { obj.imagesCount = 1; } // Loop the counter if needed
+ 
+                 //console.log('Adding Image ' + obj.counter, x, y, dimensions.width, dimensions.height);
+ 
+                 // Update the screen with the correct pointers.
+-                for (var i = 0; i < sw; i++) {
+-                    for (var j = 0; j < sh; j++) {
++                for (var i = 0; (i < sw) && ((i + sx) < obj.swidth); i++) { // Skip slots outside the screen
++                    for (var j = 0; (j < sh) && ((j + sy) < obj.sheight); j++) {
+                         var k = ((obj.swidth * (j + sy)) + (i + sx));
+                         const oi = obj.screen[k];
+                         obj.screen[k] = obj.counter;
+@@ -750,12 +983,14 @@
+                 break;
+             case 7: // Screen Size, clear the screen state and compute the tile count
+                 if (data.length < 8) break;
+-                if ((obj.width === data.readUInt16BE(4)) && (obj.height === data.readUInt16BE(6))) break; // Same screen size as before, skip this.
++                var width = data.readUInt16BE(4), height = data.readUInt16BE(6);
++                var sameSize = ((obj.width === width) && (obj.height === height));
++                parent.parent.debug('relay', 'DesktopRelay: Reanchoring screen packet ' + width + 'x' + height + ' sameSize=' + sameSize + ' viewers=' + obj.viewers.length + ' node=' + obj.nodeid);
+                 obj.counter++;
+                 obj.lastScreenSizeCmd = data;
+                 obj.lastScreenSizeCounter = obj.counter;
+-                obj.width = data.readUInt16BE(4);
+-                obj.height = data.readUInt16BE(6);
++                obj.width = width;
++                obj.height = height;
+                 obj.swidth = obj.width / 16;
+                 obj.sheight = obj.height / 16;
+                 if (Math.floor(obj.swidth) != obj.swidth) { obj.swidth = Math.floor(obj.swidth) + 1; }
+@@ -846,11 +1081,14 @@
+                 func(false);
+                 return;
+             }
++            // The session was disposed while the file was opening, don't leave an open descriptor behind.
++            if (obj.viewers == null) { try { parent.parent.fs.close(fd); } catch (ex) { } func(false); return; }
+             // Write the recording file header
+             parent.parent.debug('relay', 'Relay: Started recording to file: ' + recFullFilename);
+             var metadata = { magic: 'MeshCentralRelaySession', ver: 1, nodeid: obj.nodeid, meshid: obj.meshid, time: new Date().toLocaleString(), protocol: 2, devicename: obj.name, devicegroup: obj.meshname };
+             var firstBlock = JSON.stringify(metadata);
+             recordingEntry(fd, 1, 0, firstBlock, function () {
++                if (obj.viewers == null) { try { parent.parent.fs.close(fd); } catch (ex) { } func(false); return; } // Session ended during the header write
+                 obj.recordingFile = { fd: fd, filename: recFullFilename };
+                 obj.recordingFileWriting = false;
+                 func(true);
+@@ -881,18 +1119,21 @@
+     }
+ 
+     // Record data to the recording file
+-    function recordData(isAgent, data, func) {
++    function recordData(isAgent, data) {
+         try {
+             if (obj.recordingFile != null) {
+-                // Write data to recording file
+-                recordingEntry(obj.recordingFile.fd, 2, (isAgent ? 0 : 2), data, function () { func(data); });
+-            } else {
+-                func(data);
++                // Queue data for the recording file
++                recordingEntry(obj.recordingFile.fd, 2, (isAgent ? 0 : 2), data, null);
++
++                // Flow control, pause the agent if the recording file can't keep up
++                if (obj.recordingQueue.length > 64) { obj.recordingFileWriting = true; updateAgentFlowControl(); }
+             }
++            // A drained (or absent) recording queue never holds the agent paused.
++            if ((obj.recordingFileWriting == true) && (obj.recordingQueue.length == 0)) { obj.recordingFileWriting = false; updateAgentFlowControl(); }
+         } catch (ex) { console.log(ex); }
+     }
+ 
+-    // Record a new entry in a recording log
++    // Record a new entry in a recording log. Entries are queued and written one at a time to keep them in order.
+     function recordingEntry(fd, type, flags, data, func, tag) {
+         try {
+             if (typeof data == 'string') {
+@@ -903,7 +1144,7 @@
+                 header.writeInt32BE(blockData.length, 4); // Size
+                 header.writeIntBE(new Date(), 10, 6); // Time
+                 var block = Buffer.concat([header, blockData]);
+-                parent.parent.fs.write(fd, block, 0, block.length, function () { func(fd, tag); });
++                obj.recordingQueue.push({ fd: fd, block: block, offset: 0, func: func, tag: tag });
+                 obj.recordingFileSize += block.length;
+             } else {
+                 // Binary write
+@@ -913,10 +1154,39 @@
+                 header.writeInt32BE(data.length, 4); // Size
+                 header.writeIntBE(new Date(), 10, 6); // Time
+                 var block = Buffer.concat([header, data]);
+-                parent.parent.fs.write(fd, block, 0, block.length, function () { func(fd, tag); });
++                obj.recordingQueue.push({ fd: fd, block: block, offset: 0, func: func, tag: tag });
+                 obj.recordingFileSize += block.length;
+             }
+-        } catch (ex) { console.log(ex); func(fd, tag); }
++        } catch (ex) { console.log(ex); if (func) { func(fd, tag); } return; }
++        writeNextRecordingEntry();
++    }
++
++    // Write the next queued recording entry, only one write is in flight at any time.
++    function writeNextRecordingEntry() {
++        if ((obj.recordingEntryWriting == true) || (obj.recordingQueue.length == 0)) return;
++        obj.recordingEntryWriting = true;
++        const entry = obj.recordingQueue[0];
++        try {
++            parent.parent.fs.write(entry.fd, entry.block, entry.offset, entry.block.length - entry.offset, onRecordingEntryWritten);
++        } catch (ex) {
++            console.log(ex);
++            onRecordingEntryWritten(ex, 0);
++        }
++        function onRecordingEntryWritten(err, written) {
++            obj.recordingEntryWriting = false;
++            if ((err == null) && (typeof written == 'number') && (written > 0) && ((entry.offset + written) < entry.block.length)) {
++                // Partial write, write the rest of this entry
++                entry.offset += written;
++            } else {
++                if (err != null) { parent.parent.debug('relay', 'DesktopRelay: Recording write error: ' + err); }
++                obj.recordingQueue.shift();
++                if (entry.func) { entry.func(entry.fd, entry.tag); }
++
++                // Flow control, resume the agent once the recording queue is drained
++                if ((obj.recordingFileWriting == true) && (obj.recordingQueue.length == 0)) { obj.recordingFileWriting = false; updateAgentFlowControl(); }
++            }
++            writeNextRecordingEntry();
++        }
+     }
+ 
+     // If there is a recording quota, remove any old recordings if needed
+@@ -962,6 +1232,8 @@
+         obj.meshid = nodes[0].meshid;
+         obj.icon = nodes[0].icon;
+         obj.name = nodes[0].name;
++        obj.watchdogTimer = setInterval(sessionWatchdog, 5000);
++        if (typeof obj.watchdogTimer.unref == 'function') { obj.watchdogTimer.unref(); } // The watchdog alone must not keep the process alive
+         recordingSetup(domain, function () { func(obj); });
+     });
+     return obj;
+@@ -1093,7 +1365,8 @@
+         if ((arg == 1) || (arg == null)) { try { ws.close(); parent.parent.debug('relay', 'DesktopRelay: Soft disconnect (' + obj.req.clientIp + ')'); } catch (e) { console.log(e); } } // Soft close, close the websocket
+         if (arg == 2) { try { ws._socket._parent.end(); parent.parent.debug('relay', 'DesktopRelay: Hard disconnect (' + obj.req.clientIp + ')'); } catch (e) { console.log(e); } } // Hard close, close the TCP socket
+         if (obj.relaySessionCounted) { parent.relaySessionCount--; delete obj.relaySessionCounted; }
+-        if ((obj.deskMultiplexor != null) && (typeof obj.deskMultiplexor == 'object') && (obj.deskMultiplexor.removePeer(obj) == true)) { delete parent.desktoprelays[obj.nodeid]; }
++        // Only remove the table entry if it is still ours, a newer multiplexor for this node must survive.
++        if ((obj.deskMultiplexor != null) && (typeof obj.deskMultiplexor == 'object') && (obj.deskMultiplexor.removePeer(obj) == true) && (parent.desktoprelays[obj.nodeid] === obj.deskMultiplexor)) { delete parent.desktoprelays[obj.nodeid]; }
+ 
+         // Aggressive cleanup
+         delete obj.id;
+@@ -1102,6 +1375,7 @@
+         delete obj.user;
+         delete obj.nodeid;
+         delete obj.ruserid;
++        if (obj.expireTimer != null) { clearTimeout(obj.expireTimer); } // Don't leave the cookie expire timer holding this object alive
+         delete obj.expireTimer;
+         delete obj.deskMultiplexor;
+ 
+@@ -1181,7 +1455,11 @@
+     }
+ 
+     function performRelay(retryCount) {
+-        if ((obj.id == null) || (retryCount > 20)) { try { obj.close(); } catch (e) { } return null; } // Attempt to connect without id, drop this.
++        if ((obj.id == null) || (retryCount > 200)) { // Attempt to connect without id, or the multiplexor was not created within 10 seconds, drop this.
++            // A creation that never completed must not block this node forever, let the next connection try again.
++            if ((retryCount > 200) && (parent.desktoprelays[obj.nodeid] === 1)) { parent.parent.debug('relay', 'DesktopRelay: Releasing stale pending multiplexor for node ' + obj.nodeid); delete parent.desktoprelays[obj.nodeid]; }
++            try { obj.close(); } catch (e) { } return null;
++        }
+         if (retryCount == 0) { ws._socket.setKeepAlive(true, 240000); } // Set TCP keep alive
+ 
+         /*
+@@ -1208,18 +1486,32 @@
+         // Create if needed and add this peer to the desktop multiplexor
+         obj.deskMultiplexor = parent.desktoprelays[obj.nodeid];
+         if (obj.deskMultiplexor == null) {
+-            parent.desktoprelays[obj.nodeid] = 1; // Indicate that the creating of the desktop multiplexor is pending.
++            const relayNodeId = obj.nodeid;
++            parent.desktoprelays[relayNodeId] = 1; // Indicate that the creating of the desktop multiplexor is pending.
+             parent.parent.debug('relay', 'DesktopRelay: Creating new desktop multiplexor');
+-            CreateDesktopMultiplexor(parent, domain, obj.nodeid, obj.id, function (deskMultiplexor) {
++            CreateDesktopMultiplexor(parent, domain, relayNodeId, obj.id, function (deskMultiplexor) {
+                 if (deskMultiplexor != null) {
++                    if (parent.desktoprelays[relayNodeId] !== 1) {
++                        // Creation took so long that the pending marker was released, this node may already have a newer multiplexor. Don't replace it.
++                        parent.parent.debug('relay', 'DesktopRelay: Discarding late desktop multiplexor for node ' + relayNodeId);
++                        deskMultiplexor.disposeIfEmpty();
++                        obj.close();
++                        return;
++                    }
++
+                     // Desktop multiplexor was created, use it.
+                     obj.deskMultiplexor = deskMultiplexor;
+-                    parent.desktoprelays[obj.nodeid] = obj.deskMultiplexor;
+-                    obj.deskMultiplexor.addPeer(obj);
++                    parent.desktoprelays[relayNodeId] = deskMultiplexor;
++                    const added = deskMultiplexor.addPeer(obj);
++
++                    // If this peer closed while the multiplexor was being created, don't leave an empty multiplexor behind.
++                    if (deskMultiplexor.disposeIfEmpty() == true) { if (parent.desktoprelays[relayNodeId] === deskMultiplexor) { delete parent.desktoprelays[relayNodeId]; } }
++                    if (added === false) { obj.close(); return; }
++                    if (obj.ws == null) return; // This peer was closed
+                     ws._socket.resume(); // Release the traffic
+                 } else {
+                     // An error has occured, close this connection
+-                    delete parent.desktoprelays[obj.nodeid];
++                    delete parent.desktoprelays[relayNodeId];
+                     ws.close();
+                 }
+             });
+@@ -1229,7 +1521,7 @@
+                 setTimeout(function () { performRelay(++retryCount); }, 50);
+             } else {
+                 // Hook up this peer to the multiplexor and release the traffic
+-                obj.deskMultiplexor.addPeer(obj);
++                if (obj.deskMultiplexor.addPeer(obj) === false) { obj.close(); return; }
+                 ws._socket.resume();
+             }
+         }
+@@ -1243,15 +1535,15 @@
+         this._socket.bytesReadEx = this._socket.bytesRead;
+         this._socket.bytesWrittenEx = this._socket.bytesWritten;
+ 
+-        // If this data was received by the agent, decode it.
+-        if (this.me.deskMultiplexor != null) { this.me.deskMultiplexor.processData(this.me, data); }
++        // If this data was received by the agent, decode it. While creation is pending, deskMultiplexor is the number 1, not a multiplexor.
++        if ((this.me.deskMultiplexor != null) && (typeof this.me.deskMultiplexor == 'object')) { this.me.deskMultiplexor.processData(this.me, data); }
+     });
+ 
+     // If error, close both sides of the relay.
+     ws.on('error', function (err) {
+         //console.log('ws-error', err);
+         parent.relaySessionErrorCount++;
+-        console.log('Relay error from ' + obj.req.clientIp + ', ' + err.toString().split('\r')[0] + '.');
++        console.log('Relay error from ' + ((obj.req != null) ? obj.req.clientIp : 'closed relay') + ', ' + err.toString().split('\r')[0] + '.');
+         obj.close();
+     });
+ 

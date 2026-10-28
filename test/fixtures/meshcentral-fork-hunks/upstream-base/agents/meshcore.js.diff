@@ -1,0 +1,1544 @@
+--- a/agents/meshcore.js
++++ b/agents/meshcore.js
+@@ -1,3 +1,29 @@
++// Windows Files actions execute inside the native agent; never a command shell.
++function nativeFileAction(socket, cmd) {
++    var request = socket.httprequest || {}, rights = request.rights;
++    var result = { ok: false, error: 'Access denied.' };
++    var deleting = cmd.action == 'delete';
++    if (typeof rights == 'number' && (rights == 0xFFFFFFFF ||
++        ((rights & 8) != 0 && (rights & 1024) == 0 && (deleting || (rights & 131072) != 0)))) {
++        if (process.platform != 'win32') { result.error = 'Native Windows file actions are unavailable.'; }
++        else if (typeof cmd.path != 'string' || cmd.path.length == 0 ||
++            (cmd.action == 'execute' && typeof cmd.privileged != 'boolean')) { result.error = 'Invalid file action.'; }
++        else {
++            try {
++                var agent = require('MeshAgent');
++                if (typeof agent.fileAction != 'function') { result.error = 'Update the agent to enable native file actions.'; }
++                else { result = agent.fileAction(cmd.action, cmd.path, deleting ? cmd.rec === true : cmd.action == 'execute' && cmd.privileged === true); }
++            } catch (ex) { result = { ok: false, error: String(ex) }; }
++        }
++    }
++    result.action = 'fileaction'; result.operation = cmd.action; result.reqid = cmd.reqid;
++    try { socket.write(Buffer.from(JSON.stringify(result))); } catch (ex) { }
++    var message = 'Native file ' + cmd.action + ': ' + cmd.path + ' ' + JSON.stringify(result);
++    try { sendConsoleText(message, request.sessionid); } catch (ex) { }
++    if (typeof MeshServerLogEx == 'function') { MeshServerLogEx(20, [cmd.path], message, request); }
++    return result;
++}
++
+ /*
+ Copyright 2018-2022 Intel Corporation
+ 
+@@ -14,8 +40,29 @@
+ limitations under the License.
+ */
+ 
++function formatUncaughtException(ex) {
++    try {
++        if (ex != null && ex.stack != null) { return ('' + ex.stack); }
++        return ('' + ex);
++    } catch (formatEx) {
++        return 'unprintable uncaught exception';
++    }
++}
++function sendMeshCoreConsole(text, sessionid) {
++    try {
++        var agent = require('MeshAgent');
++        if (agent != null && typeof(agent.SendCommand) == 'function') {
++            var msg = { action: 'msg', type: 'console', value: text };
++            if (sessionid != null) { msg.sessionid = sessionid; }
++            agent.SendCommand(msg);
++            return true;
++        }
++    } catch (sendEx) { }
++    try { console.error(text); } catch (consoleEx) { }
++    return false;
++}
+ process.on('uncaughtException', function (ex) {
+-    require('MeshAgent').SendCommand({ action: 'msg', type: 'console', value: "uncaughtException1: " + ex });
++    sendMeshCoreConsole('uncaughtException1: ' + formatUncaughtException(ex));
+ });
+ if (process.platform == 'win32' && require('user-sessions').getDomain == null) {
+     require('user-sessions').getDomain = function getDomain(uid) {
+@@ -46,7 +93,13 @@
+ var MESHRIGHT_NODESKTOP = 65536;
+ var MESHRIGHT_ADMIN = 0xFFFFFFFF;
+ 
+-var pendingSetClip = false; // This is a temporary hack to prevent multiple setclips at the same time to stop the agent from crashing.
++// Desktop audio rides on a consented remote desktop session as tunnel protocol 20. The constant is the
++// operator-level kill switch for this served core: false means the agent never advertises audio on a
++// desktop tunnel and refuses protocol 20 with state "unavailable". Per-device, the agent datastore key
++// 'desktopAudio' set to '0' disables it (checked by the desktop-audio module).
++var DESKTOP_AUDIO_ENABLED = true;
++var DESKTOP_AUDIO_PROTOCOL = 20;
++
+ 
+ //
+ // This is a helper function used by the 32 bit Windows Agent, when running on 64 bit windows. It will check if the agent is already patched for this
+@@ -316,6 +369,9 @@
+     setDefaultCoreTranslation(ret, 'fileNotify', '{0} started a remote file session.');
+     setDefaultCoreTranslation(ret, 'registryNotify', '{0} started a remote registry session.');
+     setDefaultCoreTranslation(ret, 'privacyBar', 'Sharing desktop with: {0}');
++    setDefaultCoreTranslation(ret, 'desktopAudioNotify', '{0} started listening to this computer\'s audio.');
++    setDefaultCoreTranslation(ret, 'desktopAudioNotifyEnd', '{0} stopped listening to this computer\'s audio.');
++    setDefaultCoreTranslation(ret, 'privacyBarAudio', 'audio on');
+ 
+     return (ret);
+ }
+@@ -1284,7 +1340,7 @@
+     if ((tunnel_checkServerIdentity.servertlshash != null) && (tunnel_checkServerIdentity.servertlshash.toLowerCase() != certs[0].digest.split(':').join('').toLowerCase())) { throw new Error('BadCert') }
+ }
+ 
+-function tunnel_onError()
++function tunnel_onError(e)
+ {
+     sendConsoleText("ERROR: Unable to connect relay tunnel to: " + this.url + ", " + JSON.stringify(e));
+ }
+@@ -1392,7 +1448,7 @@
+ 
+                                     // Log tunnel disconnection
+                                     var xusername = data.xuserid.split('/')[2];
+-                                    if (data.guestname != null) { xusername += '/' + guestname; }
++                                    if (data.guestname != null) { xusername += '/' + data.guestname; }
+                                     MeshServerLogEx(msgid, [xusername], "Forcibly disconnected session of user: " + xusername, data);
+                                 }
+                             }
+@@ -1440,9 +1496,11 @@
+                     case 'ps': {
+                         // Return the list of running processes
+                         if (data.sessionid) {
+-                            processManager.getProcesses(function (plist) {
++                            try { processManager.getProcesses(function (plist) {
+                                 mesh.SendCommand({ action: 'msg', type: 'ps', value: JSON.stringify(plist), sessionid: data.sessionid });
+-                            });
++                            }); } catch (error) {
++                                mesh.SendCommand({ action: 'msg', type: 'ps', value: '{}', error: error.toString(), sessionid: data.sessionid });
++                            }
+                         }
+                         break;
+                     }
+@@ -1493,8 +1551,9 @@
+                     }
+                     case 'service': {
+                         // return information about the service
++                        var service = null;
+                         try {
+-                            var service = require('service-manager').manager.getService(data.serviceName);
++                            service = require('service-manager').manager.getService(data.serviceName);
+                             if (service != null) {
+                                 var reply = {
+                                     name: (service.name ? service.name : ''),
+@@ -1505,31 +1564,24 @@
+                                     installedBy: (service.installedBy ? service.installedBy : '') ,
+                                     user: (service.user ? service.user : '')
+                                 };
+-                                if(reply.installedBy.indexOf('S-1-5') != -1) {
+-                                    var cmd = "(Get-WmiObject -Class win32_userAccount -Filter \"SID='"+service.installedBy+"'\").Caption";
+-                                    var replydata = "";
+-                                    var pws = require('child_process').execFile(process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['powershell', '-noprofile', '-nologo', '-command', '-'], {});
+-                                    pws.descriptorMetadata = 'UserSIDPowerShell';
+-                                    pws.stdout.on('data', function (c) { replydata += c.toString(); });
+-                                    pws.stderr.on('data', function (c) { replydata += c.toString(); });
+-                                    pws.stdin.write(cmd + '\r\nexit\r\n');
+-                                    pws.on('exit', function () { 
+-                                        if (replydata != "") reply.installedBy = replydata;
+-                                        mesh.SendCommand({ action: 'msg', type: 'service', value: JSON.stringify(reply), sessionid: data.sessionid });
+-                                        delete pws;
+-                                    });
+-                                } else {
+-                                    mesh.SendCommand({ action: 'msg', type: 'service', value: JSON.stringify(reply), sessionid: data.sessionid });
++                                if (reply.installedBy.indexOf('S-1-') == 0) {
++                                    try { reply.installedBy = require('user-sessions').getAccountName(reply.installedBy); } catch (lookupError) { } // Keep the authoritative SID if the account was removed.
+                                 }
++                                mesh.SendCommand({ action: 'msg', type: 'service', value: JSON.stringify(reply), sessionid: data.sessionid });
+                             }
+                         } catch (ex) { 
+-                            mesh.SendCommand({ action: 'msg', type: 'service', error: ex, sessionid: data.sessionid })
++                            mesh.SendCommand({ action: 'msg', type: 'service', error: ex.toString(), sessionid: data.sessionid });
++                        } finally {
++                            if (service != null && typeof service.close == 'function') { service.close(); }
+                         }
++                        break;
+                     }
+                     case 'services': {
+                         // Return the list of installed services
+                         var services = null;
+-                        try { services = require('service-manager').manager.enumerateService(); } catch (ex) { }
++                        try { services = require('service-manager').manager.enumerateService(); } catch (ex) {
++                            mesh.SendCommand({ action: 'msg', type: 'services', value: '[]', error: ex.toString(), sessionid: data.sessionid });
++                        }
+                         if (services != null) { mesh.SendCommand({ action: 'msg', type: 'services', value: JSON.stringify(services), sessionid: data.sessionid }); }
+                         break;
+                     }
+@@ -1602,66 +1654,35 @@
+                         break;
+                     }
+                     case 'getclip': {
+-                        // Send the load clipboard back to the user
+-                        //sendConsoleText('getClip: ' + JSON.stringify(data));
+-                        if (require('MeshAgent').isService) {
+-                            require('clipboard').dispatchRead().then(function (str) {
+-                                if (str) {
+-                                    if (data.tag != 3) { MeshServerLogEx(21, [str.length], "Getting clipboard content, " + str.length + " byte(s)", data); }
+-                                    mesh.SendCommand({ action: 'msg', type: 'getclip', sessionid: data.sessionid, data: str, tag: data.tag });
+-                                }
+-                            });
+-                        } else {
+-                            require('clipboard').read().then(function (str) {
+-                                if (str) {
+-                                    if (data.tag != 3) { MeshServerLogEx(21, [str.length], "Getting clipboard content, " + str.length + " byte(s)", data); }
+-                                    mesh.SendCommand({ action: 'msg', type: 'getclip', sessionid: data.sessionid, data: str, tag: data.tag });
+-                                }
+-                            });
+-                        }
++                        // Viewers have no getclip failure reply: one without data shows or copies
++                        // "undefined". Failures stay silent, as upstream. Clipboard pulls (tag 2) and
++                        // auto-sync (tag 3) skip empty text, which non-text remote content also yields,
++                        // so they never wipe the operator's clipboard; the dialog (tag 1) shows it.
++                        var clipboardReadDeliver = function (str) {
++                            if ((typeof str != 'string') || ((str.length == 0) && ((data.tag == 2) || (data.tag == 3)))) { return; }
++                            if (data.tag != 3) { MeshServerLogEx(21, [str.length], "Getting clipboard content, " + str.length + " byte(s)", data); }
++                            mesh.SendCommand({ action: 'msg', type: 'getclip', sessionid: data.sessionid, data: str, tag: data.tag });
++                        };
++                        try {
++                            var clipboardRead = require('MeshAgent').isService ? require('clipboard').dispatchRead() : require('clipboard').read();
++                            clipboardRead.then(clipboardReadDeliver, function () { });
++                        } catch (error) { }
+                         break;
+                     }
+                     case 'setclip': {
+-                        if (pendingSetClip) return;
+-                        // Set the load clipboard to a user value
+-                        if (typeof data.data == 'string') {
++                        if (typeof data.data != 'string') { break; }
++                        var clipboardWriteSuccess = function () {
++                            mesh.SendCommand({ action: 'msg', type: 'setclip', sessionid: data.sessionid, tag: data.tag, success: true });
++                        };
++                        var clipboardWriteFailure = function (error) {
++                            mesh.SendCommand({ action: 'msg', type: 'setclip', sessionid: data.sessionid, tag: data.tag, success: false, error: '' + error });
++                        };
++                        try {
+                             MeshServerLogEx(22, [data.data.length], "Setting clipboard content, " + data.data.length + " byte(s)", data);
+-                            if (require('MeshAgent').isService) {
+-                                if (process.platform != 'win32') {
+-                                    require('clipboard').dispatchWrite(data.data);
+-                                    mesh.SendCommand({ action: 'msg', type: 'setclip', sessionid: data.sessionid, success: true });
+-                                }
+-                                else {
+-                                    var clipargs = data.data;
+-                                    var uid = require('user-sessions').consoleUid();
+-                                    var user = require('user-sessions').getUsername(uid);
+-                                    var domain = require('user-sessions').getDomain(uid);
+-                                    user = (domain + '\\' + user);
+-
+-                                    if (this._dispatcher) { this._dispatcher.close(); }
+-                                    this._dispatcher = require('win-dispatcher').dispatch({ user: user, modules: [{ name: 'clip-dispatch', script: "module.exports = { dispatch: function dispatch(val) { require('clipboard')(val); process.exit(); } };" }], launch: { module: 'clip-dispatch', method: 'dispatch', args: [clipargs] } });
+-                                    this._dispatcher.parent = this;
+-                                    //require('events').setFinalizerMetadata.call(this._dispatcher, 'clip-dispatch');
+-                                    pendingSetClip = true;
+-                                    this._dispatcher.on('connection', function (c) {
+-                                        this._c = c;
+-                                        this._c.root = this.parent;
+-                                        this._c.on('end', function ()
+-                                        {
+-                                            pendingSetClip = false;
+-                                            try { this.root._dispatcher.close(); } catch (ex) { }
+-                                            this.root._dispatcher = null;
+-                                            this.root = null;
+-                                            mesh.SendCommand({ action: 'msg', type: 'setclip', sessionid: data.sessionid, success: true });
+-                                        });
+-                                    });
+-                                }
+-                            }
+-                            else {
+-                                require('clipboard')(data.data);
+-                                mesh.SendCommand({ action: 'msg', type: 'setclip', sessionid: data.sessionid, success: true });
+-                            } // Set the clipboard
+-                        }
++                            var clipboardWrite = require('MeshAgent').isService ? require('clipboard').dispatchWrite(data.data) : require('clipboard')(data.data);
++                            if (clipboardWrite && typeof clipboardWrite.then == 'function') { clipboardWrite.then(clipboardWriteSuccess, clipboardWriteFailure); }
++                            else { clipboardWriteSuccess(); }
++                        } catch (error) { clipboardWriteFailure(error); }
+                         break;
+                     }
+                     case 'userSessions': {
+@@ -1914,51 +1935,154 @@
+                 break;
+             }
+             case 'runcommands': {
+-                if (mesh.cmdchild != null) { sendConsoleText("Run commands can't execute, already busy."); break; }
+-                if (!data.reply) sendConsoleText("Run commands (" + data.runAsUser + "): " + data.cmds);
++                function terminal_is_closed(term) {
++                    if (term == null) { return true; }
++                    if (term._meshTerminalClosed === true) { return true; }
++                    try { if (term.isBridgeClosed && term.isBridgeClosed()) { return true; } } catch (ex) { }
++                    return false;
++                }
++                function terminal_close_stream(term) {
++                    if (term == null) { return; }
++                    try { if (term.closeBridge) { term.closeBridge(); return; } } catch (ex) { }
++                    try { if (term.end) { term.end(); return; } } catch (ex2) { }
++                    try { if (term.kill) { term.kill(); } } catch (ex3) { }
++                }
++                function sendRunCommandResult(text) {
++                    if (data.reply) {
++                        mesh.SendCommand({ action: 'msg', type: 'runcommands', result: text, sessionid: data.sessionid, responseid: data.responseid });
++                    } else {
++                        if (text != null && text.length > 0) { sendConsoleText(text); }
++                    }
++                }
++                if (mesh.cmdchild != null) {
++                    if (terminal_is_closed(mesh.cmdchild)) {
++                        terminal_close_stream(mesh.cmdchild);
++                        delete mesh.cmdchild;
++                    } else {
++                        var busyReply = "Run commands can't execute, already busy.";
++                        if (data.reply) { sendRunCommandResult(busyReply); } else { sendConsoleText(busyReply); }
++                        break;
++                    }
++                }
++                var commandText = Array.isArray(data.cmds) ? data.cmds.join('\r\n') : ((data.cmds == null) ? '' : ('' + data.cmds));
++                if (!data.reply) sendConsoleText("Run commands (" + data.runAsUser + "): " + commandText);
+ 
+                 // data.runAsUser: 0=Agent,1=UserOrAgent,2=UserOnly
+                 var options = {};
++                var targetSessionId = null;
+                 if (data.runAsUser > 0) {
+-                    try { options.uid = require('user-sessions').consoleUid(); } catch (ex) { }
++                    try { targetSessionId = require('user-sessions').consoleUid(); } catch (ex) { }
++                    if ((typeof targetSessionId != 'number') || (targetSessionId < 0)) { targetSessionId = null; } else { options.uid = targetSessionId; }
+                     options.type = require('child_process').SpawnTypes.TERM;
+                 }
+                 if (data.runAsUser == 2) {
+-                    if (options.uid == null) break;
++                    if (targetSessionId == null) { sendRunCommandResult('Run commands user session is unavailable.'); break; }
+                     if (((require('user-sessions').minUid != null) && (options.uid < require('user-sessions').minUid()))) break; // This command can only run as user.
+                 }
+                 var replydata = "";
+                 if (process.platform == 'win32') {
+-                    if (data.type == 1) {
+-                        // Windows command shell
+-                        mesh.cmdchild = require('child_process').execFile(process.env['windir'] + '\\system32\\cmd.exe', ['cmd'], options);
+-                        mesh.cmdchild.descriptorMetadata = 'UserCommandsShell';
+-                        mesh.cmdchild.stdout.on('data', function (c) { replydata += c.toString(); sendConsoleText(c.toString()); });
+-                        mesh.cmdchild.stderr.on('data', function (c) { replydata += c.toString(); sendConsoleText(c.toString()); });
+-                        mesh.cmdchild.stdin.write(data.cmds + '\r\nexit\r\n');
+-                        mesh.cmdchild.on('exit', function () {
+-                            if (data.reply) {
+-                                mesh.SendCommand({ action: 'msg', type: 'runcommands', result: replydata, sessionid: data.sessionid, responseid: data.responseid });
+-                            } else {
+-                                sendConsoleText("Run commands completed.");
+-                            }
+-                            delete mesh.cmdchild;
+-                        });
+-                    } else if (data.type == 2) {
+-                        // Windows Powershell
+-                        mesh.cmdchild = require('child_process').execFile(process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['powershell', '-noprofile', '-nologo', '-command', '-'], options);
++                    var runCommandCompleted = false;
++                    var runCommandFailed = false;
++                    var runCommandInputSent = false;
++                    var runCommandTimer = null;
++                    var runCommandBridgeMarker = '\x1b]MeshConsoleBridgeReady\x07';
++                    var runCommandBridgeMarkerSeen = false;
++                    var runCommandBridgeBuffer = '';
++                    function getRunCommandBridgeState() {
++                        if (mesh.cmdchild == null) { return ' bridge=missing'; }
++                        return (' bridgeReady=' + (mesh.cmdchild._meshTerminalReady === true) +
++                            ' bridgeClosed=' + (mesh.cmdchild._meshTerminalClosed === true) +
++                            ' markerSeen=' + runCommandBridgeMarkerSeen +
++                            ' mode=' + mesh.cmdchild._meshTerminalMode +
++                            ' tokenMode=' + mesh.cmdchild._meshTerminalTokenMode +
++                            ' writes=' + mesh.cmdchild._meshTerminalWriteCount +
++                            ' lastWriteBytes=' + mesh.cmdchild._meshTerminalLastWriteBytes +
++                            ' outputChunks=' + mesh.cmdchild._meshTerminalOutputChunks +
++                            ' outputBytes=' + mesh.cmdchild._meshTerminalOutputBytes);
++                    }
++                    function completeRunCommand() {
++                        if (runCommandCompleted) { return; }
++                        runCommandCompleted = true;
++                        if (runCommandTimer != null) { try { clearTimeout(runCommandTimer); } catch (ex) { } runCommandTimer = null; }
++                        if (data.reply) {
++                            mesh.SendCommand({ action: 'msg', type: 'runcommands', result: replydata, sessionid: data.sessionid, responseid: data.responseid });
++                        } else {
++                            sendConsoleText(runCommandFailed ? "Run commands failed." : "Run commands completed.");
++                        }
++                        delete mesh.cmdchild;
++                    }
++                    function filterRunCommandBridgeMarker(text) {
++                        var markerIndex = -1;
++                        var filtered = '';
++                        // The ready-marker wrapper consumes the marker before forwarding output.
++                        // Only bypass raw-marker parsing after that wrapper has proved readiness.
++                        if (mesh.cmdchild != null && mesh.cmdchild._meshTerminalReadyMarkerProtocol === true && mesh.cmdchild._meshTerminalReady === true) { return text; }
++                        if (runCommandBridgeMarkerSeen) { return text; }
++                        runCommandBridgeBuffer += text;
++                        markerIndex = runCommandBridgeBuffer.indexOf(runCommandBridgeMarker);
++                        if (markerIndex < 0) { return ''; }
++                        runCommandBridgeMarkerSeen = true;
++                        filtered = runCommandBridgeBuffer.substring(0, markerIndex) + runCommandBridgeBuffer.substring(markerIndex + runCommandBridgeMarker.length);
++                        runCommandBridgeBuffer = '';
++                        sendRunCommandInput();
++                        return filtered;
++                    }
++                    function appendRunCommandOutput(c) {
++                        var text = '';
++                        try { text = c.toString(); } catch (ex) { text = '' + c; }
++                        text = filterRunCommandBridgeMarker(text);
++                        if (text.length == 0) { return; }
++                        replydata += text;
++                        if (!data.reply && text.length > 0) { sendConsoleText(text); }
++                    }
++                    function sendRunCommandInput() {
++                        var term = mesh.cmdchild;
++                        if (runCommandInputSent || runCommandCompleted || term == null) { return; }
++                        runCommandInputSent = true;
++                        try {
++                            term.writeBridgeInput(commandText + '\r\n', function () {
++                                try { if (term.closeInput) { term.closeInput(); } } catch (ex) { }
++                            });
++                        } catch (writeEx) {
++                            runCommandFailed = true;
++                            replydata += 'Windows run commands failed writing to MeshConsoleBridgeW: ' + writeEx.toString() + getRunCommandBridgeState();
++                            if (!data.reply) { sendConsoleText(replydata); }
++                            terminal_close_stream(term);
++                            completeRunCommand();
++                        }
++                    }
++                    function registerRunCommandInputOnBridgeReady(term) {
++                        if (term == null || term._meshTerminalReadyMarkerProtocol !== true) { return; }
++                        if (term.onBridgeReady) { term.onBridgeReady(sendRunCommandInput); return; }
++                        if (term.isBridgeReady && term.isBridgeReady()) { sendRunCommandInput(); }
++                    }
++                    try {
++                        // UserOrAgent falls back only when no WTS session was selected;
++                        // once a user token is selected, token failures remain fail-closed.
++                        var runMethod = (data.runAsUser > 0 && targetSessionId != null) ? 'RunPowerShellCommandAsUser' : 'RunPowerShellCommand';
++                        mesh.cmdchild = require('win-terminal')[runMethod](80, 25, targetSessionId);
+                         mesh.cmdchild.descriptorMetadata = 'UserCommandsPowerShell';
+-                        mesh.cmdchild.stdout.on('data', function (c) { replydata += c.toString(); sendConsoleText(c.toString()); });
+-                        mesh.cmdchild.stderr.on('data', function (c) { replydata += c.toString(); sendConsoleText(c.toString()); });
+-                        mesh.cmdchild.stdin.write(data.cmds + '\r\nexit\r\n');
+-                        mesh.cmdchild.on('exit', function () {
+-                            if (data.reply) {
+-                                mesh.SendCommand({ action: 'msg', type: 'runcommands', result: replydata, sessionid: data.sessionid, responseid: data.responseid });
+-                            } else {
+-                                sendConsoleText("Run commands completed.");
+-                            }
+-                            delete mesh.cmdchild;
++                        if (mesh.cmdchild.onBridgeData) { mesh.cmdchild.onBridgeData(appendRunCommandOutput); }
++                        else { mesh.cmdchild.on('data', appendRunCommandOutput); }
++                        mesh.cmdchild.on('error', function (error) {
++                            runCommandFailed = true;
++                            replydata += 'Windows run commands failed through MeshConsoleBridgeW: ' + error.toString() + getRunCommandBridgeState();
++                            if (!data.reply) { sendConsoleText(replydata); }
++                            completeRunCommand();
+                         });
++                        mesh.cmdchild.on('close', completeRunCommand);
++                        runCommandTimer = setTimeout(function () {
++                            runCommandFailed = true;
++                            replydata += 'Windows run commands timed out through MeshConsoleBridgeW.' + getRunCommandBridgeState();
++                            if (!data.reply) { sendConsoleText(replydata); }
++                            terminal_close_stream(mesh.cmdchild);
++                            completeRunCommand();
++                        }, 300000);
++                        registerRunCommandInputOnBridgeReady(mesh.cmdchild);
++                    } catch (ex) {
++                        replydata += 'Windows run commands failed before MeshConsoleBridgeW launch: ' + ex.toString();
++                        sendRunCommandResult(replydata);
++                        delete mesh.cmdchild;
+                     }
+                 } else if (data.type == 3) {
+                     // Linux shell
+@@ -2508,6 +2632,34 @@
+     }
+ }
+ 
++function closeFileUpload(request, removePartial) {
++    if (request == null) return true;
++    var uploadPath = request.uploadFilePath;
++    var closeOk = true;
++    if (request.uploadFile != null) {
++        try { fs.closeSync(request.uploadFile); } catch (ex) { closeOk = false; }
++    }
++    delete request.uploadFile;
++    delete request.uploadFileid;
++    delete request.uploadFilePath;
++    delete request.uploadFileSize;
++    if ((removePartial === true) && (uploadPath != null)) { try { fs.unlinkSync(uploadPath); } catch (ex) { } }
++    return closeOk;
++}
++
++function closeFileDownload(socket) {
++    if ((socket == null) || (socket.filedownload == null)) return;
++    if (socket.filedownload.f != null) { try { fs.closeSync(socket.filedownload.f); } catch (ex) { } }
++    delete socket.filedownload;
++}
++
++function closeBasicFileDownload(request, socket) {
++    if ((request == null) || (request.downloadFile == null)) return;
++    try { request.downloadFile.pause(); } catch (ex) { }
++    try { request.downloadFile.unpipe(socket); } catch (ex) { }
++    delete request.downloadFile;
++}
++
+ function onTunnelClosed()
+ {
+     if (this.httprequest._dispatcher != null && this.httprequest.term == null)
+@@ -2588,8 +2740,9 @@
+     */
+ 
+     // If there is a upload or download active on this connection, close the file
+-    if (this.httprequest.uploadFile) { fs.closeSync(this.httprequest.uploadFile); delete this.httprequest.uploadFile; delete this.httprequest.uploadFileid; delete this.httprequest.uploadFilePath; delete this.httprequest.uploadFileSize; }
+-    if (this.httprequest.downloadFile) { delete this.httprequest.downloadFile; }
++    closeFileUpload(this.httprequest, false);
++    closeFileDownload(this);
++    closeBasicFileDownload(this.httprequest, this);
+ 
+     // Clean up WebRTC
+     if (this.webrtc != null) {
+@@ -2763,6 +2916,14 @@
+         this.ws.httprequest._term = term;
+         this.ws.httprequest._term.tunnel = this.ws;
+         stdoutstream = stdinstream = term;
++        term.on('error', function (error) {
++            var tunnel = this.tunnel;
++            if (tunnel != null) {
++                tunnel.write(JSON.stringify({ ctrlChannel: '102938', type: 'console', msg: error.toString(), msgid: 2 }));
++                tunnel.end();
++            }
++        });
++        term.on('close', function () { if (this.tunnel != null) { this.tunnel.end(); } });
+     }
+     else
+     {
+@@ -2825,30 +2986,81 @@
+     } else { } // no websocket, maybe log some messages somewhere?
+ }
+ function promise_init(res, rej) { this._res = res; this._rej = rej; }
++function windows_add_js_module(moduleName)
++{
++    try
++    {
++        if (typeof addModule != 'function') { return; }
++        var script = getJSModule(moduleName);
++        if ((typeof script == 'string') && (script.length > 0)) { addModule(moduleName, script); }
++    }
++    catch (ex) { }
++}
++function windows_prepare_dispatcher_modules()
++{
++    if (process.platform != 'win32') { return; }
++    windows_add_js_module('win-system-paths');
++    windows_add_js_module('win-dispatcher');
++}
++function terminal_windows_prepare_modules()
++{
++    windows_add_js_module('win-system-paths');
++    windows_add_js_module('win-terminal');
++    windows_add_js_module('win-virtual-terminal');
++}
++function terminal_windows_active_user_session_id(users)
++{
++    var targetSessionId = terminal_windows_console_uid();
++    if (targetSessionId != null) { return targetSessionId; }
++    if ((users == null) || (users.Active == null) || (users.Active.length == 0)) { return null; }
++    if (users.Active[0].SessionId != null)
++    {
++        targetSessionId = parseInt(users.Active[0].SessionId);
++        if (!isNaN(targetSessionId) && targetSessionId >= 0) { return targetSessionId; }
++    }
++    return null;
++}
++function terminal_windows_start(protocol, cols, rows, targetSessionId)
++{
++    var method = ((protocol == 6) || (protocol == 9)) ? 'StartPowerShell' : 'Start';
++    terminal_windows_prepare_modules();
++    return require('win-terminal')[method](cols, rows, targetSessionId);
++}
++function terminal_windows_console_uid()
++{
++    try
++    {
++        var targetSessionId = require('user-sessions').consoleUid();
++        if ((typeof targetSessionId == 'number') && targetSessionId >= 0) { return targetSessionId; }
++    }
++    catch (ex) { }
++    return null;
++}
+ function terminal_userpromise_resolved(u)
+ {
+-
+     var that = this.that;
+-    if (u.Active.length > 0)
++    try
+     {
+-        var tmp;
+-        var username = '"' + u.Active[0].Domain + '\\' + u.Active[0].Username + '"';
+-
+-
+-        if (require('win-virtual-terminal').supported)
++        if (u.Active.length > 0)
+         {
+-            // ConPTY PseudoTerminal
+-            tmp = require('win-dispatcher').dispatch({ user: username, modules: [{ name: 'win-virtual-terminal', script: getJSModule('win-virtual-terminal') }], launch: { module: 'win-virtual-terminal', method: (that.httprequest.protocol == 9 ? 'StartPowerShell' : 'Start'), args: [this.cols, this.rows] } });
++            var targetSessionId = terminal_windows_active_user_session_id(u);
++            if (targetSessionId == null)
++            {
++                that.httprequest.connectionPromise._rej('Failed to start remote terminal session, no active user session ID found');
++            }
++            else
++            {
++                that.httprequest.connectionPromise._res(terminal_windows_start(that.httprequest.protocol, this.cols, this.rows, targetSessionId));
++            }
+         }
+         else
+         {
+-            // Legacy Terminal
+-            tmp = require('win-dispatcher').dispatch({ user: username, modules: [{ name: 'win-terminal', script: getJSModule('win-terminal') }], launch: { module: 'win-terminal', method: (that.httprequest.protocol == 9 ? 'StartPowerShell' : 'Start'), args: [this.cols, this.rows] } });
++            that.httprequest.connectionPromise._rej('Failed to start remote terminal session, no active user session found');
+         }
+-        that.httprequest._dispatcher = tmp;
+-        that.httprequest._dispatcher.connectionPromise = that.httprequest.connectionPromise;
+-        that.httprequest._dispatcher.on('connection', terminal_user_onconnection);
+-        that.httprequest._dispatcher.on('~', terminal_onfinalized);
++    }
++    catch (ex)
++    {
++        that.httprequest.connectionPromise._rej('Failed to start remote terminal session, ' + ex.toString());
+     }
+     this.that = null;
+     that = null;
+@@ -2864,6 +3076,7 @@
+     {
+         try
+         {
++            terminal_windows_prepare_modules();
+             var cols = 80, rows = 25;
+             if (this.httprequest.xoptions)
+             {
+@@ -2873,23 +3086,7 @@
+ 
+             if ((this.httprequest.protocol == 1) || (this.httprequest.protocol == 6))
+             {
+-                // Admin Terminal
+-                if (require('win-virtual-terminal').supported)
+-                {
+-                    // ConPTY PseudoTerminal
+-                    // this.httprequest._term = require('win-virtual-terminal')[this.httprequest.protocol == 6 ? 'StartPowerShell' : 'Start'](80, 25);
+-
+-                    // The above line is commented out, because there is a bug with ClosePseudoConsole() API, so this is the workaround
+-                    this.httprequest._dispatcher = require('win-dispatcher').dispatch({ modules: [{ name: 'win-virtual-terminal', script: getJSModule('win-virtual-terminal') }], launch: { module: 'win-virtual-terminal', method: (this.httprequest.protocol == 6 ? 'StartPowerShell' : 'Start'), args: [cols, rows] } });
+-                    this.httprequest._dispatcher.httprequest = this.httprequest;
+-                    this.httprequest._dispatcher.on('connection', terminal_onconnection);
+-                    this.httprequest._dispatcher.on('~', terminal_onfinalized);
+-                }
+-                else
+-                {
+-                    // Legacy Terminal
+-                    this.httprequest.connectionPromise._res(require('win-terminal')[this.httprequest.protocol == 6 ? 'StartPowerShell' : 'Start'](cols, rows));
+-                }
++                this.httprequest.connectionPromise._res(terminal_windows_start(this.httprequest.protocol, cols, rows, null));
+             }
+             else
+             {
+@@ -3064,10 +3261,291 @@
+         this.httprequest.desktop.kvm.connectionBar.httprequest = null;
+     }
+ 
++    desktop_audio_desktopClosed(this);
+     this.httprequest = null;
+     this.desktop.tunnel = null;
+ }
+ 
++//
++// Desktop audio (tunnel protocol 20) streams the speaker output of the Windows session that an
++// already consented remote desktop session is showing. Rights, consent and notification are
++// inherited from that desktop session: audio is refused without a consented desktop tunnel on the
++// same tsid, adds a toast or privacy bar state only where the desktop session shows one, and ends
++// when the last consented desktop tunnel for the tsid ends. Audio is live only, never queued or stored.
++//
++function desktop_audio_module()
++{
++    // Returns the desktop-audio module when audio can be offered on this agent, otherwise null. Agents
++    // without the module, or with it disabled, never advertise audio and answer "unavailable".
++    if (DESKTOP_AUDIO_ENABLED !== true) { return null; }
++    try
++    {
++        var audio = require('desktop-audio');
++        if ((audio.supported() === true) && (audio.disabled() !== true)) { return audio; }
++    }
++    catch (ex) { }
++    return null;
++}
++function desktop_audio_sameSession(a, b)
++{
++    // tsid is a number when the viewer selected a session and null for the console session.
++    return (((a == null) ? null : a) === ((b == null) ? null : b));
++}
++function desktop_audio_findDesktop(tsid, exclude)
++{
++    // Find an open desktop tunnel on this tsid that completed its consent step. With desktop
++    // multiplexing the server holds a single desktop tunnel per device, so one match is enough; the
++    // requesting user's own desktop rights are checked on the audio tunnel itself.
++    for (var i in tunnels)
++    {
++        var t = tunnels[i];
++        if ((t == null) || (t.protocol != 2) || (t.desktop == null) || (t.desktop.consented !== true) || (t.desktop.tunnel == null) || (t.desktop.tunnel === exclude)) { continue; }
++        if (desktop_audio_sameSession(t.desktop.tunnel.tsid, tsid)) { return t; }
++    }
++    return null;
++}
++function desktop_audio_listeners(tsid)
++{
++    var count = 0;
++    for (var i in tunnels)
++    {
++        var t = tunnels[i];
++        if ((t != null) && (t.protocol == DESKTOP_AUDIO_PROTOCOL) && (t.audio != null) && (t.audio.started === true) && desktop_audio_sameSession(t.audio.tsid, tsid)) { count++; }
++    }
++    return count;
++}
++function desktop_audio_sendState(ws, state, code, reason)
++{
++    var msg = { ctrlChannel: '102938', type: 'audio', state: state };
++    if (typeof code == 'number') { msg.code = code; }
++    if ((reason != null) && (reason !== '')) { msg.reason = reason.toString(); }
++    try { ws.write(JSON.stringify(msg)); } catch (ex) { }
++}
++function desktop_audio_log(msgid, args, text, request)
++{
++    // Always-on audit record, independent of any notification: the server event log (msgid 2001 started,
++    // 2002 stopped, 2003 failed or refused) with the tsid as first argument, plus the agent's local log.
++    var tsid = ((request.xoptions != null) && (typeof request.xoptions.tsid == 'number')) ? request.xoptions.tsid : null;
++    var line = text + ' (tsid=' + tsid + ', ' + request.remoteaddr + ')';
++    try { MeshServerLogEx(msgid, [String(tsid)].concat(args), line, request); } catch (ex) { }
++    try { require('MeshAgent').log(line + ', user: ' + request.username); } catch (ex) { }
++}
++function desktop_audio_desktopReady(ws)
++{
++    // The desktop tunnel passed its consent step and is streaming. Record that for protocol 20 and, when
++    // this agent can offer audio, advertise it on the desktop tunnel. Old or disabled agents never send this.
++    if ((ws == null) || (ws.httprequest == null) || (ws.httprequest.desktop == null)) { return; }
++    ws.httprequest.desktop.consented = true;
++    if (desktop_audio_module() == null) { return; }
++    // tsid names the session this desktop tunnel streams (null = console). With desktop multiplexing every
++    // viewer watches this one tunnel, so viewers open audio on this session rather than their own selection.
++    try { ws.write(JSON.stringify({ ctrlChannel: '102938', type: 'audio', state: 'available', protocol: DESKTOP_AUDIO_PROTOCOL, tsid: ((ws.tsid == null) ? null : ws.tsid) })); } catch (ex) { }
++}
++function desktop_audio_desktopClosed(ws)
++{
++    // Called while a desktop tunnel ends. If another consented desktop tunnel remains on the tsid the
++    // privacy bar, which tunnel_kvm_end just rebuilt, gets its audio state back. Otherwise every audio
++    // tunnel for that tsid ends with state "stopped".
++    var tsid = ws.tsid;
++    if (desktop_audio_findDesktop(tsid, ws) != null) { desktop_audio_updateBar(tsid); return; }
++    var ending = [];
++    for (var i in tunnels)
++    {
++        var t = tunnels[i];
++        if ((t != null) && (t.protocol == DESKTOP_AUDIO_PROTOCOL) && (t.audio != null) && (t.s != null) && desktop_audio_sameSession(t.audio.tsid, tsid)) { ending.push(t.s); }
++    }
++    for (var j in ending) { desktop_audio_end(ending[j], 'stopped', null, 'Remote desktop session ended'); }
++}
++function desktop_audio_refuse(ws, state, reason)
++{
++    desktop_audio_log(2003, [state, reason], 'Desktop audio refused, ' + reason, ws.httprequest);
++    desktop_audio_sendState(ws, state, null, reason);
++    ws.httprequest.protocol = 999999; // Disengage this tunnel, as the other protocols do on a rights failure
++    try { ws.end(); } catch (ex) { }
++}
++function desktop_audio_start(ws, tsid)
++{
++    var audio = desktop_audio_module();
++    if (audio == null) { desktop_audio_refuse(ws, 'unavailable', 'Desktop audio is not available on this agent'); return; }
++    // Audio is live only: never stream it over a tunnel the relay announced ('cr') as recorded.
++    if (ws.httprequest.relayRecorded === true) { desktop_audio_refuse(ws, 'unavailable', 'This connection is recorded by the server and desktop audio is never recorded'); return; }
++    if (desktop_audio_findDesktop(tsid, null) == null) { desktop_audio_refuse(ws, 'nodesktop', 'No consented remote desktop session'); return; }
++
++    var state = { tsid: tsid, session: null, started: false, blocked: false, pendingConfig: null, discontinuity: false };
++    ws.httprequest.audio = state;
++    ws.end = tunnel_audio_end;
++    ws.on('drain', tunnel_audio_drain);
++    try { state.session = audio.open(tsid); }
++    catch (ex) { desktop_audio_refuse(ws, 'error', 'Desktop audio failed to start, ' + ex.toString()); return; }
++    state.session.ws = ws;
++    state.session.on('packet', desktop_audio_onPacket);
++    state.session.on('status', desktop_audio_onStatus);
++    state.session.on('close', desktop_audio_onClose);
++}
++function desktop_audio_copyPacket(packet)
++{
++    // Duktape's Buffer.from(buffer) returns an empty buffer, so copy explicitly.
++    var copy = Buffer.alloc(packet.length);
++    packet.copy(copy);
++    return copy;
++}
++function tunnel_audio_drain()
++{
++    if ((this.httprequest != null) && (this.httprequest.audio != null))
++    {
++        var state = this.httprequest.audio;
++        state.blocked = false;
++        if (state.pendingConfig != null)
++        {
++            var packet = state.pendingConfig;
++            state.pendingConfig = null;
++            try { if (this.write(packet) === false) { state.blocked = true; } }
++            catch (ex) { desktop_audio_end(this, 'error', null, 'Desktop audio write failed'); }
++        }
++    }
++}
++function tunnel_audio_end()
++{
++    // The viewer or the server closed the tunnel; the socket is going away so no state is written.
++    desktop_audio_release(this, null, null, null);
++}
++function desktop_audio_onPacket(packet)
++{
++    var ws = this.ws, state = ((ws != null) && (ws.httprequest != null)) ? ws.httprequest.audio : null;
++    if ((state == null) || (state.session !== this)) { return; }
++
++    // Live only: one packet per binary message, never queued. While the socket is backed up packets are
++    // dropped until it drains; the viewer resynchronizes on the next packet it receives.
++    if (state.blocked === true)
++    {
++        state.discontinuity = true;
++        // CONFIG is bounded metadata required by the decoder, not captured audio.
++        // Keep only the latest boundary if the device changes while blocked.
++        if (packet[1] == 1) { state.pendingConfig = desktop_audio_copyPacket(packet); }
++        return;
++    }
++    if (state.discontinuity)
++    {
++        packet = desktop_audio_copyPacket(packet); // other listeners share the source packet
++        packet.writeUInt16LE(packet.readUInt16LE(2) | 1, 2);
++        state.discontinuity = false;
++    }
++    try { if (ws.write(packet) === false) { state.blocked = true; } }
++    catch (ex) { desktop_audio_end(ws, 'error', null, 'Desktop audio write failed'); }
++}
++function desktop_audio_onStatus(status)
++{
++    var ws = this.ws, state = ((ws != null) && (ws.httprequest != null)) ? ws.httprequest.audio : null;
++    if ((state == null) || (state.session !== this)) { return; }
++    var kind = ((status != null) && (typeof status.state == 'string')) ? status.state : 'error';
++    var code = ((status != null) && (typeof status.code == 'number')) ? status.code : null;
++    var reason = ((status != null) && (status.reason != null)) ? status.reason.toString() : null;
++    if (kind == 'started')
++    {
++        if (state.started === true) { return; }
++        state.started = true;
++        desktop_audio_log(2001, [], 'Desktop audio started', ws.httprequest);
++        desktop_audio_sendState(ws, 'started', code, reason);
++        desktop_audio_notify(ws, state.tsid, true);
++        return;
++    }
++    if (kind != 'stopped')
++    {
++        if (kind != 'unavailable') { kind = 'error'; }
++        desktop_audio_log(2003, [kind, reason], 'Desktop audio failed, ' + kind + ((reason != null) ? (': ' + reason) : ''), ws.httprequest);
++    }
++    desktop_audio_end(ws, kind, code, reason);
++}
++function desktop_audio_onClose()
++{
++    var ws = this.ws, state = ((ws != null) && (ws.httprequest != null)) ? ws.httprequest.audio : null;
++    if ((state == null) || (state.session !== this)) { return; }
++    desktop_audio_end(ws, 'stopped', null, null);
++}
++function desktop_audio_end(ws, state, code, reason)
++{
++    desktop_audio_release(ws, state, code, reason);
++    try { ws.end(); } catch (ex) { }
++}
++function desktop_audio_release(ws, kind, code, reason)
++{
++    // Idempotent teardown shared by every close path: helper status or close, the viewer or server
++    // closing the tunnel, and the desktop session ending. A null kind writes no state message.
++    var state = (ws.httprequest != null) ? ws.httprequest.audio : null;
++    if (state == null) { return; }
++    delete ws.httprequest.audio;
++    try { ws.removeListener('drain', tunnel_audio_drain); } catch (ex) { }
++    var session = state.session;
++    state.session = null;
++    if (session != null)
++    {
++        session.ws = null;
++        try { session.close(); } catch (ex) { }
++    }
++    if (kind != null) { desktop_audio_sendState(ws, kind, code, reason); }
++    if (state.started === true)
++    {
++        desktop_audio_log(2002, [], 'Desktop audio stopped', ws.httprequest);
++        desktop_audio_notify(ws, state.tsid, false);
++    }
++}
++function desktop_audio_notify(ws, tsid, on)
++{
++    // Mirror the desktop session's own notification choices: a toast when it toasts, the privacy bar
++    // text when it shows a bar, and nothing when it shows nothing.
++    var desktop = desktop_audio_findDesktop(tsid, null);
++    if (desktop == null) { return; }
++    if (desktop.consent && (desktop.consent & 1))
++    {
++        var notifyTitle = 'MeshCentral';
++        var notifyMessage = currentTranslation[on ? 'desktopAudioNotify' : 'desktopAudioNotifyEnd'].replace(/\{0\}/g, ws.httprequest.realname).replace(/\{1\}/g, ws.httprequest.username);
++        if ((desktop.soptions != null) && (desktop.soptions.notifyTitle != null)) { notifyTitle = desktop.soptions.notifyTitle; }
++        try { require('toaster').Toast(notifyTitle, notifyMessage, ws.tsid); } catch (ex) { }
++    }
++    desktop_audio_updateBar(tsid);
++}
++function desktop_audio_updateBar(tsid)
++{
++    // The privacy bar cannot be edited in place; as with a user list change it is closed and recreated,
++    // and only when its audio state actually changed. No bar on the desktop session means no bar here.
++    var desktop = desktop_audio_findDesktop(tsid, null);
++    if ((desktop == null) || (desktop.desktop.kvm.connectionBar == null)) { return; }
++    var kvm = desktop.desktop.kvm, bar = kvm.connectionBar;
++    var listening = (desktop_audio_listeners(tsid) > 0);
++    if ((bar.audio === true) == listening) { return; }
++    var text = desktop.privacybartext.replace(/\{0\}/g, kvm.rusers.join(', ')).replace(/\{1\}/g, kvm.users.join(', '));
++    if (listening) { text += ' - ' + currentTranslation['privacyBarAudio']; }
++    bar.removeAllListeners('close');
++    bar.close();
++    kvm.connectionBar = null;
++    try
++    {
++        // Use the desktop tunnel's own session: require('MeshAgent')._tsid is overwritten by every later tunnel.
++        kvm.connectionBar = require('notifybar-desktop')(text.replace(/'/g, "\\'\\"), desktop.desktop.tunnel.tsid, color_options);
++        MeshServerLogEx(31, null, "Remote Desktop Connection Bar Activated/Updated (" + desktop.remoteaddr + ")", desktop);
++    }
++    catch (ex)
++    {
++        MeshServerLogEx(32, null, "Remote Desktop Connection Bar Failed or not Supported (" + desktop.remoteaddr + ")", desktop);
++        return;
++    }
++    kvm.connectionBar.audio = listening;
++    // tunnel_kvm_end clears connectionBar.httprequest whenever a desktop tunnel ends, so keep a request in
++    // state as well; otherwise the local user's close button would stop working on a prompt-path bar.
++    kvm.connectionBar.state = (bar.state != null) ? bar.state : desktop;
++    kvm.connectionBar.httprequest = (bar.httprequest != null) ? bar.httprequest : desktop;
++    kvm.connectionBar.on('close', desktop_audio_barClosed);
++}
++function desktop_audio_barClosed()
++{
++    // Same effect as the bars created by the desktop consent paths: the local user ends every desktop session.
++    var request = (this.httprequest != null) ? this.httprequest : this.state;
++    if (request == null) { return; }
++    MeshServerLogEx(29, null, "Remote Desktop Connection forcefully closed by local user (" + request.remoteaddr + ")", request);
++    for (var i in request.desktop.kvm._pipedStreams) { request.desktop.kvm._pipedStreams[i].end(); }
++    request.desktop.kvm.end();
++}
++
+ function kvm_tunnel_consentpromise_closehandler()
+ {
+     if (this._consentpromise && this._consentpromise.close) { this._consentpromise.close(); }
+@@ -3124,6 +3602,7 @@
+     if (ws.httprequest.autolock) {
+         destopLockHelper_pipe(ws.httprequest);
+     }
++    desktop_audio_desktopReady(ws);
+ }
+ 
+ function kvm_consent_ask(ws){
+@@ -3201,7 +3680,7 @@
+             if (this.ws.httprequest.soptions.notifyTitle != null) { notifyTitle = this.ws.httprequest.soptions.notifyTitle; }
+             if (this.ws.httprequest.soptions.notifyMsgDesktop != null) { notifyMessage = this.ws.httprequest.soptions.notifyMsgDesktop.replace(/\{0\}/g, this.ws.httprequest.realname).replace(/\{1\}/g, this.ws.httprequest.username); }
+         }
+-        try { require('toaster').Toast(notifyTitle, notifyMessage, tsid); } catch (ex) { }
++        try { require('toaster').Toast(notifyTitle, notifyMessage, this.ws.tsid); } catch (ex) { }
+     }
+     if (this.ws.httprequest.consent && (this.ws.httprequest.consent & 0x40))
+     {
+@@ -3248,6 +3727,7 @@
+         destopLockHelper_pipe(this.ws.httprequest);
+     }
+     this.ws.resume();
++    desktop_audio_desktopReady(this.ws);
+     this.ws = null;
+ }
+ 
+@@ -3450,16 +3930,16 @@
+     //sendConsoleText('OnTunnelData, ' + data.length + ', ' + typeof data + ', ' + data);
+ 
+     // If this is upload data, save it to file
+-    if ((this.httprequest.uploadFile) && (typeof data == 'object') && (data[0] != 123)) {
++    if ((this.httprequest.uploadFile != null) && (typeof data == 'object') && (data[0] != 123)) {
+         // Save the data to file being uploaded.
+         if (data[0] == 0) {
+             // If data starts with zero, skip the first byte. This is used to escape binary file data from JSON.
+             this.httprequest.uploadFileSize += (data.length - 1);
+-            try { fs.writeSync(this.httprequest.uploadFile, data, 1, data.length - 1); } catch (ex) { sendConsoleText('FileUpload Error'); this.write(Buffer.from(JSON.stringify({ action: 'uploaderror' }))); return; } // Write to the file, if there is a problem, error out.
++            try { fs.writeSync(this.httprequest.uploadFile, data, 1, data.length - 1); } catch (ex) { var uploadReqId = this.httprequest.uploadFileid; closeFileUpload(this.httprequest, false); sendConsoleText('FileUpload Error'); this.write(Buffer.from(JSON.stringify({ action: 'uploaderror', reqid: uploadReqId }))); return; } // Write to the file, if there is a problem, error out.
+         } else {
+             // If data does not start with zero, save as-is.
+             this.httprequest.uploadFileSize += data.length;
+-            try { fs.writeSync(this.httprequest.uploadFile, data); } catch (ex) { sendConsoleText('FileUpload Error'); this.write(Buffer.from(JSON.stringify({ action: 'uploaderror' }))); return; } // Write to the file, if there is a problem, error out.
++            try { fs.writeSync(this.httprequest.uploadFile, data); } catch (ex) { var uploadReqId = this.httprequest.uploadFileid; closeFileUpload(this.httprequest, false); sendConsoleText('FileUpload Error'); this.write(Buffer.from(JSON.stringify({ action: 'uploaderror', reqid: uploadReqId }))); return; } // Write to the file, if there is a problem, error out.
+         }
+         this.write(Buffer.from(JSON.stringify({ action: 'uploadack', reqid: this.httprequest.uploadFileid }))); // Ask for more data.
+         return;
+@@ -3469,12 +3949,13 @@
+         // Check if this is a relay connection
+         if ((data == 'c') || (data == 'cr')) {
+             this.httprequest.state = 1;
++            this.httprequest.relayRecorded = (data == 'cr'); // The relay sends 'cr' when it records this tunnel
+             //sendConsoleText("Tunnel #" + this.httprequest.index + " now active", this.httprequest.sessionid);
+         }
+     }
+     else {
+         // Handle tunnel data
+-        if (this.httprequest.protocol == 0) { // 1 = Terminal (admin), 2 = Desktop, 4 = Registry, 5 = Files, 6 = PowerShell (admin), 7 = Plugin Data Exchange, 8 = Terminal (user), 9 = PowerShell (user), 10 = FileTransfer
++        if (this.httprequest.protocol == 0) { // 1 = Terminal (admin), 2 = Desktop, 4 = Registry, 5 = Files, 6 = PowerShell (admin), 7 = Plugin Data Exchange, 8 = Terminal (user), 9 = PowerShell (user), 10 = FileTransfer, 20 = Desktop Audio
+             // Take a look at the protocol
+             if ((data.length > 3) && (data[0] == '{')) { onTunnelControlData(data, this); return; }
+             this.httprequest.protocol = parseInt(data);
+@@ -3881,6 +4362,31 @@
+ 
+                 // Setup files
+                 // NOP
++            } else if (this.httprequest.protocol == DESKTOP_AUDIO_PROTOCOL) {
++                //
++                // Desktop Audio: speaker output of a session that an already consented remote desktop tunnel is showing
++                //
++
++                // Same rights check as desktop viewing; the requesting user needs them even when another user's desktop tunnel carries the consent.
++                if ((((this.httprequest.rights & MESHRIGHT_REMOTECONTROL) == 0) && ((this.httprequest.rights & MESHRIGHT_REMOTEVIEW) == 0)) || ((this.httprequest.rights != 0xFFFFFFFF) && ((this.httprequest.rights & MESHRIGHT_NODESKTOP) != 0))) {
++                    // Disengage this tunnel, user does not have the rights to do this!!
++                    desktop_audio_refuse(this, 'denied', 'No desktop rights');
++                    sendConsoleText("Error: No Desktop Audio Rights.");
++                    return;
++                }
++
++                this.descriptorMetadata = "Remote Desktop Audio";
++
++                // Look for a TSID, it travels in the connection options exactly as for desktop
++                var tsid = null;
++                if ((this.httprequest.xoptions != null) && (typeof this.httprequest.xoptions.tsid == 'number')) { tsid = this.httprequest.xoptions.tsid; }
++                this.tsid = tsid;
++
++                // Only control messages travel browser to agent on this tunnel
++                this.removeAllListeners('data');
++                this.on('data', onTunnelControlData);
++
++                desktop_audio_start(this, tsid);
+             }
+         } else if (this.httprequest.protocol == 1) {
+             // Send data into terminal stdin
+@@ -4047,9 +4553,17 @@
+                     MeshServerLogEx(164, [cmd.path], "Create file: \"" + cmd.path + "\"", this.httprequest);
+                     break;
+                 }
++                case 'execute': { nativeFileAction(this, cmd); break; }
+                 case 'rm': {
+                     // Delete, possibly recursive delete
++                    if (!Array.isArray(cmd.delfiles)) { break; }
+                     for (var i in cmd.delfiles) {
++                        if (typeof cmd.delfiles[i] != 'string' || !cmd.delfiles[i] || cmd.delfiles[i] == '.' || cmd.delfiles[i] == '..' || /[\\/:\x00]/.test(cmd.delfiles[i])) { continue; }
++                        if (process.platform == 'win32') {
++                            nativeFileAction(this, { action: 'delete', reqid: cmd.reqid, path: obj.path.join(cmd.path, cmd.delfiles[i]), rec: cmd.rec });
++                            continue;
++                        }
++
+                         var p = obj.path.join(cmd.path, cmd.delfiles[i]), delcount = 0;
+                         try { delcount = deleteFolderRecursive(p, cmd.rec); } catch (ex) { }
+                         if ((delcount == 1) && !cmd.rec) {
+@@ -4065,11 +4579,9 @@
+                     break;
+                 }
+                 case 'open': {
+-                    // Open the local file/folder on the users desktop
+-                    if (cmd.path) {
+-                        MeshServerLogEx(20, [cmd.path], "Opening: " + cmd.path, cmd);
+-                        openFileOnDesktop(cmd.path);
+-                    }
++                    if (process.platform == 'win32') { nativeFileAction(this, cmd); }
++                    else if (cmd.path) { openFileOnDesktop(cmd.path); }
++                    break;
+                 }
+                 case 'markcoredump': {
+                     // If we are asking for the coredump file, set the right path.
+@@ -4122,20 +4634,23 @@
+                                 }
+                             }
+                             MeshServerLogEx((cmd.ask == 'coredump') ? 104 : 49, [cmd.path], 'Download: \"' + cmd.path + '\"', this.httprequest);
+-                            if ((cmd.path == null) || (this.filedownload != null)) { this.write({ action: 'download', sub: 'cancel', id: this.filedownload.id }); delete this.filedownload; }
+-                            this.filedownload = { id: cmd.id, path: cmd.path, ptr: 0 }
+-                            try { this.filedownload.f = fs.openSync(this.filedownload.path, 'rbN'); } catch (ex) { this.write({ action: 'download', sub: 'cancel', id: this.filedownload.id }); delete this.filedownload; }
++                            if (cmd.path == null) { this.write({ action: 'download', sub: 'cancel', id: cmd.id }); break; }
++                            if (this.filedownload != null) { var previousDownloadId = this.filedownload.id; closeFileDownload(this); this.write({ action: 'download', sub: 'cancel', id: previousDownloadId }); }
++                            this.filedownload = { id: cmd.id, path: cmd.path, ptr: 0 };
++                            try { this.filedownload.f = fs.openSync(this.filedownload.path, 'rbN'); } catch (ex) { var failedDownloadId = this.filedownload.id; closeFileDownload(this); this.write({ action: 'download', sub: 'cancel', id: failedDownloadId }); }
+                             if (this.filedownload) { this.write({ action: 'download', sub: 'start', id: cmd.id }); }
+                         } else if ((this.filedownload != null) && (cmd.id == this.filedownload.id)) { // Download commands
+-                            if (cmd.sub == 'startack') { sendNextBlock = ((typeof cmd.ack == 'number') ? cmd.ack : 8); } else if (cmd.sub == 'stop') { delete this.filedownload; } else if (cmd.sub == 'ack') { sendNextBlock = 1; }
++                            if (cmd.sub == 'startack') { sendNextBlock = ((typeof cmd.ack == 'number') ? cmd.ack : 8); } else if ((cmd.sub == 'stop') || (cmd.sub == 'cancel')) { closeFileDownload(this); } else if (cmd.sub == 'ack') { sendNextBlock = 1; }
+                         }
+                         // Send the next download block(s)
+-                        if (sendNextBlock > 0) {
++                        if ((sendNextBlock > 0) && (this.filedownload != null)) {
+                             sendNextBlock--;
+                             var buf = Buffer.alloc(16384);
+-                            var len = fs.readSync(this.filedownload.f, buf, 4, 16380, null);
+-                            this.filedownload.ptr += len;
+-                            if (len < 16380) { buf.writeInt32BE(0x01000001, 0); fs.closeSync(this.filedownload.f); delete this.filedownload; sendNextBlock = 0; } else { buf.writeInt32BE(0x01000000, 0); }
++                            var activeDownload = this.filedownload;
++                            var len;
++                            try { len = fs.readSync(activeDownload.f, buf, 4, 16380, null); } catch (ex) { var failedDownloadId = activeDownload.id; closeFileDownload(this); this.write({ action: 'download', sub: 'cancel', id: failedDownloadId }); break; }
++                            activeDownload.ptr += len;
++                            if (len < 16380) { buf.writeInt32BE(0x01000001, 0); closeFileDownload(this); sendNextBlock = 0; } else { buf.writeInt32BE(0x01000000, 0); }
+                             this.write(buf.slice(0, len + 4)); // Write as binary
+                         }
+                         break;
+@@ -4143,41 +4658,34 @@
+                 case 'upload':
+                     {
+                         // Upload a file, browser to agent
+-                        if (this.httprequest.uploadFile != null) { fs.closeSync(this.httprequest.uploadFile); delete this.httprequest.uploadFile; }
++                        if (this.httprequest.uploadFile != null) { closeFileUpload(this.httprequest, false); }
+                         if (cmd.path == undefined) break;
+                         var filepath = cmd.name ? obj.path.join(cmd.path, cmd.name) : cmd.path;
+                         this.httprequest.uploadFilePath = filepath;
+                         this.httprequest.uploadFileSize = 0;
+-                        try { this.httprequest.uploadFile = fs.openSync(filepath, cmd.append ? 'abN' : 'wbN'); } catch (ex) { this.write(Buffer.from(JSON.stringify({ action: 'uploaderror', reqid: cmd.reqid }))); break; }
++                        try { this.httprequest.uploadFile = fs.openSync(filepath, cmd.append ? 'abN' : 'wbN'); } catch (ex) { closeFileUpload(this.httprequest, false); this.write(Buffer.from(JSON.stringify({ action: 'uploaderror', reqid: cmd.reqid }))); break; }
+                         this.httprequest.uploadFileid = cmd.reqid;
+-                        if (this.httprequest.uploadFile) { this.write(Buffer.from(JSON.stringify({ action: 'uploadstart', reqid: this.httprequest.uploadFileid }))); }
++                        if (this.httprequest.uploadFile != null) { this.write(Buffer.from(JSON.stringify({ action: 'uploadstart', reqid: this.httprequest.uploadFileid }))); }
+                         break;
+                     }
+                 case 'uploaddone':
+                     {
+                         // Indicates that an upload is done
+-                        if (this.httprequest.uploadFile) {
++                        if (this.httprequest.uploadFile != null) {
+                             MeshServerLogEx(105, [this.httprequest.uploadFilePath, this.httprequest.uploadFileSize], 'Upload: \"' + this.httprequest.uploadFilePath + '\", Size: ' + this.httprequest.uploadFileSize, this.httprequest);
+-                            fs.closeSync(this.httprequest.uploadFile);
+-                            this.write(Buffer.from(JSON.stringify({ action: 'uploaddone', reqid: this.httprequest.uploadFileid }))); // Indicate that we closed the file.
+-                            delete this.httprequest.uploadFile;
+-                            delete this.httprequest.uploadFileid;
+-                            delete this.httprequest.uploadFilePath;
+-                            delete this.httprequest.uploadFileSize;
++                            var uploadReqId = this.httprequest.uploadFileid;
++                            var closeOk = closeFileUpload(this.httprequest, false);
++                            this.write(Buffer.from(JSON.stringify({ action: closeOk ? 'uploaddone' : 'uploaderror', reqid: uploadReqId }))); // Indicate whether the file closed and flushed successfully.
+                         }
+                         break;
+                     }
+                 case 'uploadcancel':
+                     {
+                         // Indicates that an upload is canceled
+-                        if (this.httprequest.uploadFile) {
+-                            fs.closeSync(this.httprequest.uploadFile);
+-                            fs.unlinkSync(this.httprequest.uploadFilePath);
+-                            this.write(Buffer.from(JSON.stringify({ action: 'uploadcancel', reqid: this.httprequest.uploadFileid }))); // Indicate that we closed the file.
+-                            delete this.httprequest.uploadFile;
+-                            delete this.httprequest.uploadFileid;
+-                            delete this.httprequest.uploadFilePath;
+-                            delete this.httprequest.uploadFileSize;
++                        if (this.httprequest.uploadFile != null) {
++                            var uploadReqId = this.httprequest.uploadFileid;
++                            closeFileUpload(this.httprequest, true);
++                            this.write(Buffer.from(JSON.stringify({ action: 'uploadcancel', reqid: uploadReqId }))); // Indicate that we closed the file.
+                         }
+                         break;
+                     }
+@@ -4549,44 +5057,9 @@
+     try {
+         switch (process.platform) {
+             case 'win32':
+-                var uid = require('user-sessions').consoleUid();
+-                var user = require('user-sessions').getUsername(uid);
+-                var domain = require('user-sessions').getDomain(uid);
+-                var task = { name: 'MeshChatTask', user: user, domain: domain, execPath: (require('fs').statSync(file).isDirectory() ? process.env['windir'] + '\\explorer.exe' : file) };
+-                if (require('fs').statSync(file).isDirectory()) task.arguments = [file];
+-                try {
+-                    require('win-tasks').addTask(task);
+-                    require('win-tasks').getTask({ name: 'MeshChatTask' }).run();
+-                    require('win-tasks').deleteTask('MeshChatTask');
+-                    return (true);
+-                }
+-                catch (ex) {
+-                    var taskoptions = { env: { _target: (require('fs').statSync(file).isDirectory() ? process.env['windir'] + '\\explorer.exe' : file), _user: '"' + domain + '\\' + user + '"' }, _args: "" };
+-                    if (require('fs').statSync(file).isDirectory()) taskoptions.env._args = file;
+-                    for (var c1e in process.env) {
+-                        taskoptions.env[c1e] = process.env[c1e];
+-                    }
+-                    var child = require('child_process').execFile(process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['powershell', '-noprofile', '-nologo', '-command', '-'], taskoptions);
+-                    child.stderr.on('data', function (c) { });
+-                    child.stdout.on('data', function (c) { });
+-                    child.stdin.write('SCHTASKS /CREATE /F /TN MeshChatTask /SC ONCE /ST 00:00 ');
+-                    if (user) { child.stdin.write('/RU $env:_user '); }
+-                    child.stdin.write('/TR "$env:_target $env:_args"\r\n');
+-                    child.stdin.write('$ts = New-Object -ComObject Schedule.service\r\n');
+-                    child.stdin.write('$ts.connect()\r\n');
+-                    child.stdin.write('$tsfolder = $ts.getfolder("\\")\r\n');
+-                    child.stdin.write('$task = $tsfolder.GetTask("MeshChatTask")\r\n');
+-                    child.stdin.write('$taskdef = $task.Definition\r\n');
+-                    child.stdin.write('$taskdef.Settings.StopIfGoingOnBatteries = $false\r\n');
+-                    child.stdin.write('$taskdef.Settings.DisallowStartIfOnBatteries = $false\r\n');
+-                    child.stdin.write('$taskdef.Actions.Item(1).Path = $env:_target\r\n');
+-                    child.stdin.write('$taskdef.Actions.Item(1).Arguments = $env:_args\r\n');
+-                    child.stdin.write('$tsfolder.RegisterTaskDefinition($task.Name, $taskdef, 4, $null, $null, $null)\r\n');
+-                    child.stdin.write('SCHTASKS /RUN /TN MeshChatTask\r\n');
+-                    child.stdin.write('SCHTASKS /DELETE /F /TN MeshChatTask\r\nexit\r\n');
+-                    child.waitExit();
+-                }
+-                break;
++                if (typeof mesh.fileAction != 'function') { return null; }
++                var nativeResult = mesh.fileAction('open', file, false);
++                return nativeResult.ok ? true : null;
+             case 'linux':
+                 child = require('child_process').execFile('/usr/bin/xdg-open', ['xdg-open', file], { uid: require('user-sessions').consoleUid() });
+                 break;
+@@ -4669,7 +5142,7 @@
+                 var fin = '', f = '', availcommands = 'domain,translations,agentupdate,errorlog,msh,timerinfo,coreinfo,coreinfoupdate,coredump,service,fdsnapshot,fdcount,startupoptions,';
+                 availcommands += 'alert,agentsize,versions,help,info,osinfo,args,print,type,dbkeys,dbget,dbset,dbdelete,dbcompact,eval,parseuri,httpget,wslist,plugin,wsconnect,wssend,wsclose,notify,';
+                 availcommands += 'ls,ps,kill,netinfo,location,power,wakeonlan,setdebug,smbios,rawsmbios,toast,lock,users,openurl,getclip,setclip,log,cpuinfo,sysinfo,';
+-                availcommands += 'apf,scanwifi,wallpaper,agentmsg,task,uninstallagent,display,openfile,installedapps';
++                availcommands += 'apf,scanwifi,wallpaper,agentmsg,task,uninstallagent,display,openfile,installedapps,umhctl';
+                 if (require('os').dns != null) { availcommands += ',dnsinfo'; }
+                 try { require('linux-dhcp'); availcommands += ',dhcp'; } catch (ex) { }
+                 if (process.platform == 'win32') {
+@@ -5017,10 +5490,10 @@
+                 break;
+             case 'agentupdateex':
+                 // Perform an direct agent update without requesting any information from the server, this should not typically be used.
+-                if (args['_'].length == 1) {
+-                    if (args['_'][0].startsWith('https://')) { agentUpdate_Start(args['_'][0], { sessionid: sessionid }); } else { response = "Usage: agentupdateex https://server/path"; }
++                if (args['_'].length == 2) {
++                    if (args['_'][0].startsWith('https://') && /^[0-9a-f]{96}$/i.test(args['_'][1])) { agentUpdate_Start(args['_'][0], { sessionid: sessionid, hash: args['_'][1] }); } else { response = "Usage: agentupdateex https://server/path SHA384"; }
+                 } else {
+-                    agentUpdate_Start(null, { sessionid: sessionid });
++                    response = "Usage: agentupdateex https://server/path SHA384";
+                 }
+                 break;
+             case 'errorlog':
+@@ -5650,53 +6123,23 @@
+             case 'log':
+                 if (args['_'].length != 1) { response = 'Proper usage: log "sample text"'; } else { MeshServerLog(args['_'][0]); response = 'ok'; }
+                 break;
+-            case 'getclip':
+-                if (require('MeshAgent').isService) {
+-                    require('clipboard').dispatchRead().then(function (str) { sendConsoleText(str, sessionid); });
+-                } else {
+-                    require('clipboard').read().then(function (str) { sendConsoleText(str, sessionid); });
+-                }
++            case 'getclip': {
++                var consoleClipboardFailure = function (error) { sendConsoleText('Clipboard failed: ' + error, sessionid); };
++                try {
++                    var consoleClipboardRead = require('MeshAgent').isService ? require('clipboard').dispatchRead() : require('clipboard').read();
++                    consoleClipboardRead.then(function (str) { sendConsoleText(str, sessionid); }, consoleClipboardFailure);
++                } catch (error) { consoleClipboardFailure(error); }
+                 break;
++            }
+             case 'setclip': {
+-                if (pendingSetClip) {
+-                    response = 'Busy';
+-                } else if (args['_'].length != 1) {
+-                    response = 'Proper usage: setclip "sample text"';
+-                } else {
+-                    if (require('MeshAgent').isService) {
+-                        if (process.platform != 'win32') {
+-                            require('clipboard').dispatchWrite(args['_'][0]);
+-                        }
+-                        else {
+-                            var clipargs = args['_'][0];
+-                            var uid = require('user-sessions').consoleUid();
+-                            var user = require('user-sessions').getUsername(uid);
+-                            var domain = require('user-sessions').getDomain(uid);
+-                            user = (domain + '\\' + user);
+-
+-                            if (this._dispatcher) { this._dispatcher.close(); }
+-                            this._dispatcher = require('win-dispatcher').dispatch({ user: user, modules: [{ name: 'clip-dispatch', script: "module.exports = { dispatch: function dispatch(val) { require('clipboard')(val); process.exit(); } };" }], launch: { module: 'clip-dispatch', method: 'dispatch', args: [clipargs] } });
+-                            this._dispatcher.parent = this;
+-                            //require('events').setFinalizerMetadata.call(this._dispatcher, 'clip-dispatch');
+-                            pendingSetClip = true;
+-                            this._dispatcher.on('connection', function (c) {
+-                                this._c = c;
+-                                this._c.root = this.parent;
+-                                this._c.on('end', function ()
+-                                {
+-                                    pendingSetClip = false;
+-                                    try { this.root._dispatcher.close(); } catch (ex) { }
+-                                    this.root._dispatcher = null;
+-                                    this.root = null;
+-                                });
+-                            });
+-                        }
+-                        response = 'Setting clipboard to: "' + args['_'][0] + '"';
+-                    }
+-                    else {
+-                        require('clipboard')(args['_'][0]); response = 'Setting clipboard to: "' + args['_'][0] + '"';
+-                    }
+-                }
++                if (args['_'].length != 1) { response = 'Proper usage: setclip "sample text"'; break; }
++                var consoleClipboardWriteSuccess = function () { sendConsoleText('Clipboard set.', sessionid); };
++                var consoleClipboardWriteFailure = function (error) { sendConsoleText('Clipboard failed: ' + error, sessionid); };
++                try {
++                    var consoleClipboardWrite = require('MeshAgent').isService ? require('clipboard').dispatchWrite(args['_'][0]) : require('clipboard')(args['_'][0]);
++                    if (consoleClipboardWrite && typeof consoleClipboardWrite.then == 'function') { consoleClipboardWrite.then(consoleClipboardWriteSuccess, consoleClipboardWriteFailure); }
++                    else { consoleClipboardWriteSuccess(); }
++                } catch (error) { consoleClipboardWriteFailure(error); }
+                 break;
+             }
+             case 'openurl': {
+@@ -5705,6 +6148,7 @@
+                 break;
+             }
+             case 'openfile': {
++                if (rights != 0xFFFFFFFF && (rights & 131072) == 0) { response = 'Access denied.'; break; }
+                 if (args['_'].length != 1) { response = 'Proper usage: openfile (filepath)'; } // Display usage
+                 else { if (openFileOnDesktop(args['_'][0]) == null) { response = 'Failed.'; } else { response = 'Success.'; } }
+                 break;
+@@ -5906,6 +6350,7 @@
+                     var pr = require('os').name();
+                     pr.sessionid = sessionid;
+                     pr.then(function (v) {
++                        if (process.platform == 'win32') { terminal_windows_prepare_modules(); }
+                         sendConsoleText("OS: " + v + (process.platform == 'win32' ? (require('win-virtual-terminal').supported ? ' [ConPTY: YES]' : ' [ConPTY: NO]') : ''), this.sessionid);
+                     });
+                 }
+@@ -6323,6 +6768,14 @@
+                 }
+                 break;
+             }
++            case 'umhctl': {
++                try {
++                    response = require('umhctl').consoleaction(args, rights, sessionid, mesh);
++                } catch (ex) {
++                    response = 'umhctl unavailable: ' + ex;
++                }
++                break;
++            }
+             case 'plugin': {
+                 if (typeof args['_'][0] == 'string') {
+                     try {
+@@ -6990,33 +7443,25 @@
+     sendAgentMessage('Self Update failed because execv() failed', 3);
+ }
+ 
+-function windows_execve(name, agentfilename, sessionid) {
+-    var libc;
+-    try {
+-        libc = require('_GenericMarshal').CreateNativeProxy('msvcrt.dll');
+-        libc.CreateMethod('_wexecve');
+-    } catch (ex) {
+-        sendConsoleText('Self Update failed because msvcrt.dll is missing', sessionid);
+-        sendAgentMessage('Self Update failed because msvcrt.dll is missing', 3);
+-        return;
+-    }
+-    
+-    var cmd = require('_GenericMarshal').CreateVariable(process.env['windir'] + '\\system32\\cmd.exe', { wide: true });
+-    var args = require('_GenericMarshal').CreateVariable(3 * require('_GenericMarshal').PointerSize);
+-    var arg1 = require('_GenericMarshal').CreateVariable('cmd.exe', { wide: true });
+-    var arg2 = require('_GenericMarshal').CreateVariable('/C net stop "' + name + '" & "' + process.cwd() + agentfilename + '.update.exe" -b64exec ' + 'dHJ5CnsKICAgIHZhciBzZXJ2aWNlTG9jYXRpb24gPSBwcm9jZXNzLmFyZ3YucG9wKCkudG9Mb3dlckNhc2UoKTsKICAgIHJlcXVpcmUoJ3Byb2Nlc3MtbWFuYWdlcicpLmVudW1lcmF0ZVByb2Nlc3NlcygpLnRoZW4oZnVuY3Rpb24gKHByb2MpCiAgICB7CiAgICAgICAgZm9yICh2YXIgcCBpbiBwcm9jKQogICAgICAgIHsKICAgICAgICAgICAgaWYgKHByb2NbcF0ucGF0aCAmJiAocHJvY1twXS5wYXRoLnRvTG93ZXJDYXNlKCkgPT0gc2VydmljZUxvY2F0aW9uKSkKICAgICAgICAgICAgewogICAgICAgICAgICAgICAgcHJvY2Vzcy5raWxsKHByb2NbcF0ucGlkKTsKICAgICAgICAgICAgfQogICAgICAgIH0KICAgICAgICBwcm9jZXNzLmV4aXQoKTsKICAgIH0pOwp9CmNhdGNoIChlKQp7CiAgICBwcm9jZXNzLmV4aXQoKTsKfQ==' +
+-        ' "' + process.execPath + '" & copy "' + process.cwd() + agentfilename + '.update.exe" "' + process.execPath + '" & net start "' + name + '" & erase "' + process.cwd() + agentfilename + '.update.exe"', { wide: true });
+-
+-    arg1.pointerBuffer().copy(args.toBuffer());
+-    arg2.pointerBuffer().copy(args.toBuffer(), require('_GenericMarshal').PointerSize);
+-
+-    libc._wexecve(cmd, args, 0);
++function agentUpdate_ReportFailure() {
++    try { require('MeshAgent').SendCommand({ action: 'agentupdatefailed' }); } catch (ex) { }
+ }
+ 
+ // Start a JavaScript based Agent Self-Update
+ function agentUpdate_Start(updateurl, updateoptions) {
+     // If this value is null
+     var sessionid = (updateoptions != null) ? updateoptions.sessionid : null; // If this is null, messages will be broadcast. Otherwise they will be unicasted
++    if (process.platform == 'win32') {
++        sendConsoleText('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.', sessionid);
++        sendAgentMessage('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.', 3);
++        return;
++    }
++    if (updateoptions == null || typeof updateoptions.hash != 'string' || !/^[0-9a-f]{96}$/i.test(updateoptions.hash)) {
++        sendConsoleText('Self Update refused because a valid SHA-384 hash was not supplied.', sessionid);
++        sendAgentMessage('Self Update refused because a valid SHA-384 hash was not supplied.', 3);
++        agentUpdate_ReportFailure();
++        return;
++    }
+ 
+     // If the url starts with *, switch it to use the same protoco, host and port as the control channel.
+     if (updateurl != null) {
+@@ -7083,78 +7528,120 @@
+                 sendConsoleText('Self Update failed, because there was a problem trying to download the update from ' + updateurl, sessionid);
+                 sendAgentMessage('Self Update failed, because there was a problem trying to download the update from ' + updateurl, 3);
+                 agentUpdate_Start._selfupdate = null;
++                agentUpdate_ReportFailure();
+             });
+             agentUpdate_Start._selfupdate.on('response', function (img) {
+-                this._file = require('fs').createWriteStream(agentfilename + (process.platform == 'win32' ? '.update.exe' : '.update'), { flags: 'wb' });
++                if (img.statusCode != 200) {
++                    sendConsoleText('Self Update failed because the update server returned HTTP status ' + img.statusCode + '.', sessionid);
++                    sendAgentMessage('Self Update failed because the update server returned HTTP status ' + img.statusCode + '.', 3);
++                    try { img.resume(); } catch (ex) { }
++                    agentUpdate_Start._selfupdate = null;
++                    agentUpdate_ReportFailure();
++                    return;
++                }
++                var self = this;
++                this._fileClosed = false;
++                this._downloadFailed = false;
++                this._verifiedHash = null;
++                var stagedUpdatePath = process.execPath + '.update';
++                try { this._file = require('fs').createWriteStream(stagedUpdatePath, { flags: 'wb' }); }
++                catch (openError) {
++                    sendConsoleText('Self Update failed while opening the staged update: ' + openError, sessionid);
++                    sendAgentMessage('Self Update failed while opening the staged update.', 3);
++                    agentUpdate_Start._selfupdate = null;
++                    agentUpdate_ReportFailure();
++                    return;
++                }
+                 this._filehash = require('SHA384Stream').create();
++                this._file.on('error', function (e) {
++                    if (self._downloadFailed) { return; }
++                    self._downloadFailed = true;
++                    sendConsoleText('Self Update failed while writing the staged update: ' + e, sessionid);
++                    sendAgentMessage('Self Update failed while writing the staged update.', 3);
++                    try { require('fs').unlinkSync(stagedUpdatePath); } catch (ex) { }
++                    agentUpdate_Start._selfupdate = null;
++                    agentUpdate_ReportFailure();
++                });
++                this._file.on('close', function () {
++                    self._fileClosed = true;
++                    if (self._downloadFailed) { try { require('fs').unlinkSync(stagedUpdatePath); } catch (ex) { } return; }
++                    if (!self._downloadFailed && self._verifiedHash != null) {
++                        var verifiedHash = self._verifiedHash;
++                        self._verifiedHash = null;
++                        self._filehash.emit('hash', verifiedHash);
++                    }
++                });
+                 this._filehash.on('hash', function (h) {
+-                    if (updateoptions != null && updateoptions.hash != null) {
+-                        if (updateoptions.hash.toLowerCase() == h.toString('hex').toLowerCase()) {
+-                            if (sessionid != null) { sendConsoleText('Download complete. HASH verified.', sessionid); }
+-                        } else {
+-                            agentUpdate_Start._retryCount++;
+-                            sendConsoleText('Self Update FAILED because the downloaded agent FAILED hash check (' + agentUpdate_Start._retryCount + '), URL: ' + updateurl, sessionid);
+-                            sendConsoleText(updateoptions.hash + " != " + h.toString('hex'));
+-                            sendAgentMessage('Self Update FAILED because the downloaded agent FAILED hash check (' + agentUpdate_Start._retryCount + '), URL: ' + updateurl, 3);
+-                            agentUpdate_Start._selfupdate = null;
+-
+-                            if (agentUpdate_Start._retryCount < 4) {
+-                                // Retry the download again
+-                                sendConsoleText('Self Update will try again in 60 seconds...', sessionid);
+-                                agentUpdate_Start._timeout = setTimeout(agentUpdate_Start, 60000, updateurl, updateoptions);
+-                            }
+-                            else {
+-                                sendConsoleText('Self Update giving up, too many failures...', sessionid);
+-                                sendAgentMessage('Self Update giving up, too many failures...', 3);
+-                            }
+-                            return;
++                    if (self._downloadFailed) { return; }
++                    if (updateoptions.hash.toLowerCase() == h.toString('hex').toLowerCase()) {
++                        if (sessionid != null) { sendConsoleText('Download complete. HASH verified.', sessionid); }
++                    } else {
++                        self._downloadFailed = true;
++                        agentUpdate_Start._retryCount++;
++                        sendConsoleText('Self Update FAILED because the downloaded agent FAILED hash check (' + agentUpdate_Start._retryCount + '), URL: ' + updateurl, sessionid);
++                        sendConsoleText(updateoptions.hash + " != " + h.toString('hex'));
++                        sendAgentMessage('Self Update FAILED because the downloaded agent FAILED hash check (' + agentUpdate_Start._retryCount + '), URL: ' + updateurl, 3);
++                        agentUpdate_Start._selfupdate = null;
++
++                        if (agentUpdate_Start._retryCount < 4) {
++                            // Retry the download again
++                            sendConsoleText('Self Update will try again in 60 seconds...', sessionid);
++                            agentUpdate_Start._timeout = setTimeout(agentUpdate_Start, 60000, updateurl, updateoptions);
+                         }
++                        else {
++                            sendConsoleText('Self Update giving up, too many failures...', sessionid);
++                            sendAgentMessage('Self Update giving up, too many failures...', 3);
++                            agentUpdate_ReportFailure();
++                        }
++                        return;
+                     }
+-                    else {
+-                        sendConsoleText('Download complete. HASH=' + h.toString('hex'), sessionid);
+-                    }
++                    if (!self._fileClosed) { self._verifiedHash = h; return; }
+ 
+                     // Send an indication to the server that we got the update download correctly.
+                     try { require('MeshAgent').SendCommand({ action: 'agentupdatedownloaded' }); } catch (ex) { }
+ 
+-                    if (sessionid != null) { sendConsoleText('Updating and restarting agent...', sessionid); }
+-                    if (process.platform == 'win32') {
+-                        // Use _wexecve() equivalent to perform the update
+-                        windows_execve(name, agentfilename, sessionid);
++                    if (process.platform != 'freebsd' && process.platform != 'linux') {
++                        sendConsoleText('Self Update disabled for this platform; native service lifecycle is required.', sessionid);
++                        sendAgentMessage('Self Update disabled for this platform; native service lifecycle is required.', 3);
++                        try { require('fs').unlinkSync(stagedUpdatePath); } catch (ex) { }
++                        agentUpdate_Start._selfupdate = null;
++                        agentUpdate_ReportFailure();
++                        return;
+                     }
+-                    else {
+-                        var m = require('fs').statSync(process.execPath).mode;
+-                        require('fs').chmodSync(process.cwd() + agentfilename + '.update', m);
+-
+-                        // remove binary
+-                        require('fs').unlinkSync(process.execPath);
+ 
+-                        // copy update
+-                        require('fs').copyFileSync(process.cwd() + agentfilename + '.update', process.execPath);
+-                        require('fs').chmodSync(process.execPath, m);
+-
+-                        // erase update
+-                        require('fs').unlinkSync(process.cwd() + agentfilename + '.update');
++                    if (sessionid != null) { sendConsoleText('Updating and restarting agent...', sessionid); }
++                    try {
++                        var m = require('fs').statSync(process.execPath).mode;
++                        require('fs').chmodSync(stagedUpdatePath, m);
++                        // POSIX rename in the executable directory is atomic and leaves the
++                        // working binary intact if replacement fails.
++                        require('fs').renameSync(stagedUpdatePath, process.execPath);
++                    } catch (replaceError) {
++                        sendConsoleText('Self Update failed while atomically replacing the agent: ' + replaceError, sessionid);
++                        sendAgentMessage('Self Update failed while atomically replacing the agent.', 3);
++                        agentUpdate_Start._selfupdate = null;
++                        agentUpdate_ReportFailure();
++                        return;
++                    }
+ 
+-                        switch (process.platform) {
+-                            case 'freebsd':
+-                                bsd_execv(name, agentfilename, sessionid);
+-                                break;
+-                            case 'linux':
+-                                linux_execv(name, agentfilename, sessionid);
+-                                break;
+-                            default:
+-                                try {
+-                                    // restart service
+-                                    var s = require('service-manager').manager.getService(name);
+-                                    s.restart();
+-                                }
+-                                catch (ex) {
+-                                    sendConsoleText('Self Update encountered an error trying to restart service', sessionid);
+-                                    sendAgentMessage('Self Update encountered an error trying to restart service', 3);
+-                                }
+-                                break;
+-                        }
++                    switch (process.platform) {
++                        case 'freebsd':
++                            bsd_execv(name, agentfilename, sessionid);
++                            break;
++                        case 'linux':
++                            linux_execv(name, agentfilename, sessionid);
++                            break;
++                        default:
++                            try {
++                                // restart service
++                                var s = require('service-manager').manager.getService(name);
++                                s.restart();
++                            }
++                            catch (ex) {
++                                sendConsoleText('Self Update encountered an error trying to restart service', sessionid);
++                                sendAgentMessage('Self Update encountered an error trying to restart service', 3);
++                            }
++                            break;
+                     }
+                 });
+                 img.pipe(this._file);

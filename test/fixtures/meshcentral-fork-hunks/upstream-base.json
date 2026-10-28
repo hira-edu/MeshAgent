@@ -7,10 +7,8 @@
       "reviewed": "Server module that keeps agent certificate history; copy of MeshAgent tools/configure_agent_certificate_history.js (checked equal by agent_certificate_history_configuration_runtime)."
     },
     "agents/meshcore.js": {
-      "state": "pending-rebase",
-      "forkBase": "587973e8c",
-      "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
-      "reviewed": "Not reviewed hunk by hunk yet. Fork areas: native file actions, clipboard rewrite, service/process error reporting, Windows run commands via MeshConsoleBridgeW, win-terminal terminals, upload/download cleanup, desktop audio protocol 20, self-update hardening. Lacks upstream registry tunnel/consent and module split (#8072, #7690), Windows updates, software/printers (#7939), linux-info hang (#7904) and more."
+      "state": "enforced",
+      "reviewed": "Stage 3c (MeshCentral 81ef85909): upstream 1.2.5 plus the fork hunks (native file actions, uncaught-exception fallback, clipboard rewrite, service/ps error reporting, MeshConsoleBridgeW run commands, win-terminal tsid terminals, transfer cleanup/uploaderror, desktop audio protocol 20, SHA-384 self-update hardening, guestname, toast tsid, umhctl console, tunnel_onError argument); fork base was upstream 5f8b74fa8 (mirror 91a9f6e32)."
     },
     "agents/modules_meshcore/clipboard.js": {
       "state": "fork-only",
@@ -81,20 +79,16 @@
       "reviewed": "1.2.5 plus 18 added lines: the installer asks for the Screen Sharing VNC password and stores it in vncrelay.secret (root-only), and the uninstaller removes that file. No upstream line is removed."
     },
     "meshagent.js": {
-      "state": "pending-rebase",
-      "forkBase": "587973e8c",
-      "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
-      "reviewed": "Not reviewed hunk by hunk yet. Lacks #8052, #8002, #8016, #8064, #8015, #7799, #7854, #7690, #7934, #7887, #7986 and #7735."
+      "state": "enforced",
+      "reviewed": "Stage 3b (MeshCentral 5ff479199): npm 1.2.5 plus the fork hunks, from a three-way merge (base 587973e8c). Restores #8052, #8002, #8016, #8064 (getScript removed), #8015 (mc1migration removed), #7799, #7854, #7690, #7934, #7735, #7887, #7986, #7554 and the 1.2.5 compressed-core lines. Fork hunks: native update state machine (request/transfer-pending flags, agentupdatefailure/agentupdatefailed, agentupdatefailurecapability, core restore after a failed update, Windows-only native route, explicit agentupdate via command 12), native transfer fixes (task limiter completed on fs.open error, first block sliced, fd picks the disk path, EOF ends the transfer), 0x300 streaming-zip gate, all-zero hash rejected before test mode, Windows service lifecycle gate (& 0x600, with the #8052 agentInfo guard; fails closed without agentInfo), certificate history admission (isHistoricalWebCertHash, agentcertificatehistory refresh on mismatch, [AGENT_CERT_COMPAT] audit after the signature), nativeRuntimeResult no-op case. If S2 lands (ba9cbe327) the gate is & 0x400 and the diff is with-s2/meshagent.js.diff."
     },
     "meshcentral.js": {
       "state": "enforced",
       "reviewed": "Production's loader (sha256 68c45084, formerly patched at deploy time by deploy.py) plus S1.6. Three changes: core modules are added with a release version read from agents/module-versions.json, which pack.js writes from the last commit that changed packaged content (a missing manifest or module entry stops the server, naming the module; S1.6 1b34cff43 replaced the file-mtime version); only the preferred .js or .min.js copy of a module is sent; the proxy certificate is fetched with the certurl's own HTTPS hostname as SNI (align_proxy_certificate_sni)."
     },
     "meshdesktopmultiplex.js": {
-      "state": "pending-rebase",
-      "forkBase": "587973e8c",
-      "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
-      "reviewed": "Not reviewed hunk by hunk yet. Lacks #8006 and #7671; the consentAautoAccept typo is back and the terminaluservariable line is missing."
+      "state": "enforced",
+      "reviewed": "Stage 3b (MeshCentral c39d9e9be): npm 1.2.5 plus the fork hunks, from a three-way merge (base 587973e8c). Restores #8006 (rcookie guard, upstream's lines), #7671 terminalUserVariable and the consentAutoAcceptIfFileNoUser spelling. Fork hunks: held mouse button release, audio availability replay, flow control (updateAgentFlowControl, send queue used, sendQueue.length), ordered recording queue with partial writes, viewer backlog limit, image settings and pause recomputed when a viewer leaves, refresh forwarded to the agent, same-size screen re-anchor, closeWhenDrained, unresponsive agent replacement and session watchdog, outTraffc accounting, display-location reply to the viewer, peer.user null guards, image-size and off-screen tile guards, desktoprelays ownership, expireTimer cleared, pending marker not treated as a multiplexor, recording-open races, missing image guard."
     },
     "meshrelay.js": {
       "state": "enforced",
@@ -110,10 +104,8 @@
       "reviewed": "uglify-js build of the fork viewer (deploy/scripts/build-viewer-min.js)."
     },
     "public/scripts/agent-desktop-0.0.2.js": {
-      "state": "pending-rebase",
-      "forkBase": "1.2.1",
-      "flipStage": "Stage 3 (rebase overrides onto 1.2.5)",
-      "reviewed": "Not reviewed hunk by hunk yet. Lacks #8040 (_altGrDeferredDown; ControlLeftKc in pressedKeys on an array)."
+      "state": "enforced",
+      "reviewed": "Stage 3c (MeshCentral f2437fd1e): upstream 1.2.5 (with #8040) plus fork D1-D11; cancelPendingAltGr also clears _altGrDeferredDown (V3)."
     },
     "public/scripts/agent-desktop-audio-0.0.1.js": {
       "state": "fork-only",
