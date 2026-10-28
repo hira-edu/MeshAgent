@@ -387,8 +387,9 @@ build context root holds:
   outside the context fails);
 - `MeshAgent/tools/deployment/release_image.js`;
 - `agent-builds/`: the pinned fork agent builds, as
-  `tools/deployment/agent_build_release.py fetch --pins MeshCentral/agents/agent-defaults.json --directory agent-builds`
-  writes them from the release store.
+  `python MeshAgent/tools/deployment/agent_build_release.py fetch --store hira-edu/hook --pins MeshCentral/agents/agent-defaults.json --output agent-builds`
+  (with `AGENT_BUILDS_TOKEN` set; `agent-builds` must be empty) writes them from
+  the release store, checking each against its size and SHA384 pin.
 
 The build stage installs `git`, then:
 

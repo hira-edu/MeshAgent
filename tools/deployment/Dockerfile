@@ -4,7 +4,7 @@
 #   MeshCentral/    a full clone of the fork at the release commit, with its .git and complete history
 #                   (pack.js packs only tracked files and dates agent modules from git history)
 #   MeshAgent/tools/deployment/release_image.js
-#   agent-builds/   the pinned fork agent builds, as agent_build_release.py fetch wrote them
+#   agent-builds/   the pinned fork agent builds, as `agent_build_release.py fetch --output agent-builds` wrote them
 #
 # node:24.22.1-bookworm-slim, pinned by its multi-platform index digest (D1: production runs Node 24).
 # Change it only through a reviewed change.
