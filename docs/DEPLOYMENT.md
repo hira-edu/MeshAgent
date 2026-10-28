@@ -182,11 +182,29 @@ and agents come from the image's package; nothing is mounted over them (see
 publication commands concurrently with container releases; platform-specific
 updates must publish through the release process after migration.
 
-Every promotion runs the release's shadow-copy check against the host folders
-before it stops anything, and every container start, including recovery and
-rollback, checks the release again (manifest schema and fields, reviewed
-version, shadow copies) and refuses to start on any failure. No `NODE_OPTIONS`
-preload is passed to the container.
+Every promotion runs the release's shadow-copy check and the configuration path
+check against the host before it stops anything, and every container start,
+including recovery and rollback, checks again (manifest schema and fields,
+reviewed version, shadow copies, configuration paths) and refuses to start on
+any failure. No `NODE_OPTIONS` preload is passed to the container.
+
+The configuration path check reads `meshcentral-data/config.json` (keys matched
+case-insensitively, as MeshCentral lowercases them) and refuses any path the
+server would write or read outside the mounted folders, because the container's
+root filesystem is read-only and holds no other host folder. Paths that must be
+under a read-write mount (`meshcentral-data`, `meshcentral-files`,
+`meshcentral-recordings`, `meshcentral-backups`):
+`settings.autobackup.backuppath` (also refused inside `meshcentral-data`, where
+MeshCentral makes no backups), `settings.meshErrorLogPath`, and each domain's
+`sessionRecording.filepath`. Paths that may also be under the read-only
+`meshcentral-web`: each domain's `webViewsPath`, `webPublicPath` and
+`webEmailsPath`. Relative paths resolve from the container's working directory,
+`/opt/meshcentral`. Unset keys use MeshCentral's defaults,
+`/opt/meshcentral/meshcentral-backups` and `/opt/meshcentral/meshcentral-recordings`,
+which are mounted. Autobackup set to `false` and domains whose name starts with
+`_` are not checked. `settings.datapath` and `settings.filespath` are not checked:
+the container's `--datapath` and `--filespath` override them. The error names
+each key and its resolved path and no other configuration value.
 
 ### Reviewed MeshCentral versions
 
@@ -455,6 +473,11 @@ The runtime stage copies `/opt/meshcentral` root-owned and runs
 `node_modules/meshcentral/meshcentral.js` as the `node` user. The image contains no
 `deploy.py`, no MeshAgent tool copy, no overlay, and no `hashagents.json`.
 
+The image contains no `mongodump`. With a MongoDB database, MeshCentral's backup
+capability check runs `mongodump` (or `settings.autobackup.mongoDumpPath`) at
+start; when it cannot, the server warns "Mongodump error, backup will not be
+performed" and makes no automatic backups.
+
 `tools/deployment/Dockerfile.dockerignore` sends only those three inputs. From
 the MeshCentral clone it drops the root and `deploy/` `node_modules`,
 `deploy/dist`, `meshcentral-data`, `meshcentral-files`, `meshcentral-backups`,
@@ -536,12 +559,24 @@ release. In order, on the VPS, as root:
    preload stays installed.
 3. After the 1.3.1 database review, add `"1.3.1"` to `reviewed_versions` in
    `/etc/meshcentral-deploy.json`, keeping `"1.2.5"`.
-4. Set `settings.noagentupdate` to `true` in `meshcentral-data/config.json`
+4. In `meshcentral-data/config.json`, set `settings.autobackup.backupPath` to
+   `/opt/meshcentral/meshcentral-backups` (or remove it: that folder is the
+   default). The container mounts only `/opt/meshcentral/meshcentral-*`, and the
+   controller refuses a backup path elsewhere, such as `/var/meshcentral-backups`.
+   Keep the existing zips in `/var/meshcentral-backups` on the host as the
+   pre-cutover backup history; the server's retention (`keepLastDaysBackup`)
+   only prunes its own backup folder, so they are not deleted. Rename
+   `autobackup.intervalhours` to `backupIntervalHours` with the same value:
+   MeshCentral reads only `backupIntervalHours` (default 24), so
+   `intervalhours: 24` has no effect today and the rename changes nothing while
+   making the setting real. The deployment (step 8) runs the configuration
+   path check before stopping anything.
+5. Set `settings.noagentupdate` to `true` in `meshcentral-data/config.json`
    without restarting the host service. The controller writes the release's
    fleet policy only for the candidate; if the first promotion fails, recovery
    restores this file and restarts the 1.2.5 host, which must not offer the fleet
    1.2.5's own agent binaries.
-5. Move the shadow copies out of the governed paths into an archive outside
+6. Move the shadow copies out of the governed paths into an archive outside
    `meshcentral-data` and `meshcentral-web` (do not delete them; the manual
    return to the host needs them): `meshcentral-data/meshcore*.js`,
    `modules_meshcore*`, every file in `meshcentral-data/agents` except the
@@ -551,10 +586,11 @@ release. In order, on the VPS, as root:
    `public/scripts/custom.js`. Install `plugins/nativeruntime/*` and
    `custom.js` from the fork commit being released, so they match the release's
    `shadowAllowlist`. Delete `bin/refresh-signed-hashagents.py` (PRD-3).
-6. Run the shadow check against the candidate's manifest
+7. Run the shadow check against the candidate's manifest
    (`meshcentral_shadow_check.py --root /opt/meshcentral --manifest <manifest>`)
-   until it passes; the promotion runs the same check before stopping anything.
-7. Deploy the image digest. On success the controller moves the host's
+   until it passes; the promotion runs the same check, and the configuration path
+   check, before stopping anything.
+8. Deploy the image digest. On success the controller moves the host's
    `harden-image-size.js` and `30-harden-image-size.conf` to
    `/var/lib/meshcentral-deploy/retired-host-preload/<stamp>/` and reloads
    systemd; the deployment log names both files with their sha256.
