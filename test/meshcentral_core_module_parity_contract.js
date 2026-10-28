@@ -10,8 +10,8 @@
 //   - MeshAgent-owned (D22): modules both projects carry, shipped as MeshAgent's own copy. The
 //     package bytes equal MeshAgent's modules/<name>.js as git stores it (LF), byte for byte.
 //   - fork: modules upstream does not ship, or that the fork replaces. They equal MeshAgent's
-//     modules/<name>.js apart from line endings (the package keeps production's CRLF bytes), except
-//     the retained copies below.
+//     modules/<name>.js apart from line endings (the package keeps production's CRLF bytes), with no
+//     exceptions: clipboard is MeshAgent's copy too (CORE-56, operator 2026-10-28).
 //   - upstream: everything else equals the pinned upstream package (test/lib/meshcentral_upstream_
 //     reference.json) byte for byte, and every upstream module is present.
 // A file that fits none of these is unknown and fails.
@@ -32,15 +32,6 @@ const ABSENT = ['modules_meshcore_min', 'meshcore.min.js'];
 const MESHAGENT_OWNED = ['monitor-border', 'util-agentlog', 'win-console', 'win-deskutils', 'wifi-scanner'];
 // Upstream ships these, and the fork replaces them with MeshAgent's copy.
 const FORK_REPLACES_UPSTREAM = ['win-terminal', 'win-virtual-terminal'];
-// Deliberate exceptions, each with the reason the server copy must differ from modules/.
-const retained = {
-    // Builds that do not embed clipboard (before 2026-10-07) also lack the
-    // MeshClipboardBridgeW export the current module requires. The server copy
-    // keeps their in-process clipboard. Open (S1.6): the server sends it with the release date,
-    // which is newer than the embedded copy (2026-10-07), so it also replaces that copy on
-    // every build embedded before the release; production does the same today (2026-10-25).
-    'clipboard': ',MeshClipboardBridgeW'
-};
 
 const lf = (buffer) => buffer.toString('latin1').replace(/\r\n?/g, '\n');
 const moduleName = (file) => file.replace(/\.min\.js$/, '.js').replace(/\.(js|json)$/, '');
@@ -53,7 +44,7 @@ function exists(target) {
 function main() {
     const agents = forkFile('agents');
     const upstreamAgents = path.join(upstreamPackageDir(), 'agents');
-    const result = { owned: [], fork: [], retained: [], upstream: [], drifted: [], unknown: [], missingUpstream: [], missingOwned: [], present: [] };
+    const result = { owned: [], fork: [], upstream: [], drifted: [], unknown: [], missingUpstream: [], missingOwned: [], present: [] };
     assert(fs.statSync(agents).isDirectory(), 'MeshCentral package folder missing: ' + agents);
     for (const name of ABSENT) {
         if (exists(path.join(agents, name))) { result.present.push('agents/' + name); }
@@ -84,12 +75,6 @@ function main() {
                 }
             } else if (!inUpstream || FORK_REPLACES_UPSTREAM.includes(module)) {
                 if (!hasSource) { result.unknown.push(relative); continue; }
-                if (retained[module]) {
-                    // The exception holds only while the server copy avoids the export.
-                    result.retained.push(relative);
-                    if (lf(bytes).includes(retained[module])) { result.drifted.push(relative + ' (retained copy uses ' + retained[module] + ')'); }
-                    continue;
-                }
                 result.fork.push(relative);
                 if (lf(bytes) !== lf(fs.readFileSync(source))) { result.drifted.push(relative + ' (fork: must equal modules/' + module + '.js)'); }
             } else {
@@ -104,7 +89,7 @@ function main() {
 
     const checks = {
         // Guards against a vacuous pass if the layout changes.
-        everyClassPopulated: result.owned.length === MESHAGENT_OWNED.length && result.fork.length >= 9 && result.retained.length === 1 && result.upstream.length >= 15,
+        everyClassPopulated: result.owned.length === MESHAGENT_OWNED.length && result.fork.length >= 10 && result.upstream.length >= 15,
         everyMeshAgentOwnedModulePresent: result.missingOwned.length === 0,
         everyUpstreamModulePresent: result.missingUpstream.length === 0,
         noUnknownModule: result.unknown.length === 0,
@@ -114,7 +99,7 @@ function main() {
     };
     const failed = Object.keys(checks).filter((name) => !checks[name]);
     const counts = { owned: result.owned.length, fork: result.fork.length, upstream: result.upstream.length };
-    process.stdout.write(JSON.stringify({ success: failed.length === 0, counts, retained: result.retained, drifted: result.drifted, present: result.present,
+    process.stdout.write(JSON.stringify({ success: failed.length === 0, counts, drifted: result.drifted, present: result.present,
         unknown: result.unknown, missingUpstream: result.missingUpstream, missingOwned: result.missingOwned, checks }, null, 2) + '\n');
     assert(failed.length === 0, 'MeshCentral core module policy failed: ' + failed.join(', '));
 }

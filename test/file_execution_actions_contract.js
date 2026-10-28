@@ -22,39 +22,31 @@ function extractFunction(source, signature) {
     throw new Error(`Unterminated function: ${signature}`);
 }
 
+// The recovery core runs commands through the shared win-terminal RunCommand helper and reports its
+// failure result. The helper itself is exercised by MeshCentral deploy/tests/runcommands-terminal-output.test.js.
 function exerciseRecoveryCommandError(source) {
     const messages = [];
-    const handlers = {};
-    const terminal = {
-        _meshTerminalReadyMarkerProtocol: true,
-        onBridgeData(fn) { handlers.data = fn; },
-        onBridgeReady(fn) { handlers.ready = fn; },
-        on(name, fn) { handlers[name] = fn; },
-        closeBridge() { this._meshTerminalClosed = true; }
-    };
+    const runs = [];
     const sandbox = {
         process: { platform: 'win32' },
         sendConsoleText(text) { messages.push(String(text)); },
-        setTimeout() { return 1; },
-        clearTimeout() { },
         require(name) {
             if (name === 'win-terminal') {
-                return {
-                    RunPowerShellCommand() { return terminal; },
-                    RunPowerShellCommandAsUser() { return terminal; }
-                };
+                return { RunCommand(script, options, callback) { runs.push({ script, options, callback }); return {}; } };
             }
             if (name === 'user-sessions') return { consoleUid() { return 5; } };
             if (name === 'MeshAgent') return { SendCommand() { } };
             throw new Error(`Unexpected module: ${name}`);
         }
     };
-    vm.runInNewContext(`var recoveryRunCommandChild = null;\n${extractFunction(source, 'function recoveryRunCommands(')}`, sandbox);
-    sandbox.recoveryRunCommands({ runAsUser: 0, type: 2, cmds: 'Write-Output ok', reply: false, sessionid: 'session-1' });
-    assert(typeof handlers.error === 'function', 'recovery command must register an error handler');
-    handlers.error(new Error('ERROR_ELEVATION_REQUIRED'));
-    assert(messages.some((text) => text.includes('ERROR_ELEVATION_REQUIRED')), 'recovery command errors must be visible to the operator');
-    assert(messages.includes('Run commands failed.'), 'recovery command must report a failed terminal outcome');
+    const timeLimit = source.match(/^var RUN_COMMANDS_TIMEOUT_MS = \d+;$/m);
+    assert(timeLimit, 'recovery core must declare its run-commands time limit');
+    vm.runInNewContext(`${timeLimit[0]}\nvar recoveryRunCommandChild = null;\n${extractFunction(source, 'function recoveryRunCommands(')}`, sandbox);
+    sandbox.recoveryRunCommands({ runAsUser: 1, type: 2, cmds: 'Write-Output ok', reply: false, sessionid: 'session-1' });
+    assert(runs.length === 1 && runs[0].script === 'Write-Output ok' && runs[0].options.targetSessionId === 5 &&
+        runs[0].options.timeoutMs === Number(timeLimit[0].match(/\d+/)[0]), 'recovery command must run through RunCommand with the console user and the time limit');
+    runs[0].callback({ ok: false, output: '', error: 'ERROR_ELEVATION_REQUIRED', timedOut: false });
+    assert(messages.includes('Windows run commands failed: ERROR_ELEVATION_REQUIRED'), 'recovery command errors must be visible to the operator');
     assert(!messages.includes('Run commands completed.'), 'recovery command errors must not report success');
 }
 
@@ -155,8 +147,9 @@ function main() {
     exerciseRecoveryCommandError(recoverySource);
 
     for (const core of cores) {
-        const calls = [], replies = [];
+        const calls = [], replies = [], audit = [];
         const sandbox = { process: { platform: 'win32' }, Buffer, sendConsoleText() { },
+            MeshServerLog(msg) { audit.push([null, msg]); }, MeshServerLogEx(msgid, args, msg) { audit.push([msgid, msg]); },
             require(name) { assert(name === 'MeshAgent', 'native handler must not load helpers'); return { fileAction(...args) { calls.push(args); return { ok: true, pid: 42 }; } }; } };
         vm.runInNewContext(extractFunction(core.source, 'function nativeFileAction('), sandbox);
         const invoke = (rights, action, extra) => sandbox.nativeFileAction({ httprequest: { rights }, write(data) { replies.push(JSON.parse(data)); } }, Object.assign({ action, path: 'C:\\literal & name.exe', reqid: 'owned' }, extra));
@@ -172,6 +165,9 @@ function main() {
         assert(calls.length === 4 && calls[0][2] === false && calls[1][2] === true && calls[2][2] === false && calls[3][2] === true, `${core.relativePath}: native identity and delete mode must be explicit`);
         assert(calls.every((c) => c[1] === 'C:\\literal & name.exe'), 'paths must remain literal');
         assert(replies.every((r) => r.reqid === 'owned' && r.action === 'fileaction'), 'every outcome must retain correlation');
+        // Every request is audited as its own action: execute never reuses 20 ("Opening: {0}").
+        assert(audit.length === 8 && audit.slice(0, 6).every(([msgid, msg]) => msgid === null && msg.startsWith('Execute')) &&
+            audit[6][0] === 20 && audit[7][0] === 45, `${core.relativePath}: file actions must be audited as themselves`);
         sandbox.require = () => ({});
         const missing = invoke(8 | 131072, 'execute', { privileged: false });
         assert(!missing.ok && missing.error.includes('Update the agent'), 'old agents must fail visibly without a helper fallback');
@@ -189,10 +185,10 @@ function main() {
         nativeDeleteDoesNotTraverseReparsePoints: native.includes('FILE_FLAG_OPEN_REPARSE_POINT') && native.includes('FILE_ATTRIBUTE_REPARSE_POINT'),
         nativeCodeHasNoHelperCommands: !/powershell|schtasks|rundll32|cmd\.exe/i.test(native),
         allFilesCoresHandleRunCommands: cores.every(({ source }) => source.includes("case 'runcommands':")),
-        allFilesCoresUseApprovedTokenBridge: cores.every(({ source }) => source.includes("'RunPowerShellCommandAsUser'") && source.includes("'RunPowerShellCommand'")),
-        allFilesCoresReportTerminalFailure: cores.every(({ source }) => source.includes('Run commands failed.')),
+        allFilesCoresUseSharedRunCommandHelper: cores.every(({ source }) => source.includes("require('win-terminal').RunCommand(commandText, {") && !source.includes('RunPowerShellCommand')),
+        allFilesCoresReportTerminalFailure: cores.every(({ source }) => source.includes("'Windows run commands failed: '") && source.includes("'Windows run commands timed out: '")),
         recoveryRejectsInvalidIdentity: recoverySource.includes("sendResult('Invalid runAsUser value.')"),
-        recoveryHasBoundedCommandLifetime: recoverySource.includes('}, 300000);'),
+        recoveryHasBoundedCommandLifetime: recoverySource.includes('timeoutMs: RUN_COMMANDS_TIMEOUT_MS'),
         recoveryInjectedErrorReportsFailure: true
     };
     for (const [name, passed] of Object.entries(checks)) assert(passed, `file execution actions contract failed: ${name}`);

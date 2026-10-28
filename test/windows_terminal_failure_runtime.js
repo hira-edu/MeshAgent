@@ -8,9 +8,12 @@ async function run(scenario) {
     const servers = [], child = new EventEmitter();
     let killed = 0, closed = 0;
     child.kill = () => ++killed;
+    const logged = [];
     const context = {process: {platform: 'win32', pid: 123}, module: {exports: {}}, Buffer, Date,
-        setTimeout, clearTimeout, setImmediate,
+        setTimeout, clearTimeout, setImmediate, _MSH: () => ({}),
         require(name) {
+            if (name === '_agentNodeId') { if (scenario === 'identity') throw Error('no native identity'); return {serviceName: () => 'Mesh Agent'}; }
+            if (name === 'MeshAgent') return {log: line => logged.push(line)};
             if (name === 'stream') return require('stream');
             if (name === 'child_process') return {execFile: () => child};
             if (name === 'net') return {createServer(callback) {
@@ -33,14 +36,18 @@ async function run(scenario) {
         const socket = new EventEmitter(); socket.end = () => {};
         servers[1].connect(socket); socket.emit('close');
     }
-    assert.match(error.message, scenario === 'path' ? /invalid service/ : /output closed before ready/);
+    assert.match(error.message, {path: /invalid service/, identity: /service identity is unavailable \(service name: Error: no native identity\)/,
+        output: /output closed before ready/}[scenario]);
     assert.equal(closes, 1);
     assert.equal(closed, 2);
-    assert.equal(killed, scenario === 'path' ? 0 : 1);
-    assert.equal(stream._meshTerminalReady, false);
+    assert.equal(killed, scenario === 'output' ? 1 : 0);
+    assert.equal(stream.isBridgeReady(), false);
+    assert.equal(stream.lastError(), String(error));
+    // A bridge process stopped after a failure is recorded in the agent log; nothing else is.
+    assert.deepEqual(logged, scenario === 'output' ? ['Console bridge: stopping bridge pid undefined (cmd, pty, privileged-agent) after: ' + String(error)] : []);
 }
 (async () => {
-    await run('path'); await run('output');
+    await run('path'); await run('identity'); await run('output');
     console.log('Terminal startup failures reach listeners and close all resources exactly once.');
     if (process.argv.includes('--native')) {
         assert.equal(process.platform, 'win32');
