@@ -217,9 +217,21 @@ fixture or options.
 
 ### Runtime probes
 
-Behavioral probes that require built files and exercise the agent at runtime.
-They generally follow `test/*_runtime.js` and must be run after a build so the
-binaries they load are present.
+Behavioral probes that exercise the agent at runtime. They generally follow
+`test/*_runtime.js`. Some execute the agent modules or the MeshCentral fork in a
+vm with injected processes, files and timers and need no build; the others load
+built binaries, so run them after a build.
+
+`.github/workflows/contracts.yml` runs every `test/*_runtime.js` on Linux,
+except the ones in its `EXCLUDED_TESTS` list, each with its reason: built
+Windows binaries, an interactive Windows desktop, a service install, macOS, a
+browser, a .NET SDK or a live server. A new runtime therefore runs in CI unless
+it is listed, and a listed path that no longer exists fails the job.
+
+`python test/deploy_service_host_export_runtime.py` checks that the built x64
+and ARM64 `MeshServiceBundle` DLLs export the service host entry points and that
+the deploy checks reject a DLL with one removed. No workflow builds those DLLs,
+so run it after a local bundle build.
 
 `python3 test/network_policy_branding_native.py` runs the production firewall
 label migration and WFP identity checks with in-memory COM/WFP stores and
@@ -921,6 +933,9 @@ python3 test/macos_message_helper_agent_runtime.py --agent /absolute/path/to/bui
 python3 test/js_timer_retention_runtime.py --agent /absolute/path/to/built/meshagent
 python3 test/posix_fs_modes_agent_runtime.py --agent /absolute/path/to/built/meshagent
 ```
+
+`macos_install_runtime.js` runs the real `/usr/bin/plutil` and installs under
+POSIX paths, so on any other platform it prints `SKIP (darwin only)` and exits 0.
 
 Installation probes redirect `/Library` writes into temporary directories and
 verify publication order, handled-failure cleanup, private file modes and retained
