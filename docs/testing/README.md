@@ -629,30 +629,40 @@ checks that `update-online` exits 1 and names the agents still pending, and that
 
 `tools/duplicate_server/` runs a local copy of the production MeshCentral server
 under `C:\mc-dup` (override with `MC_DUP_ROOT`) with fresh keys and no production
-data or access. Layout A reproduces the current production layout; layout B
-installs a MeshCentral tarball with no overrides. Setup, the known differences
-from production, and the test-agent build are in
+data or access. Layout A reproduces production until the Stage 4 cutover (stock
+MeshCentral 1.2.5 on Node 20.20.2, with production's image-size preload); layout
+B is the fork package at MeshCentral 1.3.1 on Node 24.22.1, installed by `npm ci`
+against the deployment wrapper's lock, with no data-dir copies and no preload.
+Setup, the known differences from production, and the test-agent build are in
 [`tools/duplicate_server/README.md`](../../tools/duplicate_server/README.md).
 
 ```powershell
 python tools\duplicate_server\dupserver.py setup
-python tools\duplicate_server\dupserver.py start
-python tools\duplicate_server\dupserver.py checklist
-python tools\duplicate_server\dupserver.py layout-b --tarball <tgz>
+python tools\duplicate_server\dupserver.py layout-b --agents <folder with the pinned agent builds>
+python tools\duplicate_server\dupserver.py start --layout A
 python tools\duplicate_server\dupserver.py start --layout B
-python tools\duplicate_server\dupserver.py checklist --layout B --label <name>
-python tools\duplicate_server\dupserver.py status
+python tools\duplicate_server\dupserver.py checklist --layout A
+python tools\duplicate_server\dupserver.py checklist --layout B
+python tools\duplicate_server\dupserver.py stop --layout B
+python tools\duplicate_server\dupserver.py pin-check
 python tools\duplicate_server\dupserver.py stop --layout all
+python tools\duplicate_server\dupserver.py dbcompat
 python tools\duplicate_server\dupserver.py teardown
 ```
 
-`setup` downloads pinned Node and MongoDB builds, verifies their checksums, and
-needs network access to their publishers and the npm registry. `checklist` writes
+`setup` and `layout-b` download the pinned Node, MongoDB and MongoDB Database
+Tools builds, verify their checksums, and need network access to their publishers
+and the npm registry. `checklist` writes
 `C:\mc-dup\reports\checklist-<layout>-<label>-<time>.json`, with every item
 marked `PASS`, `FAIL`, `INFO`, or `PENDING-VM` (items that need a test agent). It
 reads core composition, agent binary selection, and plugin state through
 MeshCentral's own objects, reads view selection over HTTPS from the running
-server, and checks that the image-size preload printed its success line.
+server, and checks the image-size preload per layout, the D6 self-update settings
+and an autobackup with `mongodump`. Layout B's served Windows agents must equal
+the pins in the package's `agents/agent-defaults.json`; `pin-check` shows that
+the fork does not serve when one of them changes. `dbcompat` runs each layout's
+`db.js` through 1.2.5, 1.3.1, a rollback, a re-upgrade and the rollback drop list
+on a production-sized scratch database and records the index-build times.
 `python test\duplicate_server_tools_contract.py` checks the tooling itself
 without starting a server.
 
