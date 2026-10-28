@@ -14,6 +14,7 @@ python tools\duplicate_server\dupserver.py checklist                # plan secti
 python tools\duplicate_server\dupserver.py layout-b --tarball <tgz> [--bind <ip>] # layout B from a fork tarball
 python tools\duplicate_server\dupserver.py layout-b --standin       # layout B from npm pack meshcentral@1.2.5
 python tools\duplicate_server\dupserver.py layout-b --stage1        # B-stage1: fork tarball + A's data/web + A's config
+python tools\duplicate_server\dupserver.py layout-b --stage1 --retire-overrides  # B-stage2: B-stage1 + the D16 web cutover
 python tools\duplicate_server\dupserver.py start --layout B         # layout B on https://127.0.0.1:4432
 python tools\duplicate_server\dupserver.py checklist --layout B --label <name>
 python tools\duplicate_server\dupserver.py status
@@ -85,6 +86,17 @@ and fresh secrets. The checklist compares B-stage1 with production like layout A
 and adds 1d, "node_modules/meshcentral equals the tarball". Its 7b requires the core to come from the
 package with production's core text, and its 7d requires every served module version to equal the
 release manifest `agents/module-versions.json`.
+
+**B-stage2** (`layout-b --stage1 --retire-overrides`) is B-stage1 plus the Stage 2 web cutover (D16).
+The capture's 62 hand-made `default3` overrides (`meshcentral-web/views`, main page, `-min` and every
+translation) and the two r0 canary scripts are left out. The build fails unless exactly those 64 files
+match, and unless no `meshcentral-web/views` folder is left. `custom.js` stays. The config is B-stage1's
+without `customFiles`, which holds only the r0 canary entry. The checklist runs B-stage1's production
+comparisons, except views: there the package's own page must serve, so `default3` comes with #8104. It
+also adds `d16`, which requires:
+- no retired file or override folder on disk;
+- `customFiles` omitted in the config record;
+- no canary reference in the served page.
 
 ## Checklist
 

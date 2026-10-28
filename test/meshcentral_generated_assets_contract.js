@@ -3,7 +3,8 @@
 // agents/modules_meshcore_min/**, public/scripts/*-min.js and any other *.min.js) must be
 // listed in fixtures/meshcentral-fork-hunks/generated-assets.json with how it is produced.
 //   builders        each reproducible builder runs with --check and must report no drift.
-//   built           the file is fully produced by one of those builders.
+//   built           the file is fully produced by one of those builders (relation minified or
+//                   translated, or copy-of-source).
 //   no-builder-yet  nothing regenerates the file yet. It is reported as PENDING with its
 //                   size and line count next to its source, plus the work package that
 //                   adds a builder. A copy-of-source file must still equal its source,
@@ -51,7 +52,9 @@ function loadManifest() {
         assert(['built', 'no-builder-yet'].includes(entry.state), file + ': state must be built or no-builder-yet');
         if (entry.state === 'built') { assert(manifest.builders[entry.builder], file + ': built needs a known builder'); }
         if (entry.state === 'no-builder-yet') { assert(manifest.pending[entry.pending], file + ': no-builder-yet needs a known pending record'); }
-        assert(['copy-of-source', 'minified', 'hand-edited'].includes(entry.relation), file + ': relation must be copy-of-source, minified or hand-edited');
+        assert(['copy-of-source', 'minified', 'translated', 'hand-edited'].includes(entry.relation), file + ': relation must be copy-of-source, minified, translated or hand-edited');
+        // A translated page (translate.js) is only reproducible by its builder, so it must be built.
+        if (entry.relation === 'translated') { assert(entry.state === 'built', file + ': translated must be built by a builder'); }
         if (entry.knownDrift) {
             assert(entry.relation === 'copy-of-source' && typeof entry.knownDrift.diff === 'string' && entry.knownDrift.id && entry.knownDrift.description, file + ': knownDrift needs id, description and diff on a copy-of-source file');
         }

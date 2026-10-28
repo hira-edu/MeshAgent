@@ -122,29 +122,37 @@ def dup_value(kind, key, layout, spec, context):
     raise DupError(f"Unknown dup kind {kind!r} for {key}")
 
 
-def generate(layout, mongodb_uri, bind="127.0.0.1", profile=None):
+# Config keys the D16 cutover retires (B-stage2): customFiles holds only the r0 canary entry.
+D16_RETIRED_KEYS = {("domain", "customFiles"): "D16 cutover: the r0 canary customFiles entry is retired with its script"}
+
+
+def generate(layout, mongodb_uri, bind="127.0.0.1", profile=None, retire_d16=False):
     """Build the config dict and a record of every key that differs from production.
 
     profile selects which layout's production values apply (the "layouts" lists in
     production_flags.json); it defaults to the layout. B-stage1 uses profile "A": production's
-    config, including customFiles, on layout B's ports, database and fresh secrets."""
+    config, including customFiles, on layout B's ports, database and fresh secrets. retire_d16
+    (B-stage2) drops the keys the D16 cutover retires (D16_RETIRED_KEYS)."""
     profile = profile or layout
     if profile not in LAYOUTS:
         raise DupError(f"Unknown config profile {profile!r}")
     flags = load_flags()
     template = json.loads(template_path().read_text(encoding="utf-8"))
     record = {"template": str(template_path()), "evidence": str(EXTRA_VALUES_PATH), "bind": validate_bind(bind),
-              "profile": profile,
+              "profile": profile, "retire_d16": retire_d16,
               "dropped_template_keys": [], "from_evidence": [], "substituted": [], "omitted": [], "duplicate_only": []}
     context = {"mongodb": mongodb_uri, "bind": validate_bind(bind), "extra": load_extra_values()}
 
-    def build(section_template, section_flags, label):
+    def build(section_template, section_flags, label, section):
         result = {}
         production_lower = {key.lower(): key for key in section_flags}
         for key in section_template:
             if key.lower() not in production_lower:
                 record["dropped_template_keys"].append(f"{label}.{key}")
         for key, spec in section_flags.items():
+            if retire_d16 and (section, key) in D16_RETIRED_KEYS:
+                record["omitted"].append({"key": f"{label}.{key}", "reason": D16_RETIRED_KEYS[(section, key)]})
+                continue
             if "value" in spec:
                 result[key] = spec["value"]
             elif "omit" in spec:
@@ -164,8 +172,12 @@ def generate(layout, mongodb_uri, bind="127.0.0.1", profile=None):
                 record["substituted"].append(entry)
         return result
 
-    settings = build(template.get("settings", {}), flags["settings"], "settings")
-    domain = build(template.get("domains", {}).get("", {}), flags["domain"], "domains['']")
+    settings = build(template.get("settings", {}), flags["settings"], "settings", "settings")
+    domain = build(template.get("domains", {}).get("", {}), flags["domain"], "domains['']", "domain")
+    if retire_d16:
+        for section, key in D16_RETIRED_KEYS:
+            if key not in flags[section]:
+                raise DupError(f"D16 cutover retires {section}.{key}, which production_flags.json no longer lists")
     settings["mongoDbName"] = LAYOUTS[layout]["db"]
     record["duplicate_only"].append({"key": "settings.mongoDbName", "value": LAYOUTS[layout]["db"],
                                      "reason": flags["duplicate_only_settings"]["mongoDbName"]})
@@ -177,8 +189,8 @@ def generate(layout, mongodb_uri, bind="127.0.0.1", profile=None):
     return config, record
 
 
-def write_config(layout, mongodb_uri, bind="127.0.0.1", profile=None):
-    config, record = generate(layout, mongodb_uri, bind, profile)
+def write_config(layout, mongodb_uri, bind="127.0.0.1", profile=None, retire_d16=False):
+    config, record = generate(layout, mongodb_uri, bind, profile, retire_d16)
     text = json.dumps(config, indent=2) + "\n"
     hits = scan_text(text, load_denylist())
     if hits:

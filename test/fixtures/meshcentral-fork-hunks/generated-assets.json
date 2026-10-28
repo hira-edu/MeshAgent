@@ -18,6 +18,20 @@
       "covers": [
         "the generated desktop audio block at the end of public/scripts/agent-redir-ws-0.1.1.js and public/scripts/agent-redir-ws-0.1.1-min.js"
       ]
+    },
+    "views-translations": {
+      "script": "deploy/scripts/regenerate.js",
+      "args": [
+        "--check",
+        "--only",
+        "translations,views"
+      ],
+      "covers": [
+        "views/*-min.handlebars",
+        "views/translations/*",
+        "agents/agent-translations.json",
+        "agents/modules_meshcore/coretranslations.json"
+      ]
     }
   },
   "pending": {
@@ -40,6 +54,419 @@
       "source": "public/scripts/agent-redir-ws-0.1.1.js",
       "pending": "redir-min",
       "producedBy": "Upstream npm 1.2.5 agent-redir-ws-0.1.1-min.js with the protocol-2 connect deferral edited in by hand, followed by the desktop audio block that scripts/build-desktop-audio-control.js appends (only that block is checked)."
+    },
+    "views/default3-min.handlebars": {
+      "state": "built",
+      "relation": "minified",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js minifyall of views/default3.handlebars."
+    },
+    "views/translations/default3-min_ar.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_bs.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_ca.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_cs.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_da.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_de.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_el.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_es.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_fi.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_fr.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_he.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_hi.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_hr.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_hu.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_it.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_ja.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_ko.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_nl.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_pl.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_pt-br.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_pt.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_ro.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_ru.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_sr.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_sv.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_tr.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_uk.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_zh-chs.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3-min_zh-cht.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall (translated, then minified) of views/default3.handlebars."
+    },
+    "views/translations/default3_ar.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_bs.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_ca.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_cs.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_da.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_de.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_el.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_es.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_fi.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_fr.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_he.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_hi.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_hr.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_hu.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_it.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_ja.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_ko.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_nl.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_pl.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_pt-br.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_pt.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_ro.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_ru.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_sr.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_sv.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_tr.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_uk.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_zh-chs.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
+    },
+    "views/translations/default3_zh-cht.handlebars": {
+      "state": "built",
+      "relation": "translated",
+      "source": "views/default3.handlebars",
+      "builder": "views-translations",
+      "producedBy": "deploy/scripts/regenerate.js (pinned toolchain): translate.js translateall of views/default3.handlebars."
     }
   },
   "vendored": {

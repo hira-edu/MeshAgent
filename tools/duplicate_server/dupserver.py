@@ -6,7 +6,7 @@
     python tools/duplicate_server/dupserver.py checklist [--layout A|B]
     python tools/duplicate_server/dupserver.py status
     python tools/duplicate_server/dupserver.py stop [--layout A|B|all]
-    python tools/duplicate_server/dupserver.py layout-b (--tarball <tgz> | --standin | --stage1) [--bind 127.0.0.1]
+    python tools/duplicate_server/dupserver.py layout-b (--tarball <tgz> | --standin | --stage1 [--retire-overrides]) [--bind 127.0.0.1]
     python tools/duplicate_server/dupserver.py reset [--layout A|B|all]
     python tools/duplicate_server/dupserver.py teardown
 
@@ -59,13 +59,14 @@ def create_web_admin(layout):
     return creds
 
 
-def configure_layout(layout, bind, profile=None):
+def configure_layout(layout, bind, profile=None, retire_d16=False):
     """bind is the address MeshCentral listens on (portBind, mpsPortBind). mongod stays on 127.0.0.1.
-    profile picks which layout's production config values apply (B-stage1 uses A's)."""
+    profile picks which layout's production config values apply (B-stage1 uses A's); retire_d16
+    (B-stage2) drops the config keys the D16 cutover retires."""
     dup_config.validate_bind(bind)
     dup_mongo.start()
     dup_mongo.initialize_users()
-    dup_config.write_config(layout, dup_mongo.connection_uri(layout), bind, profile)
+    dup_config.write_config(layout, dup_mongo.connection_uri(layout), bind, profile, retire_d16)
     create_web_admin(layout)
 
 
@@ -86,9 +87,11 @@ def cmd_setup(args):
 def cmd_layout_b(args):
     require_root_marker()
     dup_config.validate_bind(args.bind)
+    if args.retire_overrides and not args.stage1:
+        raise DupError("--retire-overrides needs --stage1")
     if args.stage1:
-        dup_layout.build_layout_b(stage1=True)
-        configure_layout("B", args.bind, profile="A")
+        dup_layout.build_layout_b(stage1=True, retire_overrides=args.retire_overrides)
+        configure_layout("B", args.bind, profile="A", retire_d16=args.retire_overrides)
     else:
         dup_layout.build_layout_b(dup_layout.upstream_tarball() if args.standin else Path(args.tarball))
         configure_layout("B", args.bind)
@@ -219,6 +222,8 @@ def main(argv=None):
     group.add_argument("--standin", action="store_true", help="use the pinned stock `npm pack meshcentral@1.2.5`")
     group.add_argument("--stage1", action="store_true",
                        help="B-stage1: the wrapper's fork tarball, layout A's data and web folders without shadow cores, and A's config")
+    b.add_argument("--retire-overrides", action="store_true",
+                   help="with --stage1, B-stage2: also apply the D16 web cutover (no default3 overrides, no r0 canary script or customFiles entry)")
     for name in ("start", "stop", "checklist", "reset"):
         p = sub.add_parser(name)
         p.add_argument("--layout", choices=list(LAYOUTS) + ["all"])

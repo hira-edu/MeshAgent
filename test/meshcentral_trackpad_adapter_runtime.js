@@ -1,4 +1,4 @@
-// Run the trackpad adapters in real browsers against fixtures built from the pinned MeshCentral
+// Run the trackpad adapters in real browsers against fixtures built from the fork's MeshCentral
 // views: the views' exact canvas markup and their own touch, mouse and trackpad code (sliced from
 // default3.handlebars and default-mobile.handlebars), with the real agent-desktop module recording
 // the packets it would send. Chromium gets real multi-touch through CDP, so the browser's
@@ -8,12 +8,15 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { meshcentralRoot, upstreamPackageDir } = require('./lib/meshcentral_paths');
+const { meshcentralRoot } = require('./lib/meshcentral_paths');
 
 const meshcentral = meshcentralRoot();
 const scripts = path.join(meshcentral, 'public/scripts');
-// Stock upstream views, not the installed package: since Stage 1 the installed package is the fork.
-const views = path.join(upstreamPackageDir(), 'views');
+// The fork's own package source: since Stage 2 the fork serves its own views (the production
+// overrides are retired, D16, and #8104 is a fork commit). How these files differ from the pinned
+// upstream package is checked separately, hunk by hunk, by meshcentral_upstream_base_contract.js,
+// so an upstream change stays visible there.
+const views = path.join(meshcentral, 'views');
 
 function view(name) { return fs.readFileSync(path.join(views, name), 'utf8').replace(/\r\n/g, '\n'); }
 function slice(source, start, end, name) {

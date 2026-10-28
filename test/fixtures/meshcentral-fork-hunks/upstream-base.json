@@ -167,6 +167,305 @@
     "public/scripts/opus-decoder-0.7.11.min.js": {
       "state": "fork-only",
       "reviewed": "Vendored opus-decoder 0.7.11 release build and its licence, used by the desktop audio player."
+    },
+    "views/default3-min.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/default3.handlebars": {
+      "state": "enforced",
+      "reviewed": "Upstream #8104 (31618e90d, from 1.2.6), cherry-picked as fork 1e378b0b7 (D15): no synthetic click on mobile connect. The is-mobile GrabMouseInput override also drops the DOM mouse handlers; the connect wake sends SendUnPause plus SendRefresh at 300/800/1600/2600 ms, and one pointer move (never a button) at 3500 ms only if no frame has arrived. The diff is upstream's commit exactly; it disappears when the fork merges 1.2.6."
+    },
+    "views/translations/default3-min_ar.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_bs.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_ca.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_cs.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_da.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_de.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_el.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_es.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_fi.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_fr.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_he.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_hi.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_hr.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_hu.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_it.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_ja.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_ko.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_nl.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_pl.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_pt-br.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_pt.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_ro.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_ru.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_sr.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_sv.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_tr.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_uk.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_zh-chs.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3-min_zh-cht.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_ar.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_bs.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_ca.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_cs.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_da.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_de.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_el.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_es.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_fi.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_fr.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_he.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_hi.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_hr.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_hu.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_it.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_ja.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_ko.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_nl.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_pl.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_pt-br.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_pt.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_ro.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_ru.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_sr.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_sv.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_tr.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_uk.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_zh-chs.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
+    },
+    "views/translations/default3_zh-cht.handlebars": {
+      "state": "generated",
+      "source": "views/default3.handlebars",
+      "reviewed": "Regenerated from views/default3.handlebars by deploy/scripts/regenerate.js after #8104 (fork ca425b3c1); differs from upstream only by that change."
     }
   },
   "removed": {
@@ -199,7 +498,68 @@
     "agents/modules_meshcore_min/win-securitycenter.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
     "agents/modules_meshcore_min/win-terminal.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
     "agents/modules_meshcore_min/win-virtual-terminal.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
-    "agents/modules_meshcore_min/win-volumes.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore."
+    "agents/modules_meshcore_min/win-volumes.min.js": "D24: the fork ships no minified agent core (minifycore is off, so it is never served; no pinned minifier builds it). With minifycore on, MeshCentral falls back to meshcore.js and modules_meshcore.",
+    "emails/translations/account-check_ja-jp.html": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/account-check_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/account-invite_ja-jp.html": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/account-invite_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/account-login_ja-jp.html": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/account-login_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/account-reset_ja-jp.html": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/account-reset_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/device-help_ja-jp.html": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/device-help_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/device-notify_ja-jp.html": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/device-notify_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/mesh-invite_ja-jp.html": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/mesh-invite_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "emails/translations/sms-messages_ja-jp.txt": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/agentinvite-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/agentinvite_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/default-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/default-mobile-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/default-mobile_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/default3-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/default3_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/default_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/download-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/download2-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/download2_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/download_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/error404-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/error404-mobile-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/error404-mobile_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/error404_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/invite-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/invite_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/login-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/login-mobile-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/login-mobile_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/login2-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/login2_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/login_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/message-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/message2-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/message2_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/message_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/messenger-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/messenger_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/mstsc-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/mstsc_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/player-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/player_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/sharing-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/sharing-mobile-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/sharing-mobile_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/sharing_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/ssh-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/ssh_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/terms-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/terms-mobile-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/terms-mobile_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/terms_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/xterm-min_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1).",
+    "views/translations/xterm_ja-jp.handlebars": "Stale ja-jp translation upstream 1.2.5 ships but translate.json no longer produces; deleted by regenerate.js in Stage 2 (D23, fork ca425b3c1)."
   },
   "excluded": {
     "public/scripts/custom.js": "Out of scope by operator decision (SSOT rule 8): never opened by this contract. The package copy is npm's empty stub; the served custom.js is deploy/meshcentral-web/public/scripts/custom.js."
