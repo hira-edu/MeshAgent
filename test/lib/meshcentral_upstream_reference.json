@@ -1,9 +1,9 @@
 {
-  "comment": "Stock upstream MeshCentral package that tests compare the fork against. integrity is the npm tarball sha512 (as in the wrapper package-lock.json before Stage 1); treeDigest is the digest of the extracted package tree (see test/lib/meshcentral_paths.js treeDigest). Populate the cache with: python test/lib/fetch_upstream_reference.py",
+  "comment": "Stock upstream MeshCentral package that tests compare the fork against. integrity is the npm tarball sha512 (the registry's dist.integrity); treeDigest is the digest of the extracted package tree (see test/lib/meshcentral_paths.js treeDigest). Populate the cache with: python test/lib/fetch_upstream_reference.py",
   "name": "meshcentral",
-  "version": "1.2.5",
-  "tarball": "https://registry.npmjs.org/meshcentral/-/meshcentral-1.2.5.tgz",
-  "integrity": "sha512-9j/FuqbnkrG6yFy5jR9Q9POIQSxWJAGjVf53oREjkCAsQ9Me2G0jt+4gayU8rFcvEXDHKjwkXLyxOW9IPpbEJg==",
-  "fileCount": 2675,
-  "treeDigest": "sha256:565670c75e53dc9b604e9dea51202f2774f2d6f1f23c87e5efe1dde634ba499a"
+  "version": "1.3.1",
+  "tarball": "https://registry.npmjs.org/meshcentral/-/meshcentral-1.3.1.tgz",
+  "integrity": "sha512-adf9wyq+78RK6HTRNlF0OO9sPs6dzDaYlScaHRqs2w8xefm/QmS/zdrwuV2UuWWiOqh1RWPxgGNVwF/qvjL0Xg==",
+  "fileCount": 2646,
+  "treeDigest": "sha256:207e3ce14bd504a34a9f91907866dacb29c0efa38e42ad59dbc796a5335be603"
 }

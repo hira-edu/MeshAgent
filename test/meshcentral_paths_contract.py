@@ -306,7 +306,7 @@ def upstream_missing_marker_fails():
 def upstream_pin_is_complete():
     import re
     pin = paths.load_reference_pin()
-    assert pin["name"] == "meshcentral" and pin["version"] == "1.2.5"
+    assert pin["name"] == "meshcentral" and pin["version"] == "1.3.1"
     assert re.fullmatch(r"sha512-[A-Za-z0-9+/]{86}==", pin["integrity"]), pin["integrity"]
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", pin["treeDigest"]), pin["treeDigest"]
     assert isinstance(pin["fileCount"], int) and pin["fileCount"] > 0
