@@ -15,7 +15,7 @@ const scriptsDir = path.join(meshcentralRoot(), 'public', 'scripts');
 // upstream package is checked separately, hunk by hunk, by meshcentral_upstream_base_contract.js,
 // so an upstream change stays visible there.
 const viewsDir = path.join(meshcentralRoot(), 'views');
-const PINNED_MESHCENTRAL = '1.2.5';
+const PINNED_MESHCENTRAL = '1.3.1';
 
 function hex(packet) { return packet.map(b => b.toString(16).padStart(2, '0')).join(''); }
 
