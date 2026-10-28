@@ -69,9 +69,11 @@ function resolveSourceSet(args) {
         db: args['source-db'] ? path.resolve(args['source-db']) : defaultSidecar(exe, '.db'),
         msh: args['source-msh'] ? path.resolve(args['source-msh']) : defaultSidecar(exe, '.msh'),
         conf: args['source-conf'] ? path.resolve(args['source-conf']) : defaultSidecar(exe, '.conf'),
+        // The agent no longer stages agent-selftest.js itself; the harness copies the
+        // source module into the install directory, which is the self-test host's CWD.
         selfTestScript: args['source-selftest']
             ? path.resolve(args['source-selftest'])
-            : (fs.existsSync(path.join(path.dirname(exe), 'agent-selftest.js')) ? path.join(path.dirname(exe), 'agent-selftest.js') : null)
+            : [path.join(path.dirname(exe), 'agent-selftest.js'), path.join(REPO_ROOT, 'modules', 'agent-selftest.js')].find(candidate => fs.existsSync(candidate)) || null
     };
 }
 

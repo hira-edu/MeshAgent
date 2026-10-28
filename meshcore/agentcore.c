@@ -227,9 +227,6 @@ static int MeshAgent_ResolveControlChannelAddress(MeshAgentHostContainer *agent,
 }
 
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
-static BOOL MeshAgent_StageSelfTestModule(const wchar_t* installDir);
-static void MeshAgent_StageSelfTestModuleBestEffort(void);
-static void MeshAgent_StageSelfTestModuleForCurrentExeBestEffort(void);
 static void MeshAgent_EnsureCoreModuleRuntimeGlobals(duk_context* ctx);
 BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath);
 
@@ -347,15 +344,6 @@ static BOOL MeshAgent_WaitForServiceNotRunning(const wchar_t* serviceName, DWORD
 	return FALSE;
 }
 
-static BOOL MeshAgent_CopyFileIfPresentW(const wchar_t* sourcePath, const wchar_t* destPath)
-{
-	if (sourcePath == NULL || destPath == NULL) { return FALSE; }
-	DWORD attr = GetFileAttributesW(sourcePath);
-	if (attr == INVALID_FILE_ATTRIBUTES) { return FALSE; }
-	SetFileAttributesW(destPath, FILE_ATTRIBUTE_NORMAL);
-	return (CopyFileW(sourcePath, destPath, FALSE) != 0);
-}
-
 static void MeshAgent_EnsureCoreModuleRuntimeGlobals(duk_context* ctx)
 {
 	if (ctx == NULL) { return; }
@@ -373,98 +361,6 @@ static void MeshAgent_EnsureCoreModuleRuntimeGlobals(duk_context* ctx)
 		return;
 	}
 	duk_pop(ctx);
-}
-
-static BOOL MeshAgent_FindModulePathFromBaseDir(const wchar_t* baseDir, const wchar_t* moduleFileName, wchar_t* output, size_t outputLen)
-{
-	if (baseDir == NULL || baseDir[0] == L'\0' || moduleFileName == NULL || moduleFileName[0] == L'\0' || output == NULL || outputLen == 0)
-	{
-		return FALSE;
-	}
-
-	// Only the module directory directly beside the binary is trusted. Walking parent directories
-	// (or the process working directory) would let a standard user plant a module at a path such as
-	// C:\modules that the service then copies into the install directory and executes.
-	if (FAILED(StringCchPrintfW(output, outputLen, L"%s\\modules\\%s", baseDir, moduleFileName)) ||
-		GetFileAttributesW(output) == INVALID_FILE_ATTRIBUTES)
-	{
-		output[0] = L'\0';
-		return FALSE;
-	}
-	return TRUE;
-}
-
-static BOOL MeshAgent_FindModulePath(const wchar_t* moduleFileName, wchar_t* output, size_t outputLen)
-{
-	if (moduleFileName == NULL || output == NULL || outputLen == 0) { return FALSE; }
-	output[0] = L'\0';
-
-	wchar_t exeDir[MAX_PATH] = {0};
-	if (GetModuleFileNameW(NULL, exeDir, _countof(exeDir)) > 0)
-	{
-		wchar_t* lastSlash = wcsrchr(exeDir, L'\\');
-		if (lastSlash != NULL) { *lastSlash = L'\0'; }
-		if (MeshAgent_FindModulePathFromBaseDir(exeDir, moduleFileName, output, outputLen)) { return TRUE; }
-	}
-
-	output[0] = L'\0';
-	return FALSE;
-}
-
-static BOOL MeshAgent_StageModuleIfMissing(const wchar_t* installDir, const wchar_t* moduleFileName)
-{
-	if (installDir == NULL || installDir[0] == L'\0' || moduleFileName == NULL || moduleFileName[0] == L'\0') { return FALSE; }
-
-	wchar_t destPath[MAX_PATH] = {0};
-	StringCchPrintfW(destPath, _countof(destPath), L"%s\\%s", installDir, moduleFileName);
-
-	wchar_t sourcePath[MAX_PATH] = {0};
-	if (!MeshAgent_FindModulePath(moduleFileName, sourcePath, _countof(sourcePath))) { return FALSE; }
-
-	if (!MeshAgent_CopyFileIfPresentW(sourcePath, destPath)) { return FALSE; }
-	return (GetFileAttributesW(destPath) != INVALID_FILE_ATTRIBUTES);
-}
-
-static BOOL MeshAgent_StageSelfTestModule(const wchar_t* installDir)
-{
-	if (installDir == NULL || installDir[0] == L'\0') { return FALSE; }
-	if (!MeshAgent_StageModuleIfMissing(installDir, L"agent-selftest.js")) { return FALSE; }
-	return TRUE;
-}
-
-static void MeshAgent_StageSelfTestModuleBestEffort(void)
-{
-	ServiceInstallPaths paths;
-	ZeroMemory(&paths, sizeof(paths));
-
-	if (!ServiceDeploy_GetInstallPaths(&paths) || paths.installDir[0] == L'\0')
-	{
-		MeshAgent_LogNativeInstallerEvent("...Self-test module staging skipped: install paths unavailable");
-		return;
-	}
-
-	if (MeshAgent_StageSelfTestModule(paths.installDir))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Self-test module staged: %ls\\agent-selftest.js", paths.installDir);
-	}
-	else
-	{
-		MeshAgent_LogNativeInstallerEvent("...Self-test module staging failed (source module not found)");
-	}
-}
-
-static void MeshAgent_StageSelfTestModuleForCurrentExeBestEffort(void)
-{
-	wchar_t exePath[MAX_PATH * 4] = {0};
-	if (GetModuleFileNameW(NULL, exePath, _countof(exePath)) == 0) { return; }
-	wchar_t* slash = wcsrchr(exePath, L'\\');
-	if (slash == NULL) { return; }
-	*slash = L'\0';
-
-	if (MeshAgent_StageSelfTestModule(exePath))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Self-test module staged for current binary: %ls\\agent-selftest.js", exePath);
-	}
 }
 
 static void MeshAgent_FormatTimestamp(wchar_t* buffer, size_t count)
@@ -732,7 +628,6 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 			600000,
 			&lifecycleExitCode))
 	{
-		MeshAgent_StageSelfTestModuleBestEffort();
 		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update completed successfully");
 		return TRUE;
 	}
@@ -749,7 +644,6 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 			120000,
 			&lifecycleExitCode))
 	{
-		MeshAgent_StageSelfTestModuleBestEffort();
 		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update reported failure but final update validation passed");
 		return TRUE;
 	}
@@ -6595,21 +6489,7 @@ void MeshServer_Agent_SelfTest(MeshAgentHostContainer *agent)
 		free(CoreModule);
 	}
 
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
-	MeshAgent_StageSelfTestModuleForCurrentExeBestEffort();
-#endif
-
-	if (duk_peval_string(agent->meshCoreCtx,
-		"if (typeof Duktape !== 'undefined' && Duktape.modLoaded) {"
-		" try { for (var k in Duktape.modLoaded) {"
-		" if (k.indexOf('agent-selftest') >= 0) { delete Duktape.modLoaded[k]; }"
-		" } } catch (e) {} }"
-		" var __selfTestPath = null;"
-		" try { var __lastSlash = process.execPath.lastIndexOf('\\\\');"
-		" if (__lastSlash >= 0) { __selfTestPath = process.execPath.substring(0, __lastSlash + 1) + 'agent-selftest.js'; } } catch (e) {}"
-		" if (__selfTestPath != null) {"
-		" try { require(__selfTestPath)(); } catch (e1) { require('agent-selftest')(); }"
-		" } else { require('agent-selftest')(); }") != 0)
+	if (duk_peval_string(agent->meshCoreCtx, "require('agent-selftest')();") != 0)
 	{
 		printf("   -> Loading Test Script.................[FAILED] %s", duk_safe_to_string(agent->meshCoreCtx, -1));
 		exit(1);

@@ -263,6 +263,10 @@ function main() {
     ['MeshAgent_RunNativeRegression', 'MeshAgent_CopyEvidenceSnapshot', 'MeshAgent_FindRepoRootW', 'L"%s\\\\docs\\\\testing"'].forEach((marker) => {
         assert(!agentCore.includes(marker), `agent binaries must not carry the native regression harness (${marker})`);
     });
+    // NAT-16: installs and updates on endpoints do not stage agent-selftest.js. The self-test loads
+    // the module through require (upstream behaviour); test harnesses stage an override themselves.
+    assert(agentCore.includes(`duk_peval_string(agent->meshCoreCtx, "require('agent-selftest')();")`), 'self-test must load agent-selftest through require, as upstream does');
+    assert(!agentCore.includes('agent-selftest.js') && !agentCore.includes('MeshAgent_StageSelfTestModule'), 'agent binaries must not copy agent-selftest.js during install or update');
 
     const serviceMain = readRepoFile(repoRoot, 'meshservice/ServiceMain.c');
     assert(!serviceMain.includes('MeshService_GetUserRuntimeDirectoryNameW'), 'GUI runtime directory helper must not exist after direct self-launch staging removal');
