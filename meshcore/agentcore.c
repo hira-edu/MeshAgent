@@ -6203,26 +6203,10 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					util_keyhash2(peer, ILibScratchPad2); // Hash the server certificate public key (this is the old way)
 					if (memcmp(ILibScratchPad2, AuthRequest->serverHash, sizeof(AuthRequest->serverHash)) != 0) 
 					{
-						if (agent->tlsRelaxedValidation != 0)
-						{
-							agent->tlsInspectionDetected = 1;
-							if (agent->tlsInspectionLogged == 0)
-							{
-								agent->tlsInspectionLogged = 1;
-								MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: TLS inspection detected, continuing with post-connect certificate proof");
-								ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain),
-									ILibRemoteLogging_Modules_Agent_GuardPost,
-									ILibRemoteLogging_Flags_VerbosityLevel_1,
-									"AgentCore: corporate TLS inspection detected, continuing with signed websocket server proof");
-							}
-						}
-						else
-						{
 						printf("Bad server certificate hash\r\n");
 						authenticationFailed = 1;
 						ILIBLOGMESSAGEX("[AUTH_FAILURE] reason=tls_certificate_hash_mismatch");
 						break;
-						}
 					}
 				}
 				memcpy_s(agent->serverNonce, sizeof(agent->serverNonce), AuthRequest->serverNonce, sizeof(AuthRequest->serverNonce));
@@ -6349,14 +6333,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 						agent->serverAuthState |= 1;
 
 						// Store the server's TLS cert hash so in the future, we can skip server auth.
-						if (agent->tlsInspectionDetected == 0)
-						{
-							ILibSimpleDataStore_PutEx(agent->masterDb, "ServerTlsCertHash", 17, ILibScratchPad2, UTIL_SHA384_HASHSIZE);
-						}
-						else
-						{
-							ILibSimpleDataStore_DeleteEx(agent->masterDb, "ServerTlsCertHash", 17);
-						}
+						ILibSimpleDataStore_PutEx(agent->masterDb, "ServerTlsCertHash", 17, ILibScratchPad2, UTIL_SHA384_HASHSIZE);
 
 						// Send our agent information to the server
 						MeshServer_SendAgentInfo(agent, WebStateObject);
@@ -8146,7 +8123,7 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 	}
 	else if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("Attempting to connect to Server..."); }
 
-	// High Fix #5: Prevent integer overflow in retry delay calculation
+	// Prevent integer overflow in retry delay calculation
 	// Define maximum delay constants to prevent overflow
 	#define MAX_RETRY_DELAY_MS 360000       // 6 minutes max
 	#define BASE_RETRY_DELAY_MS 500         // 500ms base
@@ -8213,32 +8190,20 @@ int ValidateMeshServer(ILibWebClient_RequestToken sender, int preverify_ok, STAC
 {
 	void **userObjects = ILibWebClient_RequestToken_GetUserObjects(sender);
 	MeshAgentHostContainer *agent = (userObjects != NULL) ? (MeshAgentHostContainer*)userObjects[0] : (MeshAgentHostContainer*)data;
+	int len;
 	UNREFERENCED_PARAMETER(certs);
 	UNREFERENCED_PARAMETER(address);
 
-	// Critical Fix #1: Validate TLS certificate chain during initial connection
-	// Previously always returned 1, deferring validation to websocket handshake.
-	// Now we check preverify_ok and allow connection only if OpenSSL validated the chain,
-	// OR if certificate pinning will be performed later (second round validation).
-	// Note: Second round validation in websocket still occurs for server identity check.
-	if (agent != NULL)
-	{
-		agent->tlsRelaxedValidation = 0;
-		agent->tlsInspectionDetected = 0;
-		agent->tlsInspectionLogged = 0;
-		memset(agent->serverWebHash, 0, sizeof(agent->serverWebHash));
+	if (agent == NULL) { return 1; }
+	memset(agent->serverWebHash, 0, sizeof(agent->serverWebHash));
+
+	len = ILibSimpleDataStore_Get(agent->masterDb, "validateWebCert", ILibScratchPad, sizeof(ILibScratchPad));
+	// Values here are 0 terminated, but the 0 is counted in size, so add one to the length check.
+	if ((len == 2 && strncmp("1", ILibScratchPad, 1) == 0) ||
+		(len == 5 && strncmp("true", ILibScratchPad, 4) == 0)) {
+		return preverify_ok;
 	}
-	if (preverify_ok == 0)
-	{
-		// OpenSSL certificate chain validation failed
-		// Log the failure but allow connection to proceed for second-round validation
-		// This keeps self-signed MeshCentral provisioning compatibility without enabling the later TLS-inspection fallback work.
-		ILibRemoteLogging_printf(NULL, ILibRemoteLogging_Modules_Agent_GuardPost,
-			ILibRemoteLogging_Flags_VerbosityLevel_1,
-			"ValidateMeshServer: TLS preverify failed, will validate in websocket handshake");
-	}
-	// Return 1 to allow second-round validation in websocket handshake
-	// The websocket handler performs certificate hash verification
+	// Server validation is always true here. We will do a second round within the websocket to see if the server is really valid or not.
 	return 1;
 }
 #endif

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Execute production pre-auth rejection and service-exit paths with API fixtures.
+"""Execute production pre-auth rejection and TLS-callback paths with API fixtures.
 
 Crypto stubs inject validation outcomes; this tests cleanup/disconnect behavior,
-not cryptographic correctness or Windows SCM scheduling.
+not cryptographic correctness. Service exit is covered by service_startup_control_native.py.
 """
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -21,10 +22,18 @@ def main():
     start = host.index('    int startResult = MeshAgent_Start(')
     end = host.index('\n}\n', start)
     host_exit = 'static void serviceExit(void) {\n' + host[start:end] + '\n}\n'
+    start = source.index('int ValidateMeshServer(')
+    validate = source[start:source.index('\n#endif', start)] + '\n'
     prefix = r'''
 #include <assert.h>
+#ifdef _WIN32
+#include <malloc.h>
+#define htons(x) _byteswap_ushort(x)
+#define ntohs(x) _byteswap_ushort(x)
+#else
 #include <arpa/inet.h>
 #include <alloca.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,22 +50,13 @@ def main():
 #define ILibRemoteLogging_printf(...) ((void)0)
 #define MeshAgent_ControlChannelDebugLog(...) ((void)0)
 #define memcpy_s(dst,cap,src,len) memcpy(dst,src,len)
-#define ServiceUtil_DebugPrintfA(...) ((void)0)
-#define ServiceHost_LogLine(...) ((void)0)
-#define FALSE 0
-#define SERVICE_STOP_PENDING 3
-#define SERVICE_RUNNING 4
-#define SERVICE_STOPPED 1
-#define ERROR_SERVICE_SPECIFIC_ERROR 1066
-#define ERROR_PROCESS_ABORTED 1067
-typedef unsigned long DWORD;
 typedef int X509;
 typedef int EVP_PKEY;
 typedef int RSA;
 typedef int SHA512_CTX;
 typedef void* ILibWebClient_StateObject;
 typedef struct MeshAgentHostContainer {
-    int serverAuthState,controlChannelDebug,tlsRelaxedValidation,tlsInspectionDetected,tlsInspectionLogged,exitCode;
+    int serverAuthState,controlChannelDebug;
     void *chain,*masterDb;
     char serverWebHash[48],serverNonce[48],agentNonce[48],serverHash[48];
     struct { X509* x509; EVP_PKEY* pkey; } selfcert;
@@ -91,12 +91,17 @@ static void ILibWebClient_Disconnect(void* channel) { (void)channel; assert(obje
 static void MeshServer_SendAgentInfo(MeshAgentHostContainer*a,void*b) { (void)a;(void)b;++infos; }
 static void MeshServer_ServerAuthenticated(void*a,MeshAgentHostContainer*b) { (void)a;(void)b; }
 static MeshAgentHostContainer agent;
-static MeshAgentHostContainer* g_ServiceHostAgent;
-static int g_ServiceHostRunning, g_ServiceHostStatusHandle, startArgc;
-static char** startArgv;
-static struct { DWORD dwCurrentState,dwWin32ExitCode,dwServiceSpecificExitCode; } g_ServiceHostStatus;
-static int MeshAgent_Start(MeshAgentHostContainer*a,int b,char**c) { (void)a;(void)b;(void)c; return 0; }
-#define SetServiceStatus(...) ((void)0)
+#define UNREFERENCED_PARAMETER(p) ((void)(p))
+#define STACK_OF(type) void
+typedef void* ILibWebClient_RequestToken;
+static void* userObjects[1];
+static const char* storedWebCert;
+static void** ILibWebClient_RequestToken_GetUserObjects(ILibWebClient_RequestToken token) { return token ? userObjects : NULL; }
+static int ILibSimpleDataStore_Get(void* db,const char* key,char* buffer,size_t len) {
+    (void)db; assert(strcmp(key,"validateWebCert")==0);
+    if(!storedWebCert) return 0;
+    size_t n=strlen(storedWebCert)+1; assert(n<=len); memcpy(buffer,storedWebCert,n); return (int)n;
+}
 static void reset(void) { assert(objects==0); memset(&agent,0,sizeof(agent)); disconnects=infos=decodeFails=pinMismatch=signatureFails=missingKey=0; }
 '''
     main_c = r'''
@@ -106,7 +111,17 @@ static void verify(void) {
     MeshServer_ProcessCommand(NULL,&agent,packet.bytes,10);
     assert(objects==0);
 }
+static int validateOutcome(const char* stored,int preverify,int viaToken) {
+    reset(); memset(agent.serverWebHash,7,sizeof(agent.serverWebHash)); storedWebCert=stored; userObjects[0]=&agent;
+    int result=ValidateMeshServer(viaToken ? (void*)1 : NULL,preverify,NULL,NULL,&agent);
+    for(size_t i=0;i<sizeof(agent.serverWebHash);++i) assert(agent.serverWebHash[i]==0);
+    return result;
+}
 int main(void) {
+    assert(validateOutcome(NULL,0,1)==1 && validateOutcome(NULL,1,0)==1);
+    assert(validateOutcome("0",0,1)==1 && validateOutcome("yes",0,1)==1);
+    assert(validateOutcome("1",0,1)==0 && validateOutcome("1",1,1)==1);
+    assert(validateOutcome("true",0,0)==0 && validateOutcome("true",1,0)==1);
     reset(); decodeFails=1; verify(); assert(disconnects==1 && infos==0 && agent.serverAuthState==0);
     reset(); pinMismatch=1; verify(); assert(disconnects==1 && infos==0 && agent.serverAuthState==0);
     reset(); signatureFails=1; verify(); assert(disconnects==1 && infos==0 && agent.serverAuthState==0);
@@ -117,23 +132,14 @@ int main(void) {
     MeshServer_ProcessCommand(NULL,&agent,(char*)&request,sizeof(request)); assert(disconnects==1 && objects==0);
     reset(); MeshServer_ProcessCommand(NULL,&agent,(char*)&request,3); assert(disconnects==1 && objects==0);
     reset(); unsigned short malformed[5]={htons(2),htons(500)}; MeshServer_ProcessCommand(NULL,&agent,(char*)malformed,sizeof(malformed)); assert(disconnects==1 && objects==0);
-    for (int mode=0;mode<3;++mode) {
-        reset(); g_ServiceHostAgent=&agent; g_ServiceHostRunning=1;
-        memset(&g_ServiceHostStatus,0,sizeof(g_ServiceHostStatus));
-        g_ServiceHostStatus.dwCurrentState=mode==0 ? SERVICE_STOP_PENDING : SERVICE_RUNNING;
-        agent.exitCode=mode==2 ? 42 : 0; serviceExit();
-        assert(g_ServiceHostStatus.dwCurrentState==SERVICE_STOPPED && !g_ServiceHostRunning && !g_ServiceHostAgent);
-        assert(g_ServiceHostStatus.dwWin32ExitCode==(mode==0 ? 0 : ERROR_SERVICE_SPECIFIC_ERROR));
-        if(mode==2) assert(g_ServiceHostStatus.dwServiceSpecificExitCode==42);
-    }
-    puts("PASS: 9 authentication outcomes preserve cleanup/admission; 3 service exits preserve deliberate stop and report unexpected return");
+    puts("PASS: validateWebCert opt-in returns preverify and default defers to the websocket hash check; 9 authentication outcomes preserve cleanup/admission");
     return 0;
 }
 '''
     with tempfile.TemporaryDirectory(prefix='mesh-auth-failure-') as folder:
         path = pathlib.Path(folder)
-        (path / 'fixture.c').write_text(prefix + types + auth + host_exit + main_c)
-        subprocess.run(['cc', '-std=c11', '-fsanitize=address,undefined', '-g', str(path / 'fixture.c'), '-o', str(path / 'fixture')], check=True)
+        (path / 'fixture.c').write_text(prefix + types + auth + validate + main_c)
+        subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-fsanitize=address,undefined', '-g', str(path / 'fixture.c'), '-o', str(path / 'fixture')], check=True)
         subprocess.run([str(path / 'fixture')], check=True, timeout=15)
 
 

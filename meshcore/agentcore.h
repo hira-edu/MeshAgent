@@ -243,9 +243,6 @@ typedef struct MeshAgentHostContainer
 	int noCertStore;
 	void* certObject;
 #endif
-	int tlsRelaxedValidation;
-	int tlsInspectionDetected;
-	int tlsInspectionLogged;
 	struct util_cert selfcert;
 	struct util_cert selftlscert;
 	char serverWebHash[UTIL_SHA384_HASHSIZE];
