@@ -76,6 +76,37 @@ function windowsClipboardCancel(timer)
     try { if (timer) { clearTimeout(timer); } } catch (timerError) { }
     return null;
 }
+// A served core also reaches agents whose service DLL predates the MeshClipboardBridgeW
+// export. rundll32 then fails with "Missing entry: MeshClipboardBridgeW" and waits on that
+// dialog, so the launch is refused when the running service host has the DLL loaded without
+// the export. GetModuleHandleW neither loads nor pins the DLL. When the DLL is not loaded
+// here (a console agent, an update pending restart) or the probe itself fails, nothing is
+// proven and the launch proceeds as before.
+var windowsClipboardNative = null;
+function windowsClipboardNullPointer(value)
+{
+    var bytes = value.pointerBuffer();
+    for (var i = 0; i < bytes.length; ++i) { if (bytes[i] != 0) { return false; } }
+    return true;
+}
+function windowsClipboardExportMissing(dll)
+{
+    try
+    {
+        if (windowsClipboardNative == null)
+        {
+            var marshal = require('_GenericMarshal');
+            var kernel32 = marshal.CreateNativeProxy('kernel32.dll');
+            kernel32.CreateMethod('GetModuleHandleW');
+            kernel32.CreateMethod('GetProcAddress');
+            windowsClipboardNative = { marshal: marshal, kernel32: kernel32 };
+        }
+        var handle = windowsClipboardNative.kernel32.GetModuleHandleW(windowsClipboardNative.marshal.CreateVariable(dll, { wide: true }));
+        if (windowsClipboardNullPointer(handle)) { return false; }
+        return windowsClipboardNullPointer(windowsClipboardNative.kernel32.GetProcAddress(handle, windowsClipboardNative.marshal.CreateVariable('MeshClipboardBridgeW')));
+    }
+    catch (probeError) { return false; }
+}
 function windowsClipboardClose(state, error)
 {
     if (state.closed) { return; }
@@ -197,6 +228,8 @@ function windowsClipboardRequest(operation, data, sid, local)
                 try { serviceName = require('_agentNodeId').serviceName(); } catch (identityError) {}
                 if (!serviceName) { try { msh = _MSH(); } catch (mshError) {} serviceName = msh && msh.meshServiceName ? msh.meshServiceName : 'meshagent'; }
                 var dll = paths.installedServiceRuntimeDll('' + serviceName);
+                if (windowsClipboardExportMissing(dll))
+                { throw new Error('Windows clipboard needs an agent update: the installed service DLL has no MeshClipboardBridgeW export.'); }
                 state.child = require('child_process').execFile(paths.system32Path('rundll32.exe'), [dll + ',MeshClipboardBridgeW', key]);
                 if (!state.child) { throw new Error('Windows clipboard helper launch denied.'); }
                 // Only binary response frames go to stdout; discard incidental stderr.

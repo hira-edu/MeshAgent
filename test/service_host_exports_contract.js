@@ -72,6 +72,28 @@ function collectEntryNameValues(headerPath) {
     return values;
 }
 
+// rundll32 passes its own instance (rundll32.exe), not the DLL's, as an entry's HINSTANCE argument.
+// An entry that uses it to find this DLL gets rundll32.exe instead: the clipboard broker relaunched
+// "rundll32.exe",MeshClipboardBridgeW in the user session, which showed "Missing entry" on the desktop.
+// Entries resolve their module with GetModuleHandleExW(FROM_ADDRESS); the argument stays unreferenced.
+function collectEntriesUsingInstanceArgument(sourcePaths) {
+    const offenders = [];
+    for (const sourcePath of sourcePaths) {
+        const text = fs.readFileSync(sourcePath, 'utf8');
+        const entry = /\bCALLBACK\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*HWND\s+\w+\s*,\s*HINSTANCE\s+(\w+)[^)]*\)\s*\{/g;
+        let match;
+        while ((match = entry.exec(text)) !== null) {
+            let depth = 1, index = entry.lastIndex;
+            while (depth > 0 && index < text.length) { const c = text[index++]; if (c === '{') { ++depth; } else if (c === '}') { --depth; } }
+            const body = text.substring(entry.lastIndex, index)
+                .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+                .replace(new RegExp('UNREFERENCED_PARAMETER\\(\\s*' + match[2] + '\\s*\\)', 'g'), '');
+            if (new RegExp('\\b' + match[2] + '\\b').test(body)) { offenders.push(match[1]); }
+        }
+    }
+    return offenders;
+}
+
 function setsEqual(a, b) {
     if (a.size !== b.size) { return false; }
     for (const value of a) { if (!b.has(value)) { return false; } }
@@ -104,6 +126,7 @@ function main() {
     const unexportedEntryNames = entryNameValues
         .filter((name, index, self) => self.indexOf(name) === index)
         .filter(name => !exportedNames.has(name));
+    const entriesUsingInstanceArgument = collectEntriesUsingInstanceArgument(sourcePaths);
     const duplicateX64 = x64Entries.length !== x64Set.size;
     const duplicateArm64 = arm64Entries.length !== arm64Set.size;
 
@@ -117,7 +140,8 @@ function main() {
         // Explicitly guard the user-session helper exports so a dropped bridge export is a failure
         // here rather than a silent runtime resolve miss on an endpoint.
         clipboardBridgeExported: exportedNames.has('MeshClipboardBridgeW'),
-        audioBridgeExported: exportedNames.has('MeshAudioBridgeW') && entryNameValues.includes('MeshAudioBridgeW')
+        audioBridgeExported: exportedNames.has('MeshAudioBridgeW') && entryNameValues.includes('MeshAudioBridgeW'),
+        noEntryUsesRundllInstanceArgument: entriesUsingInstanceArgument.length === 0
     };
 
     const report = {
@@ -126,6 +150,7 @@ function main() {
         entryNameValues,
         missingDefinitions,
         unexportedEntryNames,
+        entriesUsingInstanceArgument,
         checks
     };
 

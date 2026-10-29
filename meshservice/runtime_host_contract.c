@@ -3458,12 +3458,19 @@ void CALLBACK MeshConsoleBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine
 void CALLBACK MeshClipboardBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
 {
     wchar_t tail[4096] = {0};
+    HMODULE module = NULL;
     DWORD error;
     UNREFERENCED_PARAMETER(hwnd);
+    UNREFERENCED_PARAMETER(hinstDLL);
     UNREFERENCED_PARAMETER(nCmdShow);
     if (!MeshRuntimeHost_GetEntryTailW(MESH_RUNTIME_HOST_ENTRY_CLIPBOARD_BRIDGE_W, lpCmdLine, tail, _countof(tail)))
     { ExitProcess(ERROR_INVALID_PARAMETER); }
-    error = MeshClipboard_Run(tail, hinstDLL);
+    // rundll32 passes its own instance as hinstDLL. The broker relaunches this DLL by path in the
+    // user session, and with hinstDLL that path was rundll32.exe: the session helper failed with
+    // "Missing entry: MeshClipboardBridgeW" on the user's desktop. Resolve the module that holds this export.
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        (LPCWSTR)&MeshClipboardBridgeW, &module)) { ExitProcess(GetLastError()); }
+    error = MeshClipboard_Run(tail, module);
     // The parent receives errors as operation status or process exit; never log clipboard text.
     ExitProcess(error);
 }

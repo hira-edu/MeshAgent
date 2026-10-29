@@ -32,6 +32,17 @@ function fixture(options = {}) {
             if (module === 'promise') return Result;
             if (module === 'user-sessions') return {Current() { if (options.sessionError) throw Error('session enumeration denied'); return {Active:sessions}; }};
             if (module === '_agentNodeId') return {serviceName:() => 'incumbent-service'};
+            // options.loaded: the service host has the DLL loaded; options.exported: it exports the bridge.
+            // Without options.loaded the probe module is absent, as in the other cases (probe unavailable).
+            if (module === '_GenericMarshal' && options.loaded !== undefined) return {
+                CreateVariable(value, opts) { return {value, wide:!!(opts && opts.wide)}; },
+                CreateNativeProxy(dll) { assert.equal(dll,'kernel32.dll'); return {CreateMethod(name) {
+                    const pointer = present => ({pointerBuffer:() => Buffer.from(present ? [1,0,0,0,0,0,0,0] : [0,0,0,0,0,0,0,0])});
+                    if (name === 'GetModuleHandleW') this[name] = v => { assert.equal(v.wide,true); return pointer(options.loaded && v.value === 'C:\\Agent With Spaces\\agent.dll'); };
+                    else if (name === 'GetProcAddress') this[name] = (h, v) => pointer(options.exported && v.value === 'MeshClipboardBridgeW');
+                    else throw Error('Unexpected kernel32 method: ' + name);
+                }}; }
+            };
             if (module === 'win-system-paths') return {installedServiceRuntimeDll(service) { name = service; if(options.pathError) throw Error('DLL missing'); return 'C:\\Agent With Spaces\\agent.dll'; }, system32Path:()=> 'C:\\Windows\\System32\\rundll32.exe'};
             if (module === 'child_process') return {execFile(exe,args) {
                 ++launched; assert.equal(exe, 'C:\\Windows\\System32\\rundll32.exe');
@@ -162,4 +173,18 @@ for(const mode of ['id','oversize','status','write-data','extra','exit','end','e
     rejected(f.clip.dispatchRead(),/still terminating/); assert.equal(f.counts().launched,1);
     f.children[0].emit('exit',0); f.clip.dispatchRead(); assert.equal(f.counts().launched,2);
 }
-console.log('Windows clipboard dispatch: reuse, coalescing, serialization, Unicode/empty text, bounded queues, failure backoff, timeouts and cleanup passed.');
+{
+    // A served core can reach an agent whose loaded service DLL predates MeshClipboardBridgeW: rundll32
+    // would show "Missing entry: MeshClipboardBridgeW" and block on that dialog. Refuse without launching.
+    const f=fixture({loaded:true, exported:false});
+    rejected(f.clip.dispatchRead(),/agent update.*no MeshClipboardBridgeW export/);
+    rejected(f.clip.dispatchWrite('x'),/agent update/); rejected(f.clip.read(),/agent update/);
+    assert.equal(f.counts().launched,0,'no rundll32 launch against a DLL without the export');
+    f.advance(30000); rejected(f.clip.dispatchRead(),/agent update/); assert.equal(f.counts().launched,0); assert.equal(f.timers.size,0);
+}
+for (const options of [{loaded:true, exported:true},{loaded:false},{}]) {
+    // Export present, DLL not loaded here (console agent, update pending restart), or no probe: launch as before.
+    const f=fixture(options), r=f.clip.dispatchRead(); assert.equal(f.counts().launched,1);
+    f.reply(f.children[0],'ok'); assert.equal(r.value,'ok'); f.advance(60000);
+}
+console.log('Windows clipboard dispatch: reuse, coalescing, serialization, Unicode/empty text, bounded queues, failure backoff, timeouts, cleanup and missing-export refusal passed.');
