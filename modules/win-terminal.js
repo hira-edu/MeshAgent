@@ -142,8 +142,6 @@ function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId, mode, tok
             flush();
         }
     });
-    // Duktape emitters only emit declared events.
-    if (stream.createEvent) { stream.createEvent('ready'); }
     stream._bridge = this;
     stream.resizeTerminal = function resizeTerminal(w, h) {
         self.cols = normalizeSize(w, self.cols, 20, 300);
@@ -219,7 +217,9 @@ ConsoleBridgeTerminal.prototype.emitReadyOnce = function emitReadyOnce()
     {
         try { callbacks[i](); } catch (callbackEx) { this.callbackFailed(callbackEx); return; }
     }
-    try { this.stream.emit('ready'); } catch (ex) { this.callbackFailed(ex); }
+    // Readiness reaches callers only through onReady(). The stream emits no 'ready' event: the agent's
+    // Duktape stream.Duplex has explicit events and no createEvent, so emitting 'ready' throws there
+    // ("Event 'ready' not found"), which failed every terminal at the handshake.
 };
 
 // Runs the callback once the bridge is ready: now when it already is (an exception reaches the

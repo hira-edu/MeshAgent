@@ -125,7 +125,17 @@ function checkTerminalModule(source) {
             !source.includes('RunPowerShellCommand'),
         noBridgeDebugState:
             !source.includes('_meshTerminal') &&
-            !source.includes('console.rawLog')
+            !source.includes('console.rawLog'),
+        // Production regression 2026-10-29: the agent's Duktape stream.Duplex has explicit events and no
+        // createEvent, so emitting an undeclared event throws ("Event 'ready' not found"); the bridge failed
+        // every terminal at the ready handshake ("Denied"). Readiness goes through onReady() only, and the
+        // module emits only events a Duktape stream.Duplex declares (behaviour: MeshCentral
+        // deploy/tests/agent-core-terminal-ready-handshake.test.js).
+        emitsOnlyDuktapeDuplexEvents:
+            !/createEvent\(/.test(source) &&
+            [...source.matchAll(/\.emit\(/g)].length === [...source.matchAll(/\.emit\('([a-zA-Z]+)'/g)].length &&
+            [...source.matchAll(/\.emit\('([a-zA-Z]+)'/g)].every((match) =>
+                ['close', 'data', 'drain', 'end', 'error', 'finish', 'pipe', 'unpipe'].includes(match[1]))
     };
 }
 

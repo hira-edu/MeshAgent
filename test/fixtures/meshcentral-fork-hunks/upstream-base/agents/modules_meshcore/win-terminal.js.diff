@@ -328,8 +328,6 @@
 +            flush();
          }
 +    });
-+    // Duktape emitters only emit declared events.
-+    if (stream.createEvent) { stream.createEvent('ready'); }
 +    stream._bridge = this;
 +    stream.resizeTerminal = function resizeTerminal(w, h) {
 +        self.cols = normalizeSize(w, self.cols, 20, 300);
@@ -463,10 +461,6 @@
 -        return (this._stream);
 -    };
 -    this.Start = function Start(CONSOLE_SCREEN_WIDTH, CONSOLE_SCREEN_HEIGHT)
--    {
--        return (this.StartEx(CONSOLE_SCREEN_WIDTH, CONSOLE_SCREEN_HEIGHT, process.env['windir'] + '\\System32\\cmd.exe'));
--    }
--    this.StartPowerShell = function StartPowerShell(CONSOLE_SCREEN_WIDTH, CONSOLE_SCREEN_HEIGHT)
 +ConsoleBridgeTerminal.prototype.emitReadyOnce = function emitReadyOnce()
 +{
 +    var callbacks = null;
@@ -478,6 +472,22 @@
 +    callbacks = this.readyCallbacks;
 +    this.readyCallbacks = [];
 +    for (i = 0; i < callbacks.length; ++i)
+     {
+-        return (this.StartEx(CONSOLE_SCREEN_WIDTH, CONSOLE_SCREEN_HEIGHT, process.env['windir'] + '\\System32\\cmd.exe'));
++        try { callbacks[i](); } catch (callbackEx) { this.callbackFailed(callbackEx); return; }
+     }
+-    this.StartPowerShell = function StartPowerShell(CONSOLE_SCREEN_WIDTH, CONSOLE_SCREEN_HEIGHT)
++    // Readiness reaches callers only through onReady(). The stream emits no 'ready' event: the agent's
++    // Duktape stream.Duplex has explicit events and no createEvent, so emitting 'ready' throws there
++    // ("Event 'ready' not found"), which failed every terminal at the handshake.
++};
++
++// Runs the callback once the bridge is ready: now when it already is (an exception reaches the
++// caller), otherwise at the ready handshake.
++ConsoleBridgeTerminal.prototype.onReady = function onReady(callback)
++{
++    if (typeof(callback) != 'function') { return (false); }
++    if (this.readyEmitted && this.closed == false && this.ended == false)
      {
 -        if (require('os').arch() == 'x64')
 -        {
@@ -494,9 +504,11 @@
 -        {
 -            return (this.StartEx(CONSOLE_SCREEN_WIDTH, CONSOLE_SCREEN_HEIGHT, process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'));
 -        }
-+        try { callbacks[i](); } catch (callbackEx) { this.callbackFailed(callbackEx); return; }
++        callback();
++        return (true);
      }
-+    try { this.stream.emit('ready'); } catch (ex) { this.callbackFailed(ex); }
++    this.readyCallbacks.push(callback);
++    return (false);
 +};
  
 -    this._stop = function () {
@@ -516,13 +528,7 @@
 -    // All events between EVENT_CONSOLE_CARET and EVENT_CONSOLE_END_APPLICATION
 -    //
 -    this._hookThread = function ()
-+// Runs the callback once the bridge is ready: now when it already is (an exception reaches the
-+// caller), otherwise at the ready handshake.
-+ConsoleBridgeTerminal.prototype.onReady = function onReady(callback)
-+{
-+    if (typeof(callback) != 'function') { return (false); }
-+    if (this.readyEmitted && this.closed == false && this.ended == false)
-     {
+-    {
 -        // 
 -        // Reference for SetWinEventHook() can be found at:
 -        // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwineventhook
@@ -551,13 +557,7 @@
 -                this.terminal._GetMessage();
 -            }
 -        });
-+        callback();
-+        return (true);
-+    }
-+    this.readyCallbacks.push(callback);
-+    return (false);
-+};
- 
+-
 -        //
 -        // This is the WINEVENTPROC callback for the WinEventHook we set
 -        //

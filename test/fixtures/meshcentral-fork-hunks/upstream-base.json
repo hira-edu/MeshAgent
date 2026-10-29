@@ -64,7 +64,7 @@
     },
     "agents/modules_meshcore/win-terminal.js": {
       "state": "enforced",
-      "reviewed": "Fork rewrite: terminal I/O is hosted by rundll32 <ServiceDll>,MeshConsoleBridgeW with an explicit session id; the upstream in-process console implementation is removed. Upstream did not change the file between 587973e8c and 1.2.5, so every removed line is a fork deletion, not a lost upstream fix. WP merges (2026-10-28): CORE-42, CORE-15a-e, CORE-49-52, CORE-54, TST-19: one run-command helper (b6f7bc99e)."
+      "reviewed": "Fork rewrite: terminal I/O is hosted by rundll32 <ServiceDll>,MeshConsoleBridgeW with an explicit session id; the upstream in-process console implementation is removed. Upstream did not change the file between 587973e8c and 1.2.5, so every removed line is a fork deletion, not a lost upstream fix. WP merges (2026-10-28): CORE-42, CORE-15a-e, CORE-49-52, CORE-54, TST-19: one run-command helper (b6f7bc99e). Terminal regression fix (2026-10-29, production): the stream no longer declares or emits a 'ready' event. On the agent's Duktape stream.Duplex (explicit events, no createEvent) emit('ready') threw \"Event 'ready' not found\", which CORE-54 (b6f7bc99e) turned into a bridge failure: every Windows terminal showed \"Denied\". Readiness reaches callers through onReady() only. Tests: MeshCentral deploy/tests/agent-core-terminal-ready-handshake.test.js; meshcentral_terminal_bridge_contract emitsOnlyDuktapeDuplexEvents."
     },
     "agents/modules_meshcore/win-virtual-terminal.js": {
       "state": "enforced",
@@ -1665,7 +1665,7 @@
     },
     "agents/agent-defaults.json": {
       "state": "enforced",
-      "reviewed": "Stage 6 (s6-e; pins 3ed4e1dd8, OD2): the fork agent manifest (schema meshcentral-fork-agents/1) pins MeshService.exe, MeshService64.exe, MeshServiceARM64.exe built from hira-edu/MeshAgent 366e4a64 (byte-identical to what production serves in the 2026-10-27 inventory). Replaces upstream release manifest. The binaries are staged by pack.js --agents (OD1 B)."
+      "reviewed": "Stage 6 (s6-e; pins 3ed4e1dd8, OD2): the fork agent manifest (schema meshcentral-fork-agents/1) pins MeshService.exe, MeshService64.exe, MeshServiceARM64.exe built from hira-edu/MeshAgent 366e4a64 (byte-identical to what production serves in the 2026-10-27 inventory). Replaces upstream release manifest. The binaries are staged by pack.js --agents (OD1 B). Re-pinned by the coordinated release (MeshCentral 3fd292fb6, 2026-10-29): MeshService.exe, MeshService64.exe, MeshServiceARM64.exe from hira-edu/MeshAgent b21750df (hook release meshagent-b21750df…-731f1b1f5794de03)."
     },
     "agents/check-releases.js": {
       "state": "enforced",
