@@ -422,14 +422,27 @@
      }
  
      this.httprequest = null;
-@@ -2842,6 +2896,14 @@
+@@ -2825,8 +2879,9 @@
+ 
+ function terminal_promise_connection_rejected(e)
+ {
+-    // FAILED to connect terminal
+-    this.ws.write(JSON.stringify({ ctrlChannel: '102938', type: 'console', msg: e.toString(), msgid: 2 }));
++    // FAILED to connect terminal. Sent without a msgid so the viewer shows this text: msgid 2 renders as
++    // "Denied", which is only for a local user refusing consent.
++    this.ws.write(JSON.stringify({ ctrlChannel: '102938', type: 'console', msg: e.toString() }));
+     this.ws.end();
+ }
+ 
+@@ -2842,6 +2897,15 @@
          this.ws.httprequest._term = term;
          this.ws.httprequest._term.tunnel = this.ws;
          stdoutstream = stdinstream = term;
 +        term.on('error', function (error) {
 +            var tunnel = this.tunnel;
 +            if (tunnel != null) {
-+                tunnel.write(JSON.stringify({ ctrlChannel: '102938', type: 'console', msg: error.toString(), msgid: 2 }));
++                // The bridge failed: show its error, not "Denied" (msgid 2 is only for a consent refusal).
++                tunnel.write(JSON.stringify({ ctrlChannel: '102938', type: 'console', msg: 'Remote terminal session failed, ' + error.toString() }));
 +                tunnel.end();
 +            }
 +        });
@@ -437,7 +450,7 @@
      }
      else
      {
-@@ -2904,33 +2966,10 @@
+@@ -2904,33 +2968,10 @@
      } else { } // no websocket, maybe log some messages somewhere?
  }
  function promise_init(res, rej) { this._res = res; this._rej = rej; }
@@ -474,7 +487,7 @@
  }
  
  function terminal_promise_consent_resolved()
-@@ -2952,32 +2991,14 @@
+@@ -2952,32 +2993,14 @@
  
              if ((this.httprequest.protocol == 1) || (this.httprequest.protocol == 6))
              {
@@ -512,7 +525,7 @@
              }
          } catch (ex)
          {
-@@ -3149,10 +3170,303 @@
+@@ -3149,10 +3172,303 @@
          this.httprequest.desktop.kvm.connectionBar.httprequest = null;
      }
  
@@ -816,7 +829,7 @@
  function kvm_tunnel_consentpromise_closehandler()
  {
      if (this._consentpromise && this._consentpromise.close) { this._consentpromise.close(); }
-@@ -3210,6 +3524,7 @@
+@@ -3210,6 +3526,7 @@
      if (ws.httprequest.autolock) {
          destopLockHelper_pipe(ws.httprequest);
      }
@@ -824,7 +837,7 @@
  }
  
  function kvm_consent_ask(ws){
-@@ -3335,6 +3650,7 @@
+@@ -3335,6 +3652,7 @@
          destopLockHelper_pipe(this.ws.httprequest);
      }
      this.ws.resume();
@@ -832,7 +845,7 @@
      this.ws = null;
  }
  
-@@ -3537,16 +3853,16 @@
+@@ -3537,16 +3855,16 @@
      //sendConsoleText('OnTunnelData, ' + data.length + ', ' + typeof data + ', ' + data);
  
      // If this is upload data, save it to file
@@ -852,7 +865,7 @@
          }
          this.write(Buffer.from(JSON.stringify({ action: 'uploadack', reqid: this.httprequest.uploadFileid }))); // Ask for more data.
          return;
-@@ -3556,12 +3872,13 @@
+@@ -3556,12 +3874,13 @@
          // Check if this is a relay connection
          if ((data == 'c') || (data == 'cr')) {
              this.httprequest.state = 1;
@@ -867,7 +880,7 @@
              // Take a look at the protocol
              if ((data.length > 3) && (data[0] == '{')) { onTunnelControlData(data, this); return; }
              this.httprequest.protocol = parseInt(data);
-@@ -3977,6 +4294,31 @@
+@@ -3977,6 +4296,31 @@
  
                  // Setup files
                  // NOP
@@ -899,7 +912,7 @@
              }
          } else if (this.httprequest.protocol == 1) {
              // Send data into terminal stdin
-@@ -4143,11 +4485,33 @@
+@@ -4143,11 +4487,33 @@
                      MeshServerLogEx(164, [cmd.path], "Create file: \"" + cmd.path + "\"", this.httprequest);
                      break;
                  }
@@ -935,7 +948,7 @@
                          if ((delcount == 1) && !cmd.rec) {
                              MeshServerLogEx(45, [p], "Delete: \"" + p + "\"", this.httprequest);
                          } else {
-@@ -4158,14 +4522,20 @@
+@@ -4158,14 +4524,20 @@
                              }
                          }
                      }
@@ -960,7 +973,7 @@
                  }
                  case 'markcoredump': {
                      // If we are asking for the coredump file, set the right path.
-@@ -4218,20 +4588,23 @@
+@@ -4218,20 +4590,23 @@
                                  }
                              }
                              MeshServerLogEx((cmd.ask == 'coredump') ? 104 : 49, [cmd.path], 'Download: \"' + cmd.path + '\"', this.httprequest);
@@ -992,7 +1005,7 @@
                              this.write(buf.slice(0, len + 4)); // Write as binary
                          }
                          break;
-@@ -4239,41 +4612,34 @@
+@@ -4239,41 +4614,34 @@
                  case 'upload':
                      {
                          // Upload a file, browser to agent
@@ -1045,7 +1058,7 @@
                          }
                          break;
                      }
-@@ -4519,11 +4885,10 @@
+@@ -4519,11 +4887,10 @@
              break;
          }
          case 'termsize': {
@@ -1060,7 +1073,7 @@
              } else {
                  if (ws.httprequest.process == null || ws.httprequest.process.pty == 0) return;
                  //sendConsoleText('Linux Resize: ' + obj.cols + 'x' + obj.rows);
-@@ -4639,73 +5004,36 @@
+@@ -4639,73 +5006,36 @@
      response.close = function () { sendConsoleText('httprequest.response.close', this.sessionid); consoleHttpRequest = null; }
  }
  
@@ -1162,7 +1175,7 @@
  }
  
  // Open a web browser to a specified URL on current user's desktop
-@@ -4789,7 +5117,7 @@
+@@ -4789,7 +5119,7 @@
                  var fin = '', f = '', availcommands = 'domain,translations,agentupdate,errorlog,msh,timerinfo,coreinfo,coreinfoupdate,coredump,service,fdsnapshot,fdcount,startupoptions,';
                  availcommands += 'alert,agentsize,versions,help,info,osinfo,args,print,type,dbkeys,dbget,dbset,dbdelete,dbcompact,eval,parseuri,httpget,wslist,plugin,wsconnect,wssend,wsclose,notify,';
                  availcommands += 'ls,ps,kill,netinfo,location,power,wakeonlan,setdebug,smbios,rawsmbios,toast,lock,users,openurl,getclip,setclip,log,cpuinfo,sysinfo,';
@@ -1171,7 +1184,7 @@
                  if (require('os').dns != null) { availcommands += ',dnsinfo'; }
                  try { require('linux-dhcp'); availcommands += ',dhcp'; } catch (ex) { }
                  if (process.platform == 'win32') {
-@@ -5137,10 +5465,10 @@
+@@ -5137,10 +5467,10 @@
                  break;
              case 'agentupdateex':
                  // Perform an direct agent update without requesting any information from the server, this should not typically be used.
@@ -1185,7 +1198,7 @@
                  }
                  break;
              case 'errorlog':
-@@ -5768,53 +6096,23 @@
+@@ -5768,53 +6098,23 @@
              case 'log':
                  if (args['_'].length != 1) { response = 'Proper usage: log "sample text"'; } else { MeshServerLog(args['_'][0]); response = 'ok'; }
                  break;
@@ -1254,7 +1267,7 @@
                  break;
              }
              case 'openurl': {
-@@ -5823,8 +6121,9 @@
+@@ -5823,8 +6123,9 @@
                  break;
              }
              case 'openfile': {
@@ -1265,7 +1278,7 @@
                  break;
              }
              case 'users': {
-@@ -6024,7 +6323,7 @@
+@@ -6024,7 +6325,7 @@
                      var pr = require('os').name();
                      pr.sessionid = sessionid;
                      pr.then(function (v) {
@@ -1274,7 +1287,7 @@
                      });
                  }
                  break;
-@@ -6418,6 +6717,14 @@
+@@ -6418,6 +6719,14 @@
                  }
                  break;
              }
@@ -1289,7 +1302,7 @@
              case 'plugin': {
                  if (typeof args['_'][0] == 'string') {
                      try {
-@@ -7085,33 +7392,32 @@
+@@ -7085,33 +7394,32 @@
      sendAgentMessage('Self Update failed because execv() failed', 3);
  }
  
@@ -1343,7 +1356,7 @@
  
      // If the url starts with *, switch it to use the same protoco, host and port as the control channel.
      if (updateurl != null) {
-@@ -7178,6 +7484,7 @@
+@@ -7178,6 +7486,7 @@
                  sendConsoleText('Self Update failed, because there was a problem trying to download the update from ' + updateurl, sessionid);
                  sendAgentMessage('Self Update failed, because there was a problem trying to download the update from ' + updateurl, 3);
                  agentUpdate_Start._selfupdate = null;
@@ -1351,7 +1364,7 @@
              });
              agentUpdate_Start._selfupdate.on('response', function (img) {
                  if (img.statusCode != 200) {
-@@ -7186,91 +7493,106 @@
+@@ -7186,91 +7495,106 @@
                      agentUpdate_Start._selfupdate = null;
                      sendConsoleText('Self Update failed, because the server replied with HTTP ' + img.statusCode + ', URL: ' + (updateurl != null ? updateurl : options.path), sessionid);
                      sendAgentMessage('Self Update failed, because the server replied with HTTP ' + img.statusCode + ', URL: ' + (updateurl != null ? updateurl : options.path), 3);
