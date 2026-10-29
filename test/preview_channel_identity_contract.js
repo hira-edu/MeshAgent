@@ -44,7 +44,11 @@ function generate(repoRoot, python, configPath, outputHeader, channel) {
         '--output-header', outputHeader
     ];
     if (channel != null) { argv.push('--channel', channel); }
-    return childProcess.spawnSync(python, argv, { cwd: repoRoot, encoding: 'utf8' });
+    // The generator falls back to MESHAGENT_CHANNEL when no --channel is given, and a preview CI build sets it.
+    // Each case here names its channel explicitly or means "unset", so the inherited variable is removed.
+    const env = Object.assign({}, process.env);
+    delete env.MESHAGENT_CHANNEL;
+    return childProcess.spawnSync(python, argv, { cwd: repoRoot, encoding: 'utf8', env });
 }
 
 function generateOrThrow(repoRoot, python, configPath, outputHeader, channel) {
