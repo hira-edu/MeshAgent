@@ -5298,18 +5298,9 @@ static BOOL ServiceDeploy_SelectIncumbent(void)
         wchar_t name[256]; DWORD count = _countof(name);
         status = RegEnumKeyExW(services, index++, name, &count, NULL, NULL, NULL, NULL);
         if (status != ERROR_SUCCESS) { break; }
-        if (exists && _wcsicmp(name, active)) { continue; }
-        if (!exists)
-        {
-            /* Side-by-side preview (MeshAgent2) and production (MeshAgent)
-             * channels have independent lifecycles and must not hijack each other. */
-            size_t activeLen = wcslen(active), nameLen = wcslen(name);
-            if ((nameLen == activeLen + 1 && name[nameLen - 1] == L'2' && !_wcsnicmp(name, active, activeLen)) ||
-                (activeLen == nameLen + 1 && active[activeLen - 1] == L'2' && !_wcsnicmp(active, name, nameLen)))
-            {
-                continue;
-            }
-        }
+        /* Like stock MeshAgent, only the active branded name is ours: services under
+         * other names (other products, other servers) are never adopted or refused on. */
+        if (_wcsicmp(name, active)) { continue; }
         BOOL knownImage = ServiceDeploy_IsLegacyMeshAgentService(name, imagePath, _countof(imagePath));
         if (!knownImage)
         {
@@ -5330,6 +5321,8 @@ static BOOL ServiceDeploy_SelectIncumbent(void)
         }
         if (!exists)
         {
+            /* Side-by-side preview (MeshAgent2) and production (MeshAgent)
+             * roots have independent lifecycles and must not hijack each other. */
             size_t curDirLen = wcslen(current.installDir), selDirLen = wcslen(selected.installDir);
             if ((selDirLen == curDirLen + 1 && selected.installDir[selDirLen - 1] == L'2' && !_wcsnicmp(selected.installDir, current.installDir, curDirLen)) ||
                 (curDirLen == selDirLen + 1 && current.installDir[curDirLen - 1] == L'2' && !_wcsnicmp(current.installDir, selected.installDir, selDirLen)))

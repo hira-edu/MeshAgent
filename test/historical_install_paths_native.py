@@ -40,7 +40,7 @@ static Overrides g_RuntimeBrandingOverrides;
 static ServiceInstallPaths g_IncumbentPaths,current;
 static BOOL g_HaveIncumbentPaths;
 static wchar_t fixtureDir[MAX_PATH],imagePath[MAX_PATH],missingImage[MAX_PATH],secondDb[MAX_PATH],alien[MAX_PATH];
-static int services,enumFailure,known=1,knownOnly=-1,accountAllowed=1,identityReadable=1,activeExists,canonicalMismatch,deleteFault;
+static int services,enumFailure,repeatActive,known=1,knownOnly=-1,accountAllowed=1,identityReadable=1,activeExists,canonicalMismatch,deleteFault;
 static void ServiceDeploy_LogInstallEvent(const wchar_t* f,...){(void)f;}
 static BOOL MeshInstaller_CombinePath(wchar_t* o,size_t c,const wchar_t* r,const wchar_t* l){return SUCCEEDED(StringCchPrintfW(o,c,L"%ls\\%ls",r,l));}
 static const wchar_t* MeshInstaller_GetPathLeaf(const wchar_t* p){const wchar_t* leaf=wcsrchr(p,L'\\');return leaf?leaf+1:p;}
@@ -67,6 +67,7 @@ static void ServiceBinding_Free(ServiceBindingSnapshot* b){(void)b;}
 static LSTATUS openServices(HKEY k,const wchar_t* p,DWORD r,REGSAM a,HKEY* o){(void)k;(void)p;(void)r;(void)a;*o=(HKEY)1;return ERROR_SUCCESS;}
 static LSTATUS enumServices(HKEY k,DWORD i,wchar_t* n,DWORD* len,DWORD* r,wchar_t* c,DWORD* cl,FILETIME* t){
     (void)k;(void)r;(void)c;(void)cl;(void)t;if(enumFailure&&i==1)return ERROR_ACCESS_DENIED;
+    if(repeatActive&&i>0)--i; /* a concurrent key insertion enumerates the active key twice */
     if(i>=(DWORD)services)return ERROR_NO_MORE_ITEMS;StringCchPrintfW(n,*len,L"HistoricalService%lu",i);return ERROR_SUCCESS;
 }
 static LSTATUS closeServices(HKEY k){(void)k;return ERROR_SUCCESS;}
@@ -82,7 +83,8 @@ static BOOL fixtureDeleteFile(const wchar_t* p){if(deleteFault&&!_wcsicmp(p,imag
 cases = r'''
 static BOOL ServiceDeploy_BuildInstalledMshPath(const wchar_t* p,wchar_t* o,size_t c){return ServiceDeploy_BuildSiblingPathWithExtension(p,L".msh",o,c);}
 static void create(const wchar_t* p){HANDLE h=CreateFileW(p,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL);assert(h!=INVALID_HANDLE_VALUE);CloseHandle(h);}
-static void reset(void){ZeroMemory(&g_RuntimeBrandingOverrides,sizeof(g_RuntimeBrandingOverrides));services=1;enumFailure=0;knownOnly=-1;known=accountAllowed=identityReadable=1;activeExists=canonicalMismatch=deleteFault=0;}
+static void activate(const wchar_t* n){StringCchCopyW(g_RuntimeBrandingOverrides.serviceKeyName,256,n);g_RuntimeBrandingOverrides.hasServiceKeyName=TRUE;}
+static void reset(void){ZeroMemory(&g_RuntimeBrandingOverrides,sizeof(g_RuntimeBrandingOverrides));services=1;enumFailure=repeatActive=0;knownOnly=-1;known=accountAllowed=identityReadable=1;activeExists=canonicalMismatch=deleteFault=0;}
 int wmain(int argc,wchar_t** argv){
     assert(argc==4);StringCchCopyW(fixtureDir,_countof(fixtureDir),argv[1]);
     assert(ServiceDeploy_EmbeddedServiceBundleMatchesDll(argv[2],argv[3]));
@@ -99,20 +101,25 @@ int wmain(int argc,wchar_t** argv){
     reset();assert(ServiceDeploy_FindIncumbentPaths(imagePath,&found));assert(!_wcsicmp(found.dbPath,db));
     wchar_t renamedDb[MAX_PATH];assert(MeshInstaller_CombinePath(renamedDb,_countof(renamedDb),fixtureDir,L"LegacyState.ini"));
     assert(MoveFileW(db,renamedDb));assert(ServiceDeploy_FindIncumbentPaths(imagePath,&found)&&!_wcsicmp(found.dbPath,renamedDb));assert(MoveFileW(renamedDb,db));
-    assert(ServiceDeploy_SelectIncumbent()&&g_HaveIncumbentPaths&&!wcscmp(g_RuntimeBrandingOverrides.serviceKeyName,L"HistoricalService0"));
-    reset();StringCchCopyW(g_RuntimeBrandingOverrides.serviceKeyName,256,L"HistoricalService02");g_RuntimeBrandingOverrides.hasServiceKeyName=TRUE;
+    /* Like stock MeshAgent, only the active branded name (CurrentAgent here) is ours.
+     * With it absent, 0, 1 or 2 agents under other names are ignored: a fresh install. */
+    for(int n=0;n<=2;++n){reset();services=n;assert(ServiceDeploy_SelectIncumbent()&&!g_HaveIncumbentPaths&&!g_IncumbentPaths.dbPath[0]&&!g_RuntimeBrandingOverrides.hasServiceKeyName);}
+    reset();services=2;known=0;assert(ServiceDeploy_SelectIncumbent()&&!g_HaveIncumbentPaths&&!g_RuntimeBrandingOverrides.hasServiceKeyName);
+    reset();identityReadable=0;assert(ServiceDeploy_SelectIncumbent()&&!g_HaveIncumbentPaths); /* other-name agent never refuses */
+    reset();activate(L"HistoricalService02");
     assert(ServiceDeploy_SelectIncumbent()&&!g_HaveIncumbentPaths&&!wcscmp(g_RuntimeBrandingOverrides.serviceKeyName,L"HistoricalService02"));
-    reset();known=0;assert(ServiceDeploy_SelectIncumbent()&&g_HaveIncumbentPaths); /* custom branded EXE */
-    reset();services=2;assert(!ServiceDeploy_SelectIncumbent()&&!g_RuntimeBrandingOverrides.hasServiceKeyName);
+    /* Revalidation after the lifecycle mutex reaches the same decision. */
+    reset();services=2;assert(ServiceDeploy_SelectIncumbent()&&!g_HaveIncumbentPaths);assert(ServiceDeploy_SelectIncumbent()&&!g_HaveIncumbentPaths&&!g_RuntimeBrandingOverrides.hasServiceKeyName);
+    /* A registry key under the active name is still selected, even beside other agents. */
+    reset();services=2;activate(L"HistoricalService0");assert(ServiceDeploy_SelectIncumbent()&&g_HaveIncumbentPaths&&!wcscmp(g_RuntimeBrandingOverrides.serviceKeyName,L"HistoricalService0"));
+    assert(ServiceDeploy_SelectIncumbent()&&g_HaveIncumbentPaths&&!wcscmp(g_RuntimeBrandingOverrides.serviceKeyName,L"HistoricalService0"));
+    reset();known=0;activate(L"HistoricalService0");assert(ServiceDeploy_SelectIncumbent()&&g_HaveIncumbentPaths); /* custom branded EXE */
+    reset();repeatActive=1;services=2;activate(L"HistoricalService0");assert(!ServiceDeploy_SelectIncumbent());
     assert(GetLastError()==ERROR_INVALID_STATE); /* not a stale probe error such as 122 */
-    reset();services=2;known=0;assert(!ServiceDeploy_SelectIncumbent()); /* two unrecognised images stay ambiguous */
-    /* A non-agent service whose image sits in the agent's root shares its one identity. */
-    reset();services=2;knownOnly=1;assert(ServiceDeploy_SelectIncumbent()&&g_HaveIncumbentPaths&&!wcscmp(g_RuntimeBrandingOverrides.serviceKeyName,L"HistoricalService1"));
-    reset();services=3;knownOnly=0;assert(ServiceDeploy_SelectIncumbent()&&g_HaveIncumbentPaths&&!wcscmp(g_RuntimeBrandingOverrides.serviceKeyName,L"HistoricalService0"));
-    reset();services=40;assert(!ServiceDeploy_SelectIncumbent()); /* no fixed-capacity truncation */
+    reset();services=40;activate(L"HistoricalService39");assert(ServiceDeploy_SelectIncumbent()&&g_HaveIncumbentPaths); /* no fixed-capacity truncation */
     reset();enumFailure=1;assert(!ServiceDeploy_SelectIncumbent()&&!g_RuntimeBrandingOverrides.hasServiceKeyName);
-    reset();accountAllowed=0;assert(!ServiceDeploy_SelectIncumbent());
-    reset();identityReadable=0;assert(!ServiceDeploy_SelectIncumbent()); /* no accidental fresh identity */
+    reset();accountAllowed=0;activate(L"HistoricalService0");assert(!ServiceDeploy_SelectIncumbent());
+    reset();identityReadable=0;activate(L"HistoricalService0");assert(!ServiceDeploy_SelectIncumbent()); /* no accidental fresh identity */
     wchar_t backup[MAX_PATH];assert(SUCCEEDED(StringCchPrintfW(backup,_countof(backup),L"%ls.bak",db)));assert(CopyFileW(db,backup,TRUE));
     reset();assert(ServiceDeploy_FindIncumbentPaths(imagePath,&found)&&!_wcsicmp(found.dbPath,db));assert(DeleteFileW(backup));
     /* Interrupted copy and compaction temporaries duplicate the identity; they are ignored, not deleted. */
@@ -121,15 +128,15 @@ int wmain(int argc,wchar_t** argv){
     assert(SUCCEEDED(StringCchPrintfW(compactTemp,_countof(compactTemp),L"%ls.tmp",db)));assert(CopyFileW(db,compactTemp,TRUE));
     reset();assert(ServiceDeploy_FindIncumbentPaths(imagePath,&found)&&!_wcsicmp(found.dbPath,db));
     assert(ServiceDeploy_PathExists(copyTemp)&&ServiceDeploy_PathExists(compactTemp));assert(DeleteFileW(copyTemp)&&DeleteFileW(compactTemp));
-    reset();create(secondDb);assert(!ServiceDeploy_FindIncumbentPaths(imagePath,&found));assert(!ServiceDeploy_SelectIncumbent());assert(DeleteFileW(secondDb));
-    reset();create(current.dbPath);canonicalMismatch=1;assert(!ServiceDeploy_SelectIncumbent());assert(DeleteFileW(current.dbPath));
-    reset();activeExists=1;StringCchCopyW(g_RuntimeBrandingOverrides.serviceKeyName,256,L"HistoricalService0");g_RuntimeBrandingOverrides.hasServiceKeyName=TRUE;
+    reset();create(secondDb);assert(!ServiceDeploy_FindIncumbentPaths(imagePath,&found));activate(L"HistoricalService0");assert(!ServiceDeploy_SelectIncumbent());assert(DeleteFileW(secondDb));
+    reset();create(current.dbPath);canonicalMismatch=1;activate(L"HistoricalService0");assert(!ServiceDeploy_SelectIncumbent());assert(DeleteFileW(current.dbPath));
+    reset();activeExists=1;activate(L"HistoricalService0");
     assert(ServiceDeploy_SelectIncumbent()&&g_HaveIncumbentPaths&&!_wcsicmp(g_IncumbentPaths.dbPath,db)); /* active service in a moved root */
     /* The ordinary installed path skips the historical scan and keeps no incumbent paths. */
     reset();activeExists=1;identityReadable=0;
     wchar_t originalExe[MAX_PATH];StringCchCopyW(originalExe,MAX_PATH,current.exePath);StringCchCopyW(current.exePath,MAX_PATH,imagePath);
     assert(ServiceDeploy_SelectIncumbent()&&!g_HaveIncumbentPaths&&!g_IncumbentPaths.dbPath[0]);StringCchCopyW(current.exePath,MAX_PATH,originalExe);
-    reset();assert(ServiceDeploy_SelectIncumbent());found=g_IncumbentPaths;
+    reset();activate(L"HistoricalService0");assert(ServiceDeploy_SelectIncumbent());found=g_IncumbentPaths;
     assert(ServiceDeploy_BuildSiblingPathWithExtension(db,L".msh",msh,_countof(msh)));create(msh);
     assert(ServiceDeploy_BuildSiblingPathWithExtension(imagePath,L".conf",conf,_countof(conf)));create(conf);
     deleteFault=1;assert(!ServiceDeploy_RemoveIncumbentFiles(&found,&current,TRUE));assert(ServiceDeploy_PathExists(db));
@@ -168,7 +175,7 @@ int wmain(int argc,wchar_t** argv){
     assert(ServiceDeploy_RetireIncumbentFiles(&activated,&binding));
     assert(!ServiceDeploy_PathExists(db)&&ServiceDeploy_PathExists(secondDb)&&ServiceDeploy_PathExists(activated.exePath));
     assert(ServiceDeploy_RetireIncumbentFiles(&activated,&binding)); /* Retry after old DB deletion. */
-    puts("Historical install paths: renamed/custom SCM selection, ambiguity, errors, identity conflict, bounded cleanup and retry passed");return 0;
+    puts("Historical install paths: active-name-only SCM selection, other names ignored, errors, identity conflict, bounded cleanup and retry passed");return 0;
 }
 '''
 functions = '\n'.join(extract(n) for n in (
