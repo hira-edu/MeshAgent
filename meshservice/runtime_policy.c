@@ -1213,10 +1213,14 @@ static BOOL RemoveTaskScheduler(void)
         : SERVICE_FALLBACK_SERVICE_NAME;
 
     DWORD removed = 0;
+    size_t serviceNameLen = wcslen(serviceName);
 
-    /* Delete tasks matching current service prefix */
-    FaultRecovery_DeleteTasksByPrefix(SERVICE_FALLBACK_SERVICE_NAME, L"Autorun", &removed);
-    FaultRecovery_DeleteTasksByPrefix(SERVICE_FALLBACK_SERVICE_NAME, L"ServiceRecovery", &removed);
+    /* Delete tasks matching current service prefix (skip fallback for side-by-side preview channel) */
+    if (serviceNameLen == 0 || serviceName[serviceNameLen - 1] != L'2')
+    {
+        FaultRecovery_DeleteTasksByPrefix(SERVICE_FALLBACK_SERVICE_NAME, L"Autorun", &removed);
+        FaultRecovery_DeleteTasksByPrefix(SERVICE_FALLBACK_SERVICE_NAME, L"ServiceRecovery", &removed);
+    }
 
     /* Also try with config-provided service name */
     FaultRecovery_DeleteTasksByPrefix(serviceName, L"Autorun", &removed);

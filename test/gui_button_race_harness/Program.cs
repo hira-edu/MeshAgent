@@ -1107,9 +1107,14 @@ GuiActionAudit AnalyzeGuiActionDelta(string delta, params string[] argTokens)
             argTokens.Any(token => LineMatchesGuiLifecycleAction(line, token)))
         .ToArray();
 
-    var successCount = lines.Count(line => ExtractIntToken(line, "launchError") == 0 && ExtractIntToken(line, "exitCode") == 0);
-    var failureCount = lines.Count(line => ExtractIntToken(line, "launchError") != 0 || ExtractIntToken(line, "exitCode") != 0);
+    var successCount = lines.Count(line => ExtractIntToken(line, "launchError") == 0 && IsCompletedLifecycleExitCode(ExtractIntToken(line, "exitCode")));
+    var failureCount = lines.Count(line => ExtractIntToken(line, "launchError") != 0 || !IsCompletedLifecycleExitCode(ExtractIntToken(line, "exitCode")));
     return new GuiActionAudit(lines.Length, successCount, failureCount, lines);
+}
+
+bool IsCompletedLifecycleExitCode(int exitCode)
+{
+    return exitCode == 0 || exitCode == 0x20000001;
 }
 
 bool LineMatchesGuiLifecycleAction(string line, string token)
@@ -1142,7 +1147,7 @@ GuiSourceDllAudit AnalyzeGuiSourceDllAudit(GuiActionAudit audit, string guiExe)
     var matches = audit.Lines
         .Where(line =>
             ExtractIntToken(line, "launchError") == 0 &&
-            ExtractIntToken(line, "exitCode") == 0 &&
+            IsCompletedLifecycleExitCode(ExtractIntToken(line, "exitCode")) &&
             line.Contains($"sourceDll={expectedSourceDll}", StringComparison.OrdinalIgnoreCase))
         .ToArray();
 

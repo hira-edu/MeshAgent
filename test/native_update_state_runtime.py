@@ -25,6 +25,7 @@ prelude = r'''
 #define TRUE 1
 #define FALSE 0
 #define ERROR_GEN_FAILURE 31
+#define MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS 0x20000001UL
 #define UNREFERENCED_PARAMETER(x) ((void)(x))
 #define ILIBLOGMESSSAGE(...) ((void)0)
 #define ILIBLOGMESSAGEX(...) ((void)0)
@@ -39,7 +40,7 @@ static int ILibSimpleDataStore_Get(void* db,const char* key,char* out,int len){(
 static int waits,releases,failures,clears,stops,complete;
 static void MeshServer_ReportUpdateFailure(MeshAgentHostContainer* a){(void)a;++failures;}
 static void MeshServer_FailUpdateActivation(MeshAgentHostContainer* a,int deletePackage){assert(!a->updateActivation&&deletePackage);++failures;}
-static BOOL MeshRuntimeHost_CompleteLifecycleHostW(MeshRuntimeHostLifecycleLaunch* l,DWORD* e){assert(l->process);l->process=NULL;++releases;*e=complete?0:1;return complete;}
+static BOOL MeshRuntimeHost_CompleteLifecycleHostW(MeshRuntimeHostLifecycleLaunch* l,DWORD* e){assert(l->process);l->process=NULL;++releases;*e=complete==2?MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS:(complete?0:1);return complete==1;}
 static void MeshRuntimeHost_ReleaseLifecycleHostW(MeshRuntimeHostLifecycleLaunch* l){assert(l->process);l->process=NULL;++releases;}
 #define GetLastError() 5
 static void ILibStopChain(void* c){(void)c;++stops;}
@@ -59,13 +60,13 @@ cases = r'''
 static void reset(void){memset(keys,0,sizeof(keys));memset(values,0,sizeof(values));writes=flushes=failWrite=failFlush=0;waits=releases=failures=clears=stops=complete=0;}
 int main(void){
  MeshAgentHostContainer a={0};
- for(int success=0;success<2;++success){
+ for(int success=0;success<3;++success){
   reset();memset(&a,0,sizeof(a));MeshServer_UpdateActivation* x=calloc(1,sizeof(*x));x->agent=&a;x->launch.process=(HANDLE)1;a.updateActivation=x;
   assert(MeshServer_UpdateTransferBlocked(&a));
   assert(!MeshServer_UpdateActivation_Sink(NULL,(HANDLE)1,ILibWaitHandle_ErrorStatus_TIMEOUT,x));
   assert(a.updateActivation==x&&x->launch.process&&waits==1&&releases==0&&stops==0&&clears==0);
   complete=success;MeshServer_UpdateActivation_Sink(NULL,(HANDLE)1,ILibWaitHandle_ErrorStatus_NONE,x);
-  assert(!a.updateActivation&&releases==1&&stops==success&&clears==0);
+  assert(!a.updateActivation&&releases==1&&stops==(success>0)&&failures==(success==0?2:1)&&clears==0);
  }
  reset();memset(&a,0,sizeof(a));MeshServer_UpdateActivation* x=calloc(1,sizeof(*x));x->agent=&a;x->launch.process=(HANDLE)1;a.updateActivation=x;
  MeshServer_UpdateActivation_Sink(NULL,(HANDLE)1,ILibWaitHandle_ErrorStatus_INVALID,x);assert(a.updateActivation==x&&!releases);MeshServer_ReleaseUpdateActivation(&a);assert(!a.updateActivation&&releases==1);

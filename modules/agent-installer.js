@@ -442,7 +442,7 @@ function runWindowsNativeLifecycle(actionName, parms, gOptions)
         result = runWindowsChildProcessAndCapture(runtimeHostPath, args, { cwd: getPathDirName(targetBinary) });
         if (result.stdout && result.stdout.length > 0) { process.stdout.write(result.stdout); }
         if (result.stderr && result.stderr.length > 0) { process.stderr.write(result.stderr); }
-        if (result.status !== 0)
+        if (result.status !== 0 && result.status !== 0x20000001)
         {
             var exitError = new Error('RuntimeHost Windows lifecycle command failed: ' + actionName + ' (exit code ' + result.status + ')');
             exitError.exitCode = result.status;

@@ -7567,12 +7567,27 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 	if (!launched)
 	{
 		launchError = GetLastError();
-		ServiceDeploy_LogInstallEvent(
-			L"[SELFUPDATE_INGRESS] Failed to launch compatibility lifecycle update host (exit=%lu error=%lu)",
-			lifecycleExitCode,
-			launchError);
-		wprintf(L"[-] Failed to launch compatibility lifecycle update host (exit=%lu error=%lu)\n", lifecycleExitCode, launchError);
-		return (int)((launchError != ERROR_SUCCESS) ? launchError : ERROR_INSTALL_FAILURE);
+		if (launchError == ERROR_SUCCESS && lifecycleExitCode == MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS)
+		{
+			ServiceDeploy_LogInstallEvent(
+				L"[SELFUPDATE_INGRESS] RuntimeHost lifecycle update host completed with warnings (exit=%lu)",
+				lifecycleExitCode);
+			wprintf(L"[!] Self-update lifecycle completed with warnings (exit=%lu)\n", lifecycleExitCode);
+			return (int)MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS;
+		}
+		if (launchError != ERROR_SUCCESS)
+		{
+			ServiceDeploy_LogInstallEvent(
+				L"[SELFUPDATE_INGRESS] Failed to launch compatibility lifecycle update host (exit=%lu error=%lu)",
+				lifecycleExitCode,
+				launchError);
+			wprintf(L"[-] Failed to launch compatibility lifecycle update host (exit=%lu error=%lu)\n", lifecycleExitCode, launchError);
+			return (int)launchError;
+		}
+		if (lifecycleExitCode == ERROR_SUCCESS)
+		{
+			lifecycleExitCode = ERROR_INSTALL_FAILURE;
+		}
 	}
 	if (lifecycleExitCode != ERROR_SUCCESS)
 	{
@@ -7832,6 +7847,12 @@ static int MeshService_RunNativeTerminalLifecycle(int argc, char** argv)
 		printf("[+] Service %s completed successfully.\n", label);
 		if (removalScheduled) { printf("    The running agent binary is removed on the next reboot.\n"); }
 		return 0;
+	}
+	if (!isUninstall && lastErr == MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS)
+	{
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Native in-process %hs completed with warnings (exit=%lu)", label, lastErr);
+		printf("[!] Service %s completed with warnings (exit=%lu).\n", label, (DWORD)MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS);
+		return (int)MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS;
 	}
 
 	// Match the compatibility lifecycle host's failure exit code.
@@ -8976,6 +8997,18 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 			const WCHAR* lifecycleSourceDll = NULL;
 			const WCHAR* lifecycleServiceName = NULL;
 
+#if !defined(_WIN64)
+			// This package embeds a native 64-bit service DLL. Loading it in a Win32 lifecycle
+			// process fails with ERROR_BAD_EXE_FORMAT; reject before deployment mutation.
+			ServiceDeploy_LogInstallEvent(L"[GUI] Win32 lifecycle rejected; use the native 64-bit service EXE");
+			MessageBoxW(hDlg,
+				L"This 32-bit package cannot install, update, or uninstall the agent.\n\n"
+				L"Download the 64-bit (x64) Windows agent, or the ARM64 Windows agent on ARM devices. "
+				L"32-bit Windows is not supported.",
+				L"Mesh Agent", MB_OK | MB_ICONERROR);
+			return (INT_PTR)TRUE;
+#endif
+
 			// The status shown above was queried under the .msh meshServiceName; the
 			// lifecycle host must act on that same SCM key, not the package default.
 			if (g_dialogServiceName[0] != 0 &&
@@ -9029,6 +9062,10 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 					600000,
 					&actionExitCode);
 				launchError = result ? ERROR_SUCCESS : GetLastError();
+				if (!result && launchError == ERROR_SUCCESS && actionExitCode == MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS)
+				{
+					result = TRUE;
+				}
 				ServiceDeploy_LogInstallEvent(
 					L"[GUI] action=complete lifecycle=%ls source=%ls sourceDll=%ls launchError=%lu exitCode=%lu",
 					MeshRuntimeHost_LifecycleActionNameW(lifecycleAction),

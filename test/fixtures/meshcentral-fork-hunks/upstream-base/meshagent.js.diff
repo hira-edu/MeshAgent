@@ -275,7 +275,7 @@
          // Connection is a success, clean up
          obj.nodeid = obj.unauth.nodeid;
          obj.dbNodeKey = 'node/' + domain.id + '/' + obj.nodeid;
-@@ -1670,6 +1756,22 @@
+@@ -1670,6 +1756,25 @@
                  }
                  case 'agentupdate': {
                      if ((obj.agentExeInfo != null) && (typeof obj.agentExeInfo.url == 'string')) {
@@ -287,6 +287,9 @@
 +                                refuseAgentUpdateRequest(command, "Windows console agents have no supported self-update; update the installed service agent.");
 +                            } else if ((obj.agentUpdateRequestPending === true) || (obj.agentUpdateTransferPending === true) || (obj.agentUpdate != null)) {
 +                                refuseAgentUpdateRequest(command, "an agent update is already in progress.");
++                            } else if ((obj.agentInfo.capabilities & 0x400) == 0) {
++                                // compareAgentBinaryHash would withhold the package; say so instead of negotiating silently.
++                                refuseAgentUpdateRequest(command, "this agent cannot run the lifecycle update host (capability 0x400 missing); reinstall it with a current agent package.");
 +                            } else {
 +                                obj.agentUpdateRequestPending = true;
 +                                delete obj.agentUpdateFailureHash;
@@ -298,7 +301,7 @@
                          var func = function agentUpdateFunc(argument, taskid, taskLimiterQueue) { // Medium priority task
                              // If agent disconnection, complete and exit now.
                              if (obj.authenticated != 2) { parent.parent.taskLimiter.completed(taskid); return; }
-@@ -1695,9 +1797,39 @@
+@@ -1695,7 +1800,38 @@
  
                          // Agent update. The recovery core was loaded in the agent, send a command to update the agent
                          parent.parent.taskLimiter.launch(func, null, 1);
@@ -314,12 +317,13 @@
 +                    delete obj.agentUpdateFailureHash;
 +                    if ((typeof command.hash == 'string') && (/^[0-9a-f]{96}$/i.test(command.hash))) {
 +                        obj.agentUpdateFailureHash = Buffer.from(command.hash, 'hex').toString('binary');
-                     }
-                     break;
-                 }
++                    }
++                    break;
++                }
 +                case 'agentupdatefailed': {
 +                    // Native activation/hash/unpack failed after command 10 cleared the
 +                    // running core. Restore the normal core without requiring reconnect.
++                    if (obj.nodeid != null) { parent.parent.debug('agentupdate', "Agent reported a failed native update; restoring its core, NodeID=0x" + obj.nodeid.substring(0, 16)); }
 +                    delete obj.agentUpdateRequestPending;
 +                    delete obj.agentUpdateTransferPending;
 +                    if (obj.agentCoreUpdateTaskId != null) {
@@ -331,14 +335,12 @@
 +                        parent.parent.taskLimiter.completed(obj.agentUpdate.taskid);
 +                        delete obj.agentUpdate.buf;
 +                        delete obj.agentUpdate;
-+                    }
+                     }
 +                    restoreAgentCoreAfterUpdateFailure();
-+                    break;
-+                }
+                     break;
+                 }
                  case 'agentupdatedownloaded': {
-                     if (obj.agentCoreUpdateTaskId != null) {
-                         // Indicate this udpate task is complete
-@@ -1850,6 +1982,11 @@
+@@ -1850,6 +1986,11 @@
                      if (parent.parent.taskManager != null) { parent.parent.taskManager.agentAction(command, obj); }
                      break;
                  }
@@ -350,7 +352,7 @@
                  default: {
                      parent.agentStats.unknownAgentActionCount++;
                      parent.parent.debug('agent', 'Unknown agent action (' + obj.remoteaddrport + '): ' + JSON.stringify(command) + '.');
-@@ -2261,16 +2398,69 @@
+@@ -2261,16 +2402,75 @@
          return '*' + getme.pathname + getme.search + '&auth=' + encodeURIComponent(parent.parent.encodeCookie({ a: 'aupd', i: obj.agentExeInfo.id }, parent.parent.loginCookieEncryptionKey));
      }
  
@@ -388,7 +390,10 @@
          // If this is a temporary agent and the server is set to not update temporary agents, don't update the agent.
          if ((obj.agentInfo) && (obj.agentInfo.capabilities & 0x20) && (args.temporaryagentupdate === false)) return 0;
 +        // An all-zero hash means the agent will ignore any transfer, so never start one, not even in test mode.
-+        if (agentHash == '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0') return 0;
++        if (agentHash == '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0') {
++            if (obj.nodeid != null) { parent.parent.debug('agentupdate', "Native update not offered, agent reported an all-zero hash (updates disabled, not ready, or a package still staged), NodeID=0x" + obj.nodeid.substring(0, 16)); }
++            return 0;
++        }
 +        // The Windows package installs only through the lifecycle host. A Windows service agent
 +        // that cannot run it hands the package to its legacy updater, which overwrites the
 +        // service EXE with a binary that is not an SCM host and leaves the device offline.
@@ -414,7 +419,10 @@
 +            (obj.agentUpdateRequestPending !== true) &&
 +            ((agentExeInfo.hash == obj.agentUpdateFailureHash) ||
 +             (agentExeInfo.fileHash != null && agentExeInfo.fileHash == obj.agentUpdateFailureHash) ||
-+             (agentExeInfo.zhash != null && agentExeInfo.zhash == obj.agentUpdateFailureHash))) return 0;
++             (agentExeInfo.zhash != null && agentExeInfo.zhash == obj.agentUpdateFailureHash))) {
++            if (obj.nodeid != null) { parent.parent.debug('agentupdate', "Native update skipped, agent reported this package failed and its retry is not due, NodeID=0x" + obj.nodeid.substring(0, 16)); }
++            return 0;
++        }
          // If the hash matches or is null, no update required.
 -        if ((agentExeInfo.hash == agentHash) || (agentHash == '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0')) return 0;
 +        if ((agentExeInfo.hash == agentHash) ||
@@ -422,7 +430,7 @@
          // If this is a macOS x86 or ARM agent type and it matched the universal binary, no update required.
          if ((agentExeInfo.id == 16) || (agentExeInfo.id == 29)) {
              if (domain.meshAgentBinaries && domain.meshAgentBinaries[10005]) {
-@@ -2281,11 +2471,10 @@
+@@ -2281,11 +2481,10 @@
          }
  
          // No match, update the agent.

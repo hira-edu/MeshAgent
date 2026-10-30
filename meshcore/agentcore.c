@@ -4383,6 +4383,12 @@ static BOOL MeshServer_UpdateActivation_Sink(void *chain, HANDLE h, ILibWaitHand
 			ILIBLOGMESSAGEX("SelfUpdate -> Stopping Chain (%d)", agent->performSelfUpdate);
 			ILibStopChain(chain);
 		}
+		else if (exitCode == MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS)
+		{
+			ILIBLOGMESSAGEX("SelfUpdate -> RuntimeHost lifecycle update activation completed with warnings (exit %lu)", exitCode);
+			ILIBLOGMESSAGEX("SelfUpdate -> Stopping Chain (%d)", agent->performSelfUpdate);
+			ILibStopChain(chain);
+		}
 		else
 		{
 			ILIBLOGMESSAGEX("SelfUpdate -> FAILED compatibility lifecycle update activation (exit %lu, error %lu); keeping current agent online", exitCode, GetLastError());
@@ -5305,6 +5311,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 			{
 				// A downloaded package is being extracted or activated; offer no new transfer until it finishes.
 				memset(rcm->coreModuleHash, 0, UTIL_SHA384_HASHSIZE);
+				ILIBLOGMESSSAGE("SelfUpdate -> update negotiation deferred: a staged package is still being extracted or activated; current agent stays online");
 			}
 #ifdef WIN32
 			else if (MeshServer_UpdateNegotiationDeferred(agent, (long long)time(NULL), deferralReason, sizeof(deferralReason)))

@@ -72,7 +72,7 @@ static void assertReceived(duk_context* ctx, const char* expected) {
 functions = '\n#define WIN32\nstatic void selectWindows(MeshAgentHostContainer* agentHost) { int msnlen;\n' + selection + '\n}\n'
 functions += 'static void statusWindows(MeshAgentHostContainer* agentHost) {\n' + service_status + '\n}\n#undef WIN32\n'
 functions += 'static void selectPosix(MeshAgentHostContainer* agentHost) { int msnlen;\n' + selection + '\n}\n'
-functions += 'static void statusPosix(MeshAgentHostContainer* agentHost, duk_context* tmpCtx) { char* tmpString;\n' + service_status + '\n}\n'
+functions += 'static void statusPosix(MeshAgentHostContainer* agentHost, duk_context* tmpCtx) {\n' + service_status + '\n}\n'
 functions += 'static void resetCheck(MeshAgentHostContainer* agentHost, duk_context* tmpCtx) {\n' + reset_call + '\nassert(duk_peval(tmpCtx)==0);\n}\n'
 cases = r'''
 int main(void) {

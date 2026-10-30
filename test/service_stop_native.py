@@ -57,6 +57,7 @@ typedef struct { DWORD dwServiceType, dwCurrentState, dwControlsAccepted,
 #define SERVICE_WIN32_SHARE_PROCESS 32
 #define PROCESS_TERMINATE 1
 #define SYNCHRONIZE 0x100000
+#define WAIT_OBJECT_0 0
 #endif
 #ifndef _countof
 #define _countof(a) (sizeof(a)/sizeof(*(a)))

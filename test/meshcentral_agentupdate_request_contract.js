@@ -88,6 +88,10 @@ for (const state of [{ agentUpdateRequestPending: true }, { agentUpdateTransferP
     const result = run(4, state);
     assertRefused(result, /already in progress/i, 'user/domain/admin/session', 'pending ' + Object.keys(state)[0]);
 }
+// Refused: a Windows service agent without 0x400, which the S2 gate would withhold, is told why.
+for (const id of [4, 43]) {
+    assertRefused(run(id, { agentInfo: { agentId: id, capabilities: 0x31f } }), /0x400/, 'user/domain/admin/session', `Windows service ${id} without 0x400`);
+}
 // Refused: no agent binary for this architecture.
 assertRefused(run(4, { agentExeInfo: null }), /no agent binary/i, 'user/domain/admin/session', 'no binary');
 assertRefused(run(6, { agentExeInfo: { hashhex: 'aa' } }), /no agent binary/i, 'user/domain/admin/session', 'binary without url');

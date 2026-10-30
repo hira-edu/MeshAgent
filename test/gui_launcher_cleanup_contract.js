@@ -93,6 +93,19 @@ function main() {
             !serviceMain.includes('return (serviceState == 0 || serviceState == 100) ?') &&
             serviceMain.includes('MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL :\n\t\tMESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE') &&
             serviceMain.includes('lifecycleAction = MeshService_GetGuiInstallButtonLifecycleAction();'),
+        guiWin32LifecycleRejectedBeforeStaging: (() => {
+            // The Win32 EXE embeds the x64 service DLL; staging it in-process fails with
+            // ERROR_BAD_EXE_FORMAT, so the GUI must refuse before any lifecycle launch.
+            const branch = serviceMain.indexOf('else if (LOWORD(wParam) == IDC_INSTALLBUTTON || LOWORD(wParam) == IDC_UNINSTALLBUTTON)');
+            const guard = serviceMain.indexOf('#if !defined(_WIN64)', branch);
+            const rejection = serviceMain.indexOf('[GUI] Win32 lifecycle rejected; use the native 64-bit service EXE', branch);
+            const guardEnd = serviceMain.indexOf('#endif', rejection);
+            const disable = serviceMain.indexOf('EnableWindow(GetDlgItem(hDlg, IDC_INSTALLBUTTON), FALSE);', branch);
+            const launch = serviceMain.indexOf('MeshRuntimeHost_LaunchLifecycleHostW(', branch);
+            const guarded = guard >= 0 && guardEnd > rejection ? serviceMain.slice(guard, guardEnd) : '';
+            return branch >= 0 && guard > branch && rejection > guard && guardEnd < disable && disable < launch &&
+                guarded.includes('MessageBoxW(hDlg,') && guarded.includes('return (INT_PTR)TRUE;');
+        })(),
         guiLifecycleUsesDialogServiceName:
             serviceMain.includes('static char g_dialogServiceName[256] = { 0 };') &&
             serviceMain.includes('StringCchCopyA(g_dialogServiceName, _countof(g_dialogServiceName), meshServiceName)') &&

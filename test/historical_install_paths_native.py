@@ -40,7 +40,7 @@ static Overrides g_RuntimeBrandingOverrides;
 static ServiceInstallPaths g_IncumbentPaths,current;
 static BOOL g_HaveIncumbentPaths;
 static wchar_t fixtureDir[MAX_PATH],imagePath[MAX_PATH],missingImage[MAX_PATH],secondDb[MAX_PATH],alien[MAX_PATH];
-static int services,enumFailure,known=1,accountAllowed=1,identityReadable=1,activeExists,canonicalMismatch,deleteFault;
+static int services,enumFailure,known=1,knownOnly=-1,accountAllowed=1,identityReadable=1,activeExists,canonicalMismatch,deleteFault;
 static void ServiceDeploy_LogInstallEvent(const wchar_t* f,...){(void)f;}
 static BOOL MeshInstaller_CombinePath(wchar_t* o,size_t c,const wchar_t* r,const wchar_t* l){return SUCCEEDED(StringCchPrintfW(o,c,L"%ls\\%ls",r,l));}
 static const wchar_t* MeshInstaller_GetPathLeaf(const wchar_t* p){const wchar_t* leaf=wcsrchr(p,L'\\');return leaf?leaf+1:p;}
@@ -55,7 +55,9 @@ static BOOL ServiceDeploy_SelectJournalService(const ServiceInstallPaths* p,BOOL
 static BOOL ServiceDeploy_GetInstallPaths(ServiceInstallPaths* p){*p=current;return TRUE;}
 static void ServiceDeploy_ResolveRuntimeServiceBranding(wchar_t* o,size_t n,...){StringCchCopyW(o,n,g_RuntimeBrandingOverrides.hasServiceKeyName?g_RuntimeBrandingOverrides.serviceKeyName:L"CurrentAgent");}
 static BOOL ServiceBinding_QueryExists(const wchar_t* n,BOOL* out){(void)n;*out=activeExists;return TRUE;}
-static BOOL ServiceDeploy_IsLegacyMeshAgentService(const wchar_t* n,wchar_t* o,size_t cap){(void)n;StringCchCopyW(o,cap,imagePath);return known;}
+static BOOL ServiceDeploy_IsLegacyMeshAgentService(const wchar_t* n,wchar_t* o,size_t cap){
+    wchar_t only[64];if(knownOnly>=0){StringCchPrintfW(only,64,L"HistoricalService%d",knownOnly);if(_wcsicmp(n,only))return FALSE;}
+    StringCchCopyW(o,cap,imagePath);return known;}
 static BOOL ServiceDeploy_QueryServiceImagePathW(const wchar_t* n,wchar_t* o,size_t cap){(void)n;return SUCCEEDED(StringCchPrintfW(o,cap,L"\"%ls\" -run",imagePath));}
 static BOOL ServiceDeploy_ExtractExecutableFromCommand(const wchar_t* n,wchar_t* o,size_t cap){(void)n;return SUCCEEDED(StringCchCopyW(o,cap,imagePath));}
 static BOOL ServiceDeploy_BindingImagePath(const ServiceBindingSnapshot* b,wchar_t* p,size_t n){return SUCCEEDED(StringCchCopyW(p,n,b->imagePath));}
@@ -80,7 +82,7 @@ static BOOL fixtureDeleteFile(const wchar_t* p){if(deleteFault&&!_wcsicmp(p,imag
 cases = r'''
 static BOOL ServiceDeploy_BuildInstalledMshPath(const wchar_t* p,wchar_t* o,size_t c){return ServiceDeploy_BuildSiblingPathWithExtension(p,L".msh",o,c);}
 static void create(const wchar_t* p){HANDLE h=CreateFileW(p,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL);assert(h!=INVALID_HANDLE_VALUE);CloseHandle(h);}
-static void reset(void){ZeroMemory(&g_RuntimeBrandingOverrides,sizeof(g_RuntimeBrandingOverrides));services=1;enumFailure=0;known=accountAllowed=identityReadable=1;activeExists=canonicalMismatch=deleteFault=0;}
+static void reset(void){ZeroMemory(&g_RuntimeBrandingOverrides,sizeof(g_RuntimeBrandingOverrides));services=1;enumFailure=0;knownOnly=-1;known=accountAllowed=identityReadable=1;activeExists=canonicalMismatch=deleteFault=0;}
 int wmain(int argc,wchar_t** argv){
     assert(argc==4);StringCchCopyW(fixtureDir,_countof(fixtureDir),argv[1]);
     assert(ServiceDeploy_EmbeddedServiceBundleMatchesDll(argv[2],argv[3]));
@@ -98,8 +100,15 @@ int wmain(int argc,wchar_t** argv){
     wchar_t renamedDb[MAX_PATH];assert(MeshInstaller_CombinePath(renamedDb,_countof(renamedDb),fixtureDir,L"LegacyState.ini"));
     assert(MoveFileW(db,renamedDb));assert(ServiceDeploy_FindIncumbentPaths(imagePath,&found)&&!_wcsicmp(found.dbPath,renamedDb));assert(MoveFileW(renamedDb,db));
     assert(ServiceDeploy_SelectIncumbent()&&g_HaveIncumbentPaths&&!wcscmp(g_RuntimeBrandingOverrides.serviceKeyName,L"HistoricalService0"));
+    reset();StringCchCopyW(g_RuntimeBrandingOverrides.serviceKeyName,256,L"HistoricalService02");g_RuntimeBrandingOverrides.hasServiceKeyName=TRUE;
+    assert(ServiceDeploy_SelectIncumbent()&&!g_HaveIncumbentPaths&&!wcscmp(g_RuntimeBrandingOverrides.serviceKeyName,L"HistoricalService02"));
     reset();known=0;assert(ServiceDeploy_SelectIncumbent()&&g_HaveIncumbentPaths); /* custom branded EXE */
     reset();services=2;assert(!ServiceDeploy_SelectIncumbent()&&!g_RuntimeBrandingOverrides.hasServiceKeyName);
+    assert(GetLastError()==ERROR_INVALID_STATE); /* not a stale probe error such as 122 */
+    reset();services=2;known=0;assert(!ServiceDeploy_SelectIncumbent()); /* two unrecognised images stay ambiguous */
+    /* A non-agent service whose image sits in the agent's root shares its one identity. */
+    reset();services=2;knownOnly=1;assert(ServiceDeploy_SelectIncumbent()&&g_HaveIncumbentPaths&&!wcscmp(g_RuntimeBrandingOverrides.serviceKeyName,L"HistoricalService1"));
+    reset();services=3;knownOnly=0;assert(ServiceDeploy_SelectIncumbent()&&g_HaveIncumbentPaths&&!wcscmp(g_RuntimeBrandingOverrides.serviceKeyName,L"HistoricalService0"));
     reset();services=40;assert(!ServiceDeploy_SelectIncumbent()); /* no fixed-capacity truncation */
     reset();enumFailure=1;assert(!ServiceDeploy_SelectIncumbent()&&!g_RuntimeBrandingOverrides.hasServiceKeyName);
     reset();accountAllowed=0;assert(!ServiceDeploy_SelectIncumbent());

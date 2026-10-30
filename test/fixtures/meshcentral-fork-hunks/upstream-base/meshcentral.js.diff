@@ -143,7 +143,29 @@
                                  modulesAdd['windows-agentrecovery'].push(...moduleData);
                              }
                          }
-@@ -3685,10 +3729,6 @@
+@@ -3100,6 +3144,8 @@
+                     obj.defaultMeshCores[i] = [obj.common.IntToStr(0), ...modulesAdd[i], meshCore].join('');
+                 }
+                 obj.defaultMeshCores[i] = Buffer.from(obj.defaultMeshCores[i], 'utf8');
++                // The previous compressed core no longer matches the new hash, agents would reject it and drop their core. Until compressed, this core is sent uncompressed.
++                delete obj.defaultMeshCoresDeflate[i];
+                 obj.defaultMeshCoresHash[i] = obj.crypto.createHash('sha384').update(obj.defaultMeshCores[i]).digest('binary');
+                 obj.debug('main', 'Core module ' + i + ' is ' + obj.defaultMeshCores[i].length + ' bytes.');
+ 
+@@ -3109,9 +3155,10 @@
+                     obj.fs.writeFile('meshcores/' + i + '.js', obj.defaultMeshCores[i].slice(4), function () { }); // Write the core to file
+                 }
+ 
+-                // Compress the mesh cores with DEFLATE
+-                const callback = function MeshCoreDeflateCb(err, buffer) { if (err == null) { obj.defaultMeshCoresDeflate[MeshCoreDeflateCb.i] = buffer; } }
++                // Compress the mesh cores with DEFLATE, dropping the result if the core was rebuilt meanwhile
++                const callback = function MeshCoreDeflateCb(err, buffer) { if ((err == null) && (obj.defaultMeshCores[MeshCoreDeflateCb.i] === MeshCoreDeflateCb.core)) { obj.defaultMeshCoresDeflate[MeshCoreDeflateCb.i] = buffer; } }
+                 callback.i = i;
++                callback.core = obj.defaultMeshCores[i];
+                 // agents expect a zlib.deflateRaw instead of zlib.deflate, fixed in meshagent.js, maybe change to zlib.deflateRaw here? Compressed cores also served at <server>/meshagents?cores
+                 require('zlib').deflate(obj.defaultMeshCores[i], { level: require('zlib').constants.Z_BEST_COMPRESSION }, callback);
+             }
+@@ -3685,10 +3732,6 @@
          const agentTable = {};
          function done() { objx.meshAgentBinaries = agentTable; if (func != null) func(); }
  
@@ -154,7 +176,7 @@
          var archcount = 0;
          for (var archid in obj.meshAgentsArchitectureNumbers) {
              var agentpath;
-@@ -3725,7 +3765,6 @@
+@@ -3725,7 +3768,6 @@
              if (release && domain.id === '' && agentpath !== override) agentTable[archid].release = release;
              agentTable[archid].url = 'http://' + obj.certificates.CommonName + ':' + ((typeof obj.args.aliasport == 'number') ? obj.args.aliasport : obj.args.port) + '/meshagents?id=' + archid;
              agentTable[archid].size = stats.size;
@@ -162,7 +184,7 @@
  
              // If this is a windows binary, pull binary information
              if (obj.meshAgentsArchitectureNumbers[archid].platform == 'win32') {
-@@ -4426,7 +4465,6 @@
+@@ -4426,7 +4468,6 @@
          var allsspi = true;
          var yubikey = false;
          var ssh = false;
@@ -170,7 +192,7 @@
          var domainCount = 0;
          var wildleek = false;
          var nodemailer = false;
-@@ -4451,7 +4489,6 @@
+@@ -4451,7 +4492,6 @@
                  if (typeof config.domains[i].authstrategies.oidc == 'object') { passport.push('openid-client@5.7.1'); }
                  if ((typeof config.domains[i].authstrategies.saml == 'object') || (typeof config.domains[i].authstrategies.jumpcloud == 'object')) { passport.push('passport-saml@3.2.4'); }
              }
@@ -178,7 +200,7 @@
              if ((config.domains[i].passwordrequirements != null) && (config.domains[i].passwordrequirements.bancommonpasswords == true)) { wildleek = true; }
              if ((config.domains[i].newaccountscaptcha != null) && (config.domains[i].newaccountscaptcha !== false)) { captcha = true; }
              if ((typeof config.domains[i].duo2factor == 'object') && (passport.indexOf('@duosecurity/duo_universal') == -1)) { passport.push('@duosecurity/duo_universal@2.1.0'); }
-@@ -4466,7 +4503,6 @@
+@@ -4466,7 +4506,6 @@
          if (passport != null) { passport = passport.filter((value, index, self) => self.indexOf(value) === index); modules.push(...passport); }
          if (captcha == true) { modules.push('svg-captcha@1.4.0'); }
  
@@ -186,7 +208,7 @@
          if (config.letsencrypt != null) { modules.push('acme-client@4.2.5'); } // Add acme-client module. We need to force v4.2.4 or higher since olver versions using SHA-1 which is no longer supported by Let's Encrypt.
          if (config.settings.mqtt != null) { modules.push('aedes@0.51.3'); } // Add MQTT Modules
          if (config.settings.mysql != null) { modules.push('mysql2@3.15.1'); } // Add MySQL.
-@@ -4507,9 +4543,6 @@
+@@ -4507,9 +4546,6 @@
              if (allsspi == false) { modules.push('otplib@13.4.1'); } // Google Authenticator support (v10 supports older NodeJS versions).
          }
  

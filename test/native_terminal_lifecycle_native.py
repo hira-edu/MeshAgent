@@ -39,10 +39,12 @@ prelude = r'''
 #define MESH_LIFECYCLE_ACTION_VALIDATE_INSTALL_W L"validate-install"
 #define MESH_LIFECYCLE_ACTION_VALIDATE_UPDATE_W L"validate-update"
 #define MESH_LIFECYCLE_ACTION_VALIDATE_UNINSTALL_W L"validate-uninstall"
+#define MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS 0x20000001UL
 typedef struct { WCHAR installDir[MAX_PATH], exePath[MAX_PATH]; } ServiceInstallPaths;
 typedef struct { BOOL configAvailable; } ServicePackagePreflight;
 static int admin, extraPathFault, moduleFault, sameFile, preflightFault, config,
     engineResult, calls, validationCalls, handlers, handlerFault, quietCalls, quietFault;
+static DWORD engineLastError;
 static BOOL passedConfig;
 static DWORD module(HMODULE mod, WCHAR* out, DWORD size) {
     (void)mod; if (moduleFault) return moduleFault == 1 ? 0 : size;
@@ -59,11 +61,11 @@ static BOOL fixturePreflight(const WCHAR* path, BOOL require, ServicePackagePref
 static BOOL engine(const WCHAR* action, const WCHAR* exe, const WCHAR* dll, BOOL require) {
     (void)exe; (void)dll; passedConfig = require;
     if (!wcsncmp(action, L"validate-", 9)) { ++validationCalls; return TRUE; }
-    ++calls; return engineResult;
+    ++calls; if (!engineResult && engineLastError) SetLastError(engineLastError); return engineResult;
 }
 static BOOL uninstall(const WCHAR* path, WCHAR* retired, size_t capacity, BOOL* scheduled) {
     (void)path; (void)retired; (void)capacity; *scheduled = FALSE;
-    ++calls; return engineResult;
+    ++calls; if (!engineResult && engineLastError) SetLastError(engineLastError); return engineResult;
 }
 static BOOL ctrl(PHANDLER_ROUTINE handler, BOOL add) {
     (void)handler; if (add && handlerFault) return FALSE;
@@ -95,6 +97,7 @@ static void log_event(const WCHAR* format, ...) { (void)format; }
 cases = r'''
 static void reset(void) {
     admin = engineResult = TRUE;
+    engineLastError = 0;
     extraPathFault = moduleFault = sameFile = preflightFault = config = calls =
         validationCalls = handlers = handlerFault = quietCalls = quietFault = 0;
 }
@@ -109,6 +112,12 @@ int main(void) {
     reset(); engineResult = FALSE;
     assert(run("-update", NULL) == ERROR_INSTALL_FAILURE);
     assert(calls == 1 && !validationCalls);
+    reset(); engineResult = FALSE; engineLastError = MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS;
+    assert(run("-install", NULL) == (int)MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS && calls == 1);
+    reset(); engineResult = FALSE; engineLastError = MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS;
+    assert(run("-update", NULL) == (int)MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS && calls == 1);
+    reset(); engineResult = FALSE; engineLastError = MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS;
+    assert(run("-uninstall", NULL) == ERROR_INSTALL_FAILURE && calls == 1);
     for (int i = 0; i < 3; ++i) {
         const char* action = i == 0 ? "-install" : i == 1 ? "-update" : "-uninstall";
         reset(); assert(run(action, NULL) == 0 && calls == 1);

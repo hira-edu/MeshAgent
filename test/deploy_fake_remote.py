@@ -68,7 +68,8 @@ if [ -f "$FAKE_STATE/@NAME@-fail" ]; then
     esac
   done < "$FAKE_STATE/@NAME@-fail"
 fi
-exec /usr/bin/@NAME@ "$@"
+[ -x /usr/bin/@NAME@ ] && exec /usr/bin/@NAME@ "$@"
+exec /bin/@NAME@ "$@"
 """
 
 

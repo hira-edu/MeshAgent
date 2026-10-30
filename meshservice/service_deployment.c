@@ -3636,10 +3636,18 @@ static BOOL ServiceDeploy_ApplyUninstallFlow(void)
         ServiceBindingSnapshot* original = ServiceBinding_Capture(serviceKeyName,
             g_IncumbentPaths.exePath[0] ? g_IncumbentPaths.exePath : paths.exePath,
             g_IncumbentPaths.dllPath[0] ? g_IncumbentPaths.dllPath : paths.dllPath);
-        if (!original) { return FALSE; }
+        if (!original)
+        {
+            ServiceDeploy_LogInstallEvent(L"[UNINSTALL] Unable to capture the incumbent service binding for %ls (error=%lu); no files changed", serviceKeyName, GetLastError());
+            return FALSE;
+        }
         BOOL suspended = ServiceDeploy_SuspendOriginalRestarters(&paths, original);
         ServiceBinding_Free(original);
-        if (!suspended) { return FALSE; }
+        if (!suspended)
+        {
+            ServiceDeploy_LogInstallEvent(L"[UNINSTALL] Unable to suspend incumbent restarters for %ls (error=%lu)", serviceKeyName, GetLastError());
+            return FALSE;
+        }
     }
     {
         size_t removedAliases = ServiceDeploy_CleanupConflictingServiceAliases(&paths, serviceKeyName);
@@ -3660,10 +3668,18 @@ static BOOL ServiceDeploy_ApplyUninstallFlow(void)
 
     if (g_IncumbentPaths.dbPath[0])
     {
-        if (!ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000, TRUE)) { return FALSE; }
+        if (!ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000, TRUE))
+        {
+            ServiceDeploy_LogInstallEvent(L"[UNINSTALL] Service %ls did not stop; incumbent files kept (error=%lu)", serviceKeyName, GetLastError());
+            return FALSE;
+        }
         ServiceDeploy_ReleaseRuntimeFiles(&g_IncumbentPaths, TRUE);
         /* Keep the database as ownership evidence until SCM deletion succeeds. */
-        if (!ServiceDeploy_RemoveIncumbentFiles(&g_IncumbentPaths, &paths, FALSE)) { return FALSE; }
+        if (!ServiceDeploy_RemoveIncumbentFiles(&g_IncumbentPaths, &paths, FALSE))
+        {
+            ServiceDeploy_LogInstallEvent(L"[UNINSTALL] Unable to remove incumbent files under %ls (error=%lu)", g_IncumbentPaths.installDir, GetLastError());
+            return FALSE;
+        }
     }
 
     // Clean up any persistence artifacts that may have been recreated during shutdown
@@ -3671,6 +3687,7 @@ static BOOL ServiceDeploy_ApplyUninstallFlow(void)
     ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000, TRUE);
     ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);
     ServiceDeploy_TerminateProcessesByPath(paths.exePath);
+    ServiceDeploy_ReleaseRuntimeFiles(&paths, TRUE);
 
     if (!ServiceHost_UnregisterServiceHostService(serviceKeyName))
     {
@@ -3683,7 +3700,12 @@ static BOOL ServiceDeploy_ApplyUninstallFlow(void)
         success = FALSE;
     }
     if (g_IncumbentPaths.dbPath[0] &&
-        (!success || !ServiceDeploy_RemoveIncumbentFiles(&g_IncumbentPaths, &paths, TRUE))) { return FALSE; }
+        (!success || !ServiceDeploy_RemoveIncumbentFiles(&g_IncumbentPaths, &paths, TRUE)))
+    {
+        ServiceDeploy_LogInstallEvent(L"[UNINSTALL] Incumbent identity files under %ls were kept (service removal %ls, error=%lu)",
+            g_IncumbentPaths.installDir, success ? L"succeeded" : L"failed", GetLastError());
+        return FALSE;
+    }
 
     // Remove firewall rules
     if (!Security_RemoveFirewallRuleForService(serviceKeyName))
@@ -3796,15 +3818,17 @@ static void ServiceDeploy_ReleaseRuntimeFiles(const ServiceInstallPaths* paths, 
     for (size_t i = 0; i < _countof(files); ++i)
     {
         if (files[i][0] == L'\0' || GetFileAttributesW(files[i]) == INVALID_FILE_ATTRIBUTES) { continue; }
+        DWORD lockErr = ERROR_SUCCESS;
         while ((GetTickCount() - lockWaitStart) < 10000)
         {
             HANDLE hTest = CreateFileW(files[i], GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
             if (hTest != INVALID_HANDLE_VALUE)
             {
                 CloseHandle(hTest);
+                lockErr = ERROR_SUCCESS;
                 break;
             }
-            DWORD lockErr = GetLastError();
+            lockErr = GetLastError();
             if (lockErr != ERROR_SHARING_VIOLATION && lockErr != ERROR_LOCK_VIOLATION) { break; }
             if (!holdersTerminated)
             {
@@ -3813,6 +3837,11 @@ static void ServiceDeploy_ReleaseRuntimeFiles(const ServiceInstallPaths* paths, 
                 continue;
             }
             Sleep(250);
+        }
+        // Callers proceed regardless; record a lock that outlived the wait so a later file failure has its cause.
+        if (lockErr == ERROR_SHARING_VIOLATION || lockErr == ERROR_LOCK_VIOLATION)
+        {
+            ServiceDeploy_LogInstallEvent(L"[QUIESCE] %ls is still locked after the release wait (error=%lu); continuing", files[i], lockErr);
         }
     }
 }
@@ -5247,7 +5276,7 @@ static BOOL ServiceDeploy_SelectIncumbent(void)
 {
     ServiceInstallPaths current, selected;
     wchar_t active[256], chosen[256] = {0}, imagePath[MAX_PATH], command[MAX_PATH * 4];
-    BOOL exists;
+    BOOL exists, chosenKnown = FALSE;
     HKEY services = NULL;
     DWORD index = 0;
     LSTATUS status;
@@ -5270,6 +5299,17 @@ static BOOL ServiceDeploy_SelectIncumbent(void)
         status = RegEnumKeyExW(services, index++, name, &count, NULL, NULL, NULL, NULL);
         if (status != ERROR_SUCCESS) { break; }
         if (exists && _wcsicmp(name, active)) { continue; }
+        if (!exists)
+        {
+            /* Side-by-side preview (MeshAgent2) and production (MeshAgent)
+             * channels have independent lifecycles and must not hijack each other. */
+            size_t activeLen = wcslen(active), nameLen = wcslen(name);
+            if ((nameLen == activeLen + 1 && name[nameLen - 1] == L'2' && !_wcsnicmp(name, active, activeLen)) ||
+                (activeLen == nameLen + 1 && active[activeLen - 1] == L'2' && !_wcsnicmp(active, name, nameLen)))
+            {
+                continue;
+            }
+        }
         BOOL knownImage = ServiceDeploy_IsLegacyMeshAgentService(name, imagePath, _countof(imagePath));
         if (!knownImage)
         {
@@ -5288,6 +5328,15 @@ static BOOL ServiceDeploy_SelectIncumbent(void)
             }
             continue;
         }
+        if (!exists)
+        {
+            size_t curDirLen = wcslen(current.installDir), selDirLen = wcslen(selected.installDir);
+            if ((selDirLen == curDirLen + 1 && selected.installDir[selDirLen - 1] == L'2' && !_wcsnicmp(selected.installDir, current.installDir, curDirLen)) ||
+                (curDirLen == selDirLen + 1 && current.installDir[curDirLen - 1] == L'2' && !_wcsnicmp(current.installDir, selected.installDir, selDirLen)))
+            {
+                continue;
+            }
+        }
         ServiceBindingSnapshot* binding = ServiceBinding_Capture(name,
             selected.exePath[0] ? selected.exePath : current.exePath,
             selected.dllPath[0] ? selected.dllPath : current.dllPath);
@@ -5300,12 +5349,30 @@ static BOOL ServiceDeploy_SelectIncumbent(void)
         ServiceBinding_Free(binding);
         if (chosen[0])
         {
-            RegCloseKey(services);
-            ServiceDeploy_LogInstallEvent(L"[LIFECYCLE] Multiple historical identities require explicit operator selection; no files changed");
-            return FALSE;
+            /* A non-agent service whose image sits in the incumbent's install root
+             * (e.g. MasterService.exe) resolves to the same datastore. That is one
+             * identity, not two: keep the recognised agent binding. */
+            if (!_wcsicmp(selected.dbPath, g_IncumbentPaths.dbPath) && knownImage != chosenKnown)
+            {
+                ServiceDeploy_LogInstallEvent(L"[LIFECYCLE] Services %ls and %ls share identity %ls; selecting agent service %ls",
+                    chosen, name, selected.dbPath, knownImage ? name : chosen);
+                if (!knownImage) { continue; }
+            }
+            else
+            {
+                RegCloseKey(services);
+                ServiceDeploy_LogInstallEvent(L"[LIFECYCLE] Multiple historical identities require explicit operator selection; no files changed: "
+                    L"service %ls (image=%ls db=%ls) and service %ls (image=%ls db=%ls)",
+                    chosen, g_IncumbentPaths.dllPath[0] ? g_IncumbentPaths.dllPath : g_IncumbentPaths.exePath, g_IncumbentPaths.dbPath,
+                    name, imagePath, selected.dbPath);
+                /* Without this, callers report a stale SCM sizing-probe error (122). */
+                SetLastError(ERROR_INVALID_STATE);
+                return FALSE;
+            }
         }
         StringCchCopyW(chosen, _countof(chosen), name);
         g_IncumbentPaths = selected;
+        chosenKnown = knownImage;
     }
     RegCloseKey(services);
     if (status != ERROR_NO_MORE_ITEMS) { return FALSE; }
@@ -6086,7 +6153,10 @@ static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request,
     ServiceLifecycleDiscovery postState;
     if (ServiceDeploy_DiscoverCurrentState(&postState))
     {
-        ServiceDeploy_LogLifecycleSnapshot(ok ? L"after" : L"after-failed", &postState, &plan);
+        ServiceDeploy_LogLifecycleSnapshot(
+            ok ? L"after" : (operationError == MESH_LIFECYCLE_EXIT_COMPLETED_WITH_WARNINGS ? L"after-warnings" : L"after-failed"),
+            &postState,
+            &plan);
     }
 
     if (!ok) { SetLastError(operationError); }
@@ -8104,7 +8174,11 @@ static size_t ServiceDeploy_BuildTaskPrefixCandidates(
         ServiceDeploy_AddTaskCandidate(candidates, &count, capacity, exeBase);
     }
 
-    ServiceDeploy_AddTaskCandidate(candidates, &count, capacity, SERVICE_FALLBACK_SERVICE_NAME);
+    size_t serviceKeyLen = (serviceKeyName != NULL) ? wcslen(serviceKeyName) : 0;
+    if (serviceKeyLen == 0 || serviceKeyName[serviceKeyLen - 1] != L'2')
+    {
+        ServiceDeploy_AddTaskCandidate(candidates, &count, capacity, SERVICE_FALLBACK_SERVICE_NAME);
+    }
     return count;
 }
 
