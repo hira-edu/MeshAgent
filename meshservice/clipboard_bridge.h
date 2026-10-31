@@ -251,6 +251,7 @@ static DWORD MeshClipboard_Broker(DWORD sessionId, HINSTANCE module)
     if (FAILED(StringCchPrintfW(command, _countof(command), L"\"%ls\" \"%ls\",MeshClipboardBridgeW user %ls %lu %lu",
         host, dll, pipeName, GetCurrentProcessId(), sessionId))) { error = ERROR_BUFFER_OVERFLOW; goto cleanup; }
     startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_FORCEOFFFEEDBACK; // no "app starting" cursor for this hidden helper
     startup.lpDesktop = L"winsta0\\default";
     if (!CreateProcessAsUserW(token, host, command, NULL, NULL, FALSE,
         CREATE_SUSPENDED | CREATE_NO_WINDOW, NULL, NULL, &startup, &child))

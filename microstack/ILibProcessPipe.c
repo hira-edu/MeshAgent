@@ -1877,6 +1877,9 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	// BUGFIX: Explicitly hide window to prevent taskbar flash
 	info.dwFlags |= STARTF_USESHOWWINDOW;
 	info.wShowWindow = SW_HIDE;
+	// Hidden helpers never signal "ready" to Windows, so without this the user's
+	// cursor shows the "app starting" spinner for several seconds after each spawn.
+	info.dwFlags |= STARTF_FORCEOFFFEEDBACK;
 
 	if (spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
 	{
